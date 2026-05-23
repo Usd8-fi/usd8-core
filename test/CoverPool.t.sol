@@ -56,9 +56,8 @@ contract CoverPoolTest is Test {
     uint64 constant DURATION = 7 days;
 
     // EIP-712 plumbing — must match the contract.
-    bytes32 constant CLAIM_TYPEHASH = keccak256(
-        "Claim(address user,address coverToken,uint128 coverTokenAmount,uint256 score,uint256 nonce)"
-    );
+    bytes32 constant CLAIM_TYPEHASH =
+        keccak256("Claim(address user,address coverToken,uint128 coverTokenAmount,uint256 score,uint256 nonce)");
 
     MockUsdOracle usdcOracle;
     MockUsdOracle daiOracle;
@@ -78,7 +77,7 @@ contract CoverPoolTest is Test {
 
         // 1 USDC = $1; 1 DAI = $1; 1 WBTC = $100k; 1 LP1 = $1; 1 LP2 = $1.
         usdcOracle = new MockUsdOracle(1e12); // 1e18 / 1e6 -> $1 per whole USDC
-        daiOracle = new MockUsdOracle(1);     // 1e18 / 1e18 -> $1 per whole DAI
+        daiOracle = new MockUsdOracle(1); // 1e18 / 1e18 -> $1 per whole DAI
         wbtcOracle = new MockUsdOracle(1e15); // 100_000 * 1e18 / 1e8 = 1e15 (i.e., $100k per BTC)
         lp1Oracle = new MockUsdOracle(1);
         lp2Oracle = new MockUsdOracle(1);
@@ -125,15 +124,12 @@ contract CoverPoolTest is Test {
         );
     }
 
-    function _signClaim(
-        address user,
-        IERC20 coverToken,
-        uint128 amount,
-        uint256 score,
-        uint256 nonce
-    ) internal view returns (bytes memory) {
-        bytes32 structHash =
-            keccak256(abi.encode(CLAIM_TYPEHASH, user, address(coverToken), amount, score, nonce));
+    function _signClaim(address user, IERC20 coverToken, uint128 amount, uint256 score, uint256 nonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(abi.encode(CLAIM_TYPEHASH, user, address(coverToken), amount, score, nonce));
         bytes32 digest = MessageHashUtils.toTypedDataHash(_domainSeparator(), structHash);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
         return abi.encodePacked(r, s, v);
@@ -243,9 +239,7 @@ contract CoverPoolTest is Test {
 
     function test_AddCoverTokenDuplicateReverts() public {
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(CoverPool.CoverTokenAlreadyApproved.selector, IERC20(address(lp1)))
-        );
+        vm.expectRevert(abi.encodeWithSelector(CoverPool.CoverTokenAlreadyApproved.selector, IERC20(address(lp1))));
         pool.addCoverToken(IERC20(address(lp1)), lp1Oracle);
     }
 
@@ -433,7 +427,7 @@ contract CoverPoolTest is Test {
         _stake(alice, usdc, 100e6);
         _registerClaim(bob, lp1, 50e18, 1000);
         _registerClaim(carol, lp1, 30e18, 500);
-        (,,,uint256 totalScore, uint256 claimCount,,,) = pool.incidents(1);
+        (,,, uint256 totalScore, uint256 claimCount,,,) = pool.incidents(1);
         assertEq(totalScore, 1500);
         assertEq(claimCount, 2);
     }
@@ -447,7 +441,7 @@ contract CoverPoolTest is Test {
         bytes memory sig = _signClaim(carol, IERC20(address(lp1)), 30e18, 500, 0);
         vm.startPrank(carol);
         lp1.approve(address(pool), 30e18);
-        (, , uint64 wEnd,,,,, ) = pool.incidents(1);
+        (,, uint64 wEnd,,,,,) = pool.incidents(1);
         vm.expectRevert(abi.encodeWithSelector(CoverPool.ClaimWindowClosed.selector, IERC20(address(lp1)), wEnd));
         pool.registerClaim(IERC20(address(lp1)), 30e18, 500, sig);
         vm.stopPrank();

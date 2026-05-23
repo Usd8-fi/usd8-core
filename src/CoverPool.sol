@@ -88,9 +88,8 @@ contract CoverPool is Ownable2Step, EIP712 {
     /// @notice EIP-712 type hash for the claim attestation. The off-chain
     ///         signer signs `Claim(user, coverToken, coverTokenAmount,
     ///         score, nonce)`.
-    bytes32 public constant CLAIM_TYPEHASH = keccak256(
-        "Claim(address user,address coverToken,uint128 coverTokenAmount,uint256 score,uint256 nonce)"
-    );
+    bytes32 public constant CLAIM_TYPEHASH =
+        keccak256("Claim(address user,address coverToken,uint128 coverTokenAmount,uint256 score,uint256 nonce)");
 
     /// @notice Maximum coverage applied to every claim payout, in basis
     ///         points of the claim's USD-valued cover-token loss. Caps
@@ -648,9 +647,7 @@ contract CoverPool is Ownable2Step, EIP712 {
         _checkpointReward(s);
         _checkpointUser(asset, msg.sender);
 
-        sharesMinted = s.totalShares == 0
-            ? amount
-            : (amount * uint256(s.totalShares)) / uint256(s.totalAssets);
+        sharesMinted = s.totalShares == 0 ? amount : (amount * uint256(s.totalShares)) / uint256(s.totalAssets);
 
         asset.safeTransferFrom(msg.sender, address(this), amount);
         s.totalAssets += uint128(amount);
@@ -672,8 +669,7 @@ contract CoverPool is Ownable2Step, EIP712 {
         if (u.shares < shares) revert InsufficientShares(shares, u.shares);
         if (unstakeRequests[asset][msg.sender].shares != 0) revert UnstakeRequestExists();
 
-        unstakeRequests[asset][msg.sender] =
-            UnstakeRequest({shares: shares, requestedAt: uint64(block.timestamp)});
+        unstakeRequests[asset][msg.sender] = UnstakeRequest({shares: shares, requestedAt: uint64(block.timestamp)});
 
         emit UnstakeRequested(asset, msg.sender, shares);
     }
@@ -789,12 +785,10 @@ contract CoverPool is Ownable2Step, EIP712 {
     ///                           {claimSigner}. Binds the current
     ///                           user nonce.
     /// @return claimId           The newly minted claim id.
-    function registerClaim(
-        IERC20 coverToken,
-        uint128 coverTokenAmount,
-        uint256 score,
-        bytes calldata signature
-    ) external returns (uint256 claimId) {
+    function registerClaim(IERC20 coverToken, uint128 coverTokenAmount, uint256 score, bytes calldata signature)
+        external
+        returns (uint256 claimId)
+    {
         if (claimSigner == address(0)) revert ClaimSignerUnset();
         if (coverTokenAmount == 0) revert ZeroAmount();
         if (!coverTokenApproved[coverToken] && openIncidentByToken[coverToken] == 0) {
@@ -803,9 +797,8 @@ contract CoverPool is Ownable2Step, EIP712 {
 
         // Signature verification (current nonce, then bump).
         uint256 nonce = claimNonces[msg.sender];
-        bytes32 structHash = keccak256(
-            abi.encode(CLAIM_TYPEHASH, msg.sender, address(coverToken), coverTokenAmount, score, nonce)
-        );
+        bytes32 structHash =
+            keccak256(abi.encode(CLAIM_TYPEHASH, msg.sender, address(coverToken), coverTokenAmount, score, nonce));
         bytes32 digest = _hashTypedDataV4(structHash);
         if (ECDSA.recover(digest, signature) != claimSigner) revert InvalidSignature();
         claimNonces[msg.sender] = nonce + 1;
@@ -994,8 +987,8 @@ contract CoverPool is Ownable2Step, EIP712 {
     ///         {claim}(asset) right now.
     function earned(IERC20 asset, address user) public view returns (uint256) {
         UserAssetState storage u = users[asset][user];
-        return (uint256(u.shares) * (_rewardPerShare(assets[asset]) - u.userRewardPerSharePaid))
-            / REWARD_SCALE + u.rewards;
+        return
+            (uint256(u.shares) * (_rewardPerShare(assets[asset]) - u.userRewardPerSharePaid)) / REWARD_SCALE + u.rewards;
     }
 
     /// @notice Total shares outstanding for `asset`.
@@ -1042,8 +1035,7 @@ contract CoverPool is Ownable2Step, EIP712 {
         if (s.totalShares == 0) return s.rewardPerShareStored;
         uint256 t = block.timestamp < s.periodFinish ? block.timestamp : s.periodFinish;
         if (t <= s.lastUpdateTime) return s.rewardPerShareStored;
-        return s.rewardPerShareStored
-            + ((t - s.lastUpdateTime) * uint256(s.rewardRate) * REWARD_SCALE) / s.totalShares;
+        return s.rewardPerShareStored + ((t - s.lastUpdateTime) * uint256(s.rewardRate) * REWARD_SCALE) / s.totalShares;
     }
 
     /// @dev Roll `s.rewardPerShareStored` forward to now and update

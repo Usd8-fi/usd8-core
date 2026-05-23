@@ -78,7 +78,12 @@ contract Treasury is Ownable2Step {
     ///         - `SystemPaused` : neither mint nor redeem allowed.
     ///         - `MintPaused`   : mint blocked, redeem allowed.
     ///         - `RedeemPaused` : redeem blocked, mint allowed.
-    enum PauseState { None, SystemPaused, MintPaused, RedeemPaused }
+    enum PauseState {
+        None,
+        SystemPaused,
+        MintPaused,
+        RedeemPaused
+    }
 
     // ─────────────────────────── State ───────────────────────────
 

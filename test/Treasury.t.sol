@@ -234,9 +234,7 @@ contract TreasuryTest is Test {
         usdc.mint(bob, 10e6);
         vm.startPrank(bob);
         usdc.approve(address(treasury), 10e6);
-        vm.expectRevert(
-            abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(treasury))
-        );
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(treasury)));
         treasury.mintUSD8(10e6);
         vm.stopPrank();
 
@@ -442,9 +440,7 @@ contract TreasuryTest is Test {
         vm.prank(treasuryAdmin);
         treasury.setPauseState(Treasury.PauseState.SystemPaused);
 
-        bytes memory pauseErr = abi.encodeWithSelector(
-            Treasury.Paused.selector, Treasury.PauseState.SystemPaused
-        );
+        bytes memory pauseErr = abi.encodeWithSelector(Treasury.Paused.selector, Treasury.PauseState.SystemPaused);
 
         // acceptOwnership (Treasury admin role)
         vm.prank(alice);
@@ -968,10 +964,7 @@ contract TreasuryTest is Test {
 
         // After each redeem, C/S must equal the prior C/S (modulo rounding).
         // Equivalent: C * denom == S * numer.
-        assertEq(
-            treasury.getReserveBalance() * ratioBeforeDenom,
-            usd8.totalSupply() * ratioBeforeNumer
-        );
+        assertEq(treasury.getReserveBalance() * ratioBeforeDenom, usd8.totalSupply() * ratioBeforeNumer);
     }
 
     function test_MintDuringDistressIsDonation() public {
