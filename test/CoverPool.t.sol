@@ -14,7 +14,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {CoverPool} from "../src/CoverPool.sol";
-import {IUsdOracle} from "../src/IUsdOracle.sol";
+import {IUsdOracle} from "../src/interfaces/IUsdOracle.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// @dev USD-1e18 per token base unit. So 1 USDC ($1, 6 decimals)

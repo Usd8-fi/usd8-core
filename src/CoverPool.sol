@@ -14,7 +14,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Ownable, Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {IUsdOracle} from "./IUsdOracle.sol";
+import {IUsdOracle} from "./interfaces/IUsdOracle.sol";
 
 /// @title  CoverPool v1
 /// @notice Two-sided cover pool for the USD8 system.

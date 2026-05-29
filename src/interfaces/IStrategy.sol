@@ -33,6 +33,12 @@ pragma solidity 0.8.28;
 ///           minus losses), in USDC base units (6 decimals).
 /// @custom:security-contact rick@usd8.fi
 interface IStrategy {
+    /// @notice The underlying asset this strategy accepts and reports in.
+    /// @dev    Treasury strategies must report USDC; SavingsUSD8 strategies
+    ///         must report USD8. Verified by the consuming contract on
+    ///         `addStrategy` to prevent cross-wiring.
+    function underlying() external view returns (address);
+
     function deploy(uint256 amount) external;
 
     function withdraw(uint256 amount) external;

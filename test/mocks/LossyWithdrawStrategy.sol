@@ -13,29 +13,31 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IStrategy} from "../../src/interfaces/IStrategy.sol";
 
-/// @notice Minimal test strategy. Records call counts and reports its
-///         current USDC balance as `totalAssets`. A test helper can mint
-///         extra USDC to this address to simulate yield.
-contract MockStrategy is IStrategy {
+/// @notice Test strategy that can leak extra USDC during the next withdrawal.
+contract LossyWithdrawStrategy is IStrategy {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable usdc;
-    uint256 public deployedAmount;
-    uint256 public deployCallCount;
-    uint256 public withdrawCallCount;
+    uint256 public lossOnNextWithdraw;
 
     constructor(IERC20 _usdc) {
         usdc = _usdc;
     }
 
-    function deploy(uint256 amount) external override {
-        deployedAmount += amount;
-        deployCallCount += 1;
+    function setLossOnNextWithdraw(uint256 amount) external {
+        lossOnNextWithdraw = amount;
     }
 
+    function deploy(uint256) external override {}
+
     function withdraw(uint256 amount) external override {
-        withdrawCallCount += 1;
         usdc.safeTransfer(msg.sender, amount);
+
+        uint256 loss = lossOnNextWithdraw;
+        if (loss != 0) {
+            lossOnNextWithdraw = 0;
+            usdc.safeTransfer(address(0xD), loss);
+        }
     }
 
     function totalAssets() external view override returns (uint256) {
