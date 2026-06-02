@@ -77,8 +77,6 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
         _setTreasury(initialTreasury);
     }
 
-
-
     // ═══════════════════════════ Admin fns ═══════════════════════════
 
     /// @notice Transfer admin. Single-step; admin cannot be zero.
@@ -98,8 +96,6 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     ///      is also the admin.
     function _authorizeUpgrade(address) internal view override onlyAdmin {}
 
-
-
     // ═══════════════════════════ Treasury actions mint/burn ═══════════════════════════
 
     /// @notice Mint `amount` USD8 to `to`. Callable only by {treasury}.
@@ -111,9 +107,6 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     function burn(address from, uint256 amount) external onlyTreasury {
         _burn(from, amount);
     }
-
-
-
 
     // ═══════════════════════════ Internal helpers & modifiers ═══════════════════════════
 

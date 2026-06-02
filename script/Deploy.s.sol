@@ -76,18 +76,24 @@ contract DeployScript is Script {
         // treasury so we can wire the real Treasury below.
         USD8 impl = new USD8();
         d.usd8Impl = address(impl);
-        d.usd8 = USD8(
-            address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (deployer, deployer))))
-        );
+        d.usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (deployer, deployer)))));
 
         // Treasury — deployer is admin + strategy manager for setup.
         d.treasury = new Treasury(d.usd8, deployer, deployer);
+
+        // Mint 100 USD8 to deployer before handing off treasury role —
+        // deposited into SavingsUSD8 below to seed the vault against inflation attacks.
+        d.usd8.mint(deployer, 100e18);
 
         // Flip USD8's mint/burn permission from deployer to Treasury.
         d.usd8.setTreasury(address(d.treasury));
 
         // SavingsUSD8 — deployer is admin + strategy manager for setup.
         d.savings = new SavingsUSD8(d.usd8, deployer, deployer, SAVINGS_PROFIT_MAX_UNLOCK);
+
+        // Seed SavingsUSD8 with 100 USD8 to prevent first-depositor inflation attack.
+        d.usd8.approve(address(d.savings), 100e18);
+        d.savings.deposit(100e18, deployer);
 
         // Aave v3 USDC strategy at Treasury index 0.
         d.aaveStrat = new AaveV3UsdcStrategy(address(d.treasury));
@@ -120,10 +126,7 @@ contract DeployScript is Script {
         d.savings.setAdmin(admin);
     }
 
-    function _logResults(Deployed memory d, address admin, address morphoVault1, address morphoVault2)
-        internal
-        pure
-    {
+    function _logResults(Deployed memory d, address admin, address morphoVault1, address morphoVault2) internal pure {
         console2.log("=== USD8 ===");
         console2.log("Implementation:    ", d.usd8Impl);
         console2.log("Proxy:             ", address(d.usd8));

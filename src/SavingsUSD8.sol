@@ -445,7 +445,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     /// @notice Approve a new strategy. Admin only. Strategy approval is a
     ///         trusted process — admin is expected to verify the contract
     ///         implements {IStrategy} correctly off-chain.
-    function addStrategy(IStrategy s) external onlyStrategyOrAdmin {
+    function addStrategy(IStrategy s) external onlyAdmin {
         if (address(s) == address(0)) revert ZeroAddress();
         address underlying = s.underlying();
         if (underlying != asset()) revert StrategyAssetMismatch(s, asset(), underlying);
@@ -467,7 +467,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     ///         loss out of existing depositors. Use {withdrawFromStrategy}
     ///         to drain first; only force-remove when the strategy is
     ///         compromised or its `totalAssets()` is permanently broken.
-    function removeStrategy(IStrategy s) external onlyStrategyOrAdmin {
+    function removeStrategy(IStrategy s) external onlyAdmin {
         (uint256 idx, bool found) = _findStrategy(s);
         if (!found) revert StrategyNotApproved(s);
 
@@ -576,7 +576,9 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
             uint256 available = s.totalAssets();
             if (available == 0) continue;
             uint256 toPull = needed < available ? needed : available;
-            s.withdraw(toPull);
+            // Skip strategies that revert (e.g. illiquid Aave during stress)
+            // so the walk continues to the next strategy and remaining idle.
+            try s.withdraw(toPull) {} catch {}
         }
     }
 

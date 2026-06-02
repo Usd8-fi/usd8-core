@@ -12,6 +12,7 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {USD8} from "./USD8.sol";
 import {IProfitDistributionReceiver} from "./interfaces/IProfitDistributionReceiver.sol";
@@ -361,8 +362,12 @@ contract Treasury is ReentrancyGuardTransient {
             if (reserveAfterInUsd8 < supplyAfter || reserveAfterInUsd8 - supplyAfter < surplusBefore) {
                 revert ReserveSupplyStatusWorsened(reserveBefore, supplyBefore, reserveAfter, supplyAfter);
             }
-        } else if (reserveAfterInUsd8 * supplyBefore < reserveBeforeInUsd8 * supplyAfter) {
-            revert ReserveSupplyStatusWorsened(reserveBefore, supplyBefore, reserveAfter, supplyAfter);
+        } else {
+            (uint256 lh, uint256 ll) = Math.mul512(reserveAfterInUsd8, supplyBefore);
+            (uint256 rh, uint256 rl) = Math.mul512(reserveBeforeInUsd8, supplyAfter);
+            if (lh < rh || (lh == rh && ll < rl)) {
+                revert ReserveSupplyStatusWorsened(reserveBefore, supplyBefore, reserveAfter, supplyAfter);
+            }
         }
     }
 
@@ -672,12 +677,7 @@ contract Treasury is ReentrancyGuardTransient {
     /// @dev    `to` must be an address that's currently approved in
     ///         {revenueRecipients}. See {rescueToken} for the rationale.
     ///         Not gated by pause: rescue is an emergency function.
-    function rescueETH(address payable to, uint256 amount)
-        external
-        nonReentrant
-        onlyAdmin
-        onlyApprovedRecipient(to)
-    {
+    function rescueETH(address payable to, uint256 amount) external nonReentrant onlyAdmin onlyApprovedRecipient(to) {
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert EthTransferFailed();
         emit ETHRescued(to, amount);
@@ -742,7 +742,9 @@ contract Treasury is ReentrancyGuardTransient {
             uint256 available = s.totalAssets();
             if (available == 0) continue;
             uint256 toPull = needed < available ? needed : available;
-            s.withdraw(toPull);
+            // Skip strategies that revert (e.g. illiquid Aave during stress)
+            // so the walk continues to the next strategy and remaining idle.
+            try s.withdraw(toPull) {} catch {}
         }
     }
 
