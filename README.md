@@ -1,6 +1,6 @@
 # USD8 Core
 
-Stablecoin protocol contracts for [usd8.fi](https://usd8.fi).
+Stablecoin protocol contracts for [usd8.fi](https://usd8.fi). Please note this project is under development now. 
 
 ## Release scope
 
