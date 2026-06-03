@@ -27,3 +27,7 @@ front-ends not maintained in this repo.
 We follow coordinated disclosure. We request that researchers delay public
 disclosure until a fix is deployed and users have had reasonable time to
 upgrade or take protective action.
+
+## Timing
+
+This project is under heavy development and not ready yet. Please wait till the project is finished before submitting reports. 
