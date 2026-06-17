@@ -16,3 +16,6 @@ docs/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# TEE service dependencies
+tee/node_modules/

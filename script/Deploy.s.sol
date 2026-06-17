@@ -12,6 +12,7 @@ pragma solidity 0.8.28;
 import {Script, console2} from "forge-std/Script.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {SavingsUSD8} from "../src/SavingsUSD8.sol";
@@ -23,7 +24,7 @@ import {MorphoVaultStrategy} from "../src/strategies/MorphoVaultStrategy.sol";
 /// @notice Beta-release deployer: USD8 (proxy + impl), Treasury, SavingsUSD8,
 ///         and strategies. CoverPool intentionally out of scope.
 ///
-/// @dev    All admin / strategy manager roles land on a single EOA
+/// @dev    Both roles (timelock + admin) land on a single EOA
 ///         ({DEFAULT_ADMIN}) — fine for beta, MUST be migrated to a Safe +
 ///         TimelockController before opening to real user volume. Override
 ///         the admin per-run with the `OVERRIDE_ADMIN` env var (useful for
@@ -38,12 +39,20 @@ import {MorphoVaultStrategy} from "../src/strategies/MorphoVaultStrategy.sol";
 ///         the same script unchanged — Aave v3 USDC and Morpho vaults are
 ///         all present at their mainnet addresses on the fork.
 contract DeployScript is Script {
-    /// @notice Single EOA used as admin + strategy manager on every contract.
+    /// @notice Single EOA used as timelock + admin on every contract.
     address constant DEFAULT_ADMIN = 0xB2E999D531D45a9115dA7706adFc651999f3c1F1;
 
-    /// @notice Linear vesting window for SavingsUSD8 profit reports.
-    ///         >= 7 days defeats JIT economically.
-    uint64 constant SAVINGS_PROFIT_MAX_UNLOCK = 7 days;
+    /// @notice USDC seeded into the protocol at deploy. Minted 1:1 into USD8
+    ///         and deposited into SavingsUSD8 with the shares burned, so the
+    ///         vault can never be emptied to a near-zero supply — the
+    ///         first-depositor inflation attack has no foothold. Backed by
+    ///         real USDC, so it does NOT dilute the peg.
+    ///         Deployer must hold at least this much USDC at run time.
+    uint256 constant SEED_USDC = 100e6;
+
+    /// @notice Burn sink for the seed shares. Not `address(0)` — ERC20 `_mint`
+    ///         rejects the zero address — but equally unspendable.
+    address constant SEED_SINK = 0x000000000000000000000000000000000000dEaD;
 
     struct Deployed {
         address usd8Impl;
@@ -62,7 +71,7 @@ contract DeployScript is Script {
 
         vm.startBroadcast();
         Deployed memory d = _deployAndWire(msg.sender, morphoVault1, morphoVault2);
-        _handOffAdmin(d, admin);
+        _handOffRoles(d, admin);
         vm.stopBroadcast();
 
         _logResults(d, admin, morphoVault1, morphoVault2);
@@ -78,52 +87,53 @@ contract DeployScript is Script {
         d.usd8Impl = address(impl);
         d.usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (deployer, deployer)))));
 
-        // Treasury — deployer is admin + strategy manager for setup.
+        // Treasury — deployer holds both roles for setup.
         d.treasury = new Treasury(d.usd8, deployer, deployer);
 
-        // Mint 100 USD8 to deployer before handing off treasury role —
-        // deposited into SavingsUSD8 below to seed the vault against inflation attacks.
-        d.usd8.mint(deployer, 100e18);
-
-        // Flip USD8's mint/burn permission from deployer to Treasury.
+        // Flip USD8's mint/burn permission to Treasury so the seed mint goes
+        // through the normal USDC-backed mint path (no unbacked supply).
         d.usd8.setTreasury(address(d.treasury));
 
-        // SavingsUSD8 — deployer is admin + strategy manager for setup.
-        d.savings = new SavingsUSD8(d.usd8, deployer, deployer, SAVINGS_PROFIT_MAX_UNLOCK);
+        // SavingsUSD8 — deployer holds both roles for setup.
+        d.savings = new SavingsUSD8(d.usd8, deployer, deployer);
 
-        // Seed SavingsUSD8 with 100 USD8 to prevent first-depositor inflation attack.
-        d.usd8.approve(address(d.savings), 100e18);
-        d.savings.deposit(100e18, deployer);
+        // Seed SavingsUSD8 against the first-depositor inflation attack.
+        // Mint USD8 1:1 from real USDC (so the seed is fully backed and the
+        // peg is unaffected), deposit it, and burn the shares to SEED_SINK so
+        // the vault's supply can never be drained back toward zero.
+        IERC20 usdc = d.treasury.USDC();
+        usdc.approve(address(d.treasury), SEED_USDC);
+        d.treasury.mintUSD8(SEED_USDC);
+        uint256 seedUsd8 = SEED_USDC * d.treasury.USDC_TO_USD8_SCALE();
+        d.usd8.approve(address(d.savings), seedUsd8);
+        d.savings.deposit(seedUsd8, SEED_SINK);
 
         // Aave v3 USDC strategy at Treasury index 0.
         d.aaveStrat = new AaveV3UsdcStrategy(address(d.treasury));
-        d.treasury.addStrategy(IStrategy(address(d.aaveStrat)));
+        d.treasury.addStrategy(IStrategy(address(d.aaveStrat)), type(uint256).max);
 
         // Optional MetaMorpho USDC strategies behind Aave.
         if (morphoVault1 != address(0)) {
             d.morphoStrat1 = new MorphoVaultStrategy(address(d.treasury), IERC4626(morphoVault1));
-            d.treasury.addStrategy(IStrategy(address(d.morphoStrat1)));
+            d.treasury.addStrategy(IStrategy(address(d.morphoStrat1)), type(uint256).max);
         }
         if (morphoVault2 != address(0)) {
             d.morphoStrat2 = new MorphoVaultStrategy(address(d.treasury), IERC4626(morphoVault2));
-            d.treasury.addStrategy(IStrategy(address(d.morphoStrat2)));
+            d.treasury.addStrategy(IStrategy(address(d.morphoStrat2)), type(uint256).max);
         }
 
-        // Approve SavingsUSD8 as a profit-distribution recipient so harvested
-        // revenue can be routed to it via Treasury.distributeRevenue.
-        d.treasury.addRevenueRecipient(address(d.savings), Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
     }
 
-    function _handOffAdmin(Deployed memory d, address admin) internal {
-        // setStrategyManager BEFORE setAdmin: both are onlyAdmin, and once the
-        // deployer setAdmin-s away its role it can no longer set the manager.
-        d.usd8.setAdmin(admin);
+    function _handOffRoles(Deployed memory d, address admin) internal {
+        // setAdmin BEFORE setTimelock: setAdmin is onlyTimelock, and once the
+        // deployer setTimelock-s away its role it can no longer set the admin.
+        d.usd8.setTimelock(admin);
 
-        d.treasury.setStrategyManager(admin);
         d.treasury.setAdmin(admin);
+        d.treasury.setTimelock(admin);
 
-        d.savings.setStrategyManager(admin);
         d.savings.setAdmin(admin);
+        d.savings.setTimelock(admin);
     }
 
     function _logResults(Deployed memory d, address admin, address morphoVault1, address morphoVault2) internal pure {
@@ -136,7 +146,6 @@ contract DeployScript is Script {
         console2.log("");
         console2.log("=== SavingsUSD8 ===");
         console2.log("Address:           ", address(d.savings));
-        console2.log("ProfitMaxUnlock:   ", uint256(SAVINGS_PROFIT_MAX_UNLOCK));
         console2.log("");
         console2.log("=== Strategies ===");
         console2.log("AaveV3UsdcStrategy:", address(d.aaveStrat));

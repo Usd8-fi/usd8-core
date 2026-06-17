@@ -1,0 +1,21 @@
+{
+  "name": "usd8-coverpool-tee",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "USD8 CoverPool settlement engine. Runs identically as the signing enclave (AWS Nitro) and as the public verifier anyone uses during the dispute window.",
+  "scripts": {
+    "build": "tsc",
+    "settle": "node dist/main.js settle",
+    "verify": "node dist/main.js verify",
+    "keygen": "node dist/main.js keygen"
+  },
+  "dependencies": {
+    "@openzeppelin/merkle-tree": "^1.0.7",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}

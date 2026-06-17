@@ -26,13 +26,13 @@ contract USD8Test is Test {
     USD8 impl;
     USD8 usd8; // proxy, accessed as USD8
 
-    address admin = address(0xC0DE);
+    address timelock = address(0xC0DE);
     address treasury = address(0xA11CE);
     address alice = address(0xBEEF);
     address newTreasury = address(0xB0B);
-    address newAdmin = address(0xD00D);
+    address newTimelock = address(0xD00D);
 
-    event AdminChanged(address indexed oldAdmin, address indexed newAdmin);
+    event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
     event TreasuryChanged(address indexed oldTreasury, address indexed newTreasury);
 
     function _deployProxy(address _admin, address _treasury) internal returns (USD8) {
@@ -42,16 +42,16 @@ contract USD8Test is Test {
     }
 
     function _unauthorizedAdmin(address account) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(USD8.UnauthorizedAdmin.selector, account);
+        return abi.encodeWithSelector(USD8.UnauthorizedTimelock.selector, account);
     }
 
     function setUp() public {
         impl = new USD8();
-        usd8 = _deployProxy(admin, treasury);
+        usd8 = _deployProxy(timelock, treasury);
     }
 
     function test_AuthorityWiring() public view {
-        assertEq(usd8.admin(), admin);
+        assertEq(usd8.timelock(), timelock);
         assertEq(usd8.treasury(), treasury);
     }
 
@@ -86,18 +86,18 @@ contract USD8Test is Test {
 
     function test_InitializeRejectsZeroTreasury() public {
         vm.expectRevert(USD8.ZeroAddress.selector);
-        _deployProxy(admin, address(0));
+        _deployProxy(timelock, address(0));
     }
 
     function test_InitializeOnlyOnce() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        usd8.initialize(admin, treasury);
+        usd8.initialize(timelock, treasury);
     }
 
     function test_ImplementationDisabled() public {
         // Direct calls to the implementation must not be initializable.
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(admin, treasury);
+        impl.initialize(timelock, treasury);
     }
 
     function test_MintToZeroReverts() public {
@@ -117,7 +117,7 @@ contract USD8Test is Test {
         vm.prank(newTreasury);
         usd8.mint(alice, 1e18);
 
-        vm.prank(admin);
+        vm.prank(timelock);
         vm.expectEmit(true, true, false, true, address(usd8));
         emit TreasuryChanged(treasury, newTreasury);
         usd8.setTreasury(newTreasury);
@@ -135,7 +135,7 @@ contract USD8Test is Test {
 
     function test_SetTreasuryRejectsZero() public {
         vm.expectRevert(USD8.ZeroAddress.selector);
-        vm.prank(admin);
+        vm.prank(timelock);
         usd8.setTreasury(address(0));
     }
 
@@ -146,39 +146,39 @@ contract USD8Test is Test {
     }
 
     function test_AdminCanBeTransferred() public {
-        vm.prank(admin);
+        vm.prank(timelock);
         vm.expectEmit(true, true, false, true, address(usd8));
-        emit AdminChanged(admin, newAdmin);
-        usd8.setAdmin(newAdmin);
+        emit TimelockChanged(timelock, newTimelock);
+        usd8.setTimelock(newTimelock);
 
-        assertEq(usd8.admin(), newAdmin);
+        assertEq(usd8.timelock(), newTimelock);
 
-        vm.expectRevert(_unauthorizedAdmin(admin));
-        vm.prank(admin);
+        vm.expectRevert(_unauthorizedAdmin(timelock));
+        vm.prank(timelock);
         usd8.setTreasury(newTreasury);
 
-        vm.prank(newAdmin);
+        vm.prank(newTimelock);
         usd8.setTreasury(newTreasury);
         assertEq(usd8.treasury(), newTreasury);
     }
 
     function test_SetAdminRejectsZero() public {
         vm.expectRevert(USD8.ZeroAddress.selector);
-        vm.prank(admin);
-        usd8.setAdmin(address(0));
+        vm.prank(timelock);
+        usd8.setTimelock(address(0));
     }
 
     function test_NonAdminCannotSetAdmin() public {
         vm.expectRevert(_unauthorizedAdmin(treasury));
         vm.prank(treasury);
-        usd8.setAdmin(newAdmin);
+        usd8.setTimelock(newTimelock);
     }
 
     // ─────────────────── UUPS upgrade path ───────────────────
 
     function test_AdminCanUpgrade() public {
         USD8V2 v2 = new USD8V2();
-        vm.prank(admin);
+        vm.prank(timelock);
         usd8.upgradeToAndCall(address(v2), "");
         assertEq(USD8V2(address(usd8)).version(), 2);
         assertEq(usd8.treasury(), treasury);
@@ -189,7 +189,7 @@ contract USD8Test is Test {
         usd8.mint(alice, 500e18);
 
         USD8V2 v2 = new USD8V2();
-        vm.prank(admin);
+        vm.prank(timelock);
         usd8.upgradeToAndCall(address(v2), "");
 
         assertEq(usd8.balanceOf(alice), 500e18);
