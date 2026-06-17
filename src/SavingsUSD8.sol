@@ -23,7 +23,7 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 /// @title  SavingsUSD8 (sUSD8) v1
 /// @notice ERC4626 savings vault for USD8 with linear profit vesting and
 ///         multi-strategy deployment. Users deposit USD8, receive sUSD8.
-///         The underlying USD8 may be deployed by admin to external
+///         The underlying USD8 may be deployed to timelock-approved external
 ///         strategies (LP positions, lending markets, etc.) to generate
 ///         yield, which is received via {receiveProfitDistribution} and vests
 ///         smoothly into the share price.
@@ -56,14 +56,17 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ─────────────────────────── State ───────────────────────────
 
-    /// @notice Governance/admin address.
+    /// @notice Slow governance role. Holds user-impacting powers: strategy
+    ///         approval, role assignment, rescues. Expected to be a
+    ///         TimelockController in production.
+    address public timelock;
+
+    /// @notice Fast operational role. Runs pause, strategy fund moves,
+    ///         force-removal, and revenue harvest/distribution.
     address public admin;
 
-    /// @notice Account allowed to manage approved strategies.
-    address public strategyManager;
-
     /// @notice Current pause state. Defaults to `None` on deployment.
-    ///         Settable by admin via {setPauseState}.
+    ///         Settable by admin or timelock via {setPauseState}.
     PauseState public pauseState;
 
     /// @notice Amount of profit still vesting (in asset base units).
@@ -76,12 +79,23 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     /// @notice End of the current vesting schedule.
     uint64 public profitEndTime;
 
-    /// @notice Maximum duration (seconds) over which freshly-reported
-    ///         profit is vested. Set once at deploy. Recommended >= 1 week
-    ///         to defeat JIT attacks economically.
-    uint64 public immutable profitMaxUnlockTime;
+    /// @notice Default {profitMaxUnlockTime}: 7 days, matching scrvUSD /
+    ///         Yearn v3 and the expected weekly distribution cadence.
+    uint64 public constant DEFAULT_PROFIT_MAX_UNLOCK_TIME = 7 days;
 
-    /// @notice Approved USD8 strategies, in admin-determined order.
+    /// @notice Upper bound for {setProfitMaxUnlockTime}. Vesting longer
+    ///         than this only delays yield without adding JIT protection.
+    uint64 public constant MAX_PROFIT_MAX_UNLOCK_TIME = 30 days;
+
+    /// @notice Maximum duration (seconds) over which freshly-reported
+    ///         profit is vested. Defaults to
+    ///         {DEFAULT_PROFIT_MAX_UNLOCK_TIME}; timelock-settable via
+    ///         {setProfitMaxUnlockTime}. Linear vesting means even short
+    ///         windows defeat JIT deposit-sniping (sUSDe uses 8 hours),
+    ///         but the window must be nonzero.
+    uint64 public profitMaxUnlockTime;
+
+    /// @notice Approved USD8 strategies, in timelock-determined order.
     ///         Order doubles as the withdrawal fallback queue.
     IStrategy[] public strategies;
 
@@ -91,12 +105,11 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     error ZeroAddress();
     error InvalidProfitMaxUnlockTime();
     error ProfitTooLarge();
+    error UnauthorizedTimelock(address caller);
     error UnauthorizedAdmin(address caller);
-    error UnauthorizedStrategyManager(address caller);
     error StrategyNotApproved(IStrategy strategy);
     error StrategyAlreadyApproved(IStrategy strategy);
     error StrategyAssetMismatch(IStrategy strategy, address expected, address actual);
-    error IndexOutOfRange(uint256 given, uint256 length);
     error SharePriceDecreased(uint256 assetsBefore, uint256 supplyBefore, uint256 assetsAfter, uint256 supplyAfter);
     error RescueProtected(address token);
     error EthTransferFailed();
@@ -122,12 +135,12 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     // ─────────────────────────── Events ──────────────────────────
 
     event ProfitReported(address indexed reporter, uint256 amount, uint256 newPending, uint64 newEndTime);
+    event ProfitMaxUnlockTimeChanged(uint64 oldTime, uint64 newTime);
     event PauseStateChanged(PauseState oldState, PauseState newState);
+    event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
     event AdminChanged(address indexed oldAdmin, address indexed newAdmin);
-    event StrategyManagerChanged(address indexed oldStrategyManager, address indexed newStrategyManager);
     event StrategyAdded(IStrategy indexed strategy);
     event StrategyRemoved(IStrategy indexed strategy);
-    event StrategyMoved(IStrategy indexed strategy, uint256 fromIndex, uint256 toIndex);
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
 
     /// @notice Emitted when admin pulls USD8 from a strategy back to idle.
@@ -140,22 +153,20 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ─────────────────────────── Constructor ─────────────────────
 
-    /// @param _usd8                 The USD8 token (underlying asset).
-    /// @param _admin                Admin, expected to be governance timelock.
-    /// @param _strategyManager      Account allowed to manage strategies.
-    /// @param _profitMaxUnlockTime  Vesting duration in seconds.
-    constructor(USD8 _usd8, address _admin, address _strategyManager, uint64 _profitMaxUnlockTime)
+    /// @param _usd8     The USD8 token (underlying asset).
+    /// @param _timelock Slow governance role, expected TimelockController.
+    /// @param _admin    Fast operational role.
+    constructor(USD8 _usd8, address _timelock, address _admin)
         ERC20("Savings USD8", "sUSD8")
         ERC20Permit("Savings USD8")
         ERC4626(IERC20(address(_usd8)))
     {
-        if (address(_usd8) == address(0) || _admin == address(0) || _strategyManager == address(0)) {
+        if (address(_usd8) == address(0) || _timelock == address(0) || _admin == address(0)) {
             revert ZeroAddress();
         }
-        if (_profitMaxUnlockTime == 0) revert InvalidProfitMaxUnlockTime();
-        profitMaxUnlockTime = _profitMaxUnlockTime;
+        profitMaxUnlockTime = DEFAULT_PROFIT_MAX_UNLOCK_TIME;
+        timelock = _timelock;
         admin = _admin;
-        strategyManager = _strategyManager;
     }
 
     // ─────────────────────────── Modifiers ───────────────────────
@@ -182,16 +193,16 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         _;
     }
 
-    modifier onlyAdmin() {
-        if (msg.sender != admin) revert UnauthorizedAdmin(msg.sender);
+    modifier onlyTimelock() {
+        if (msg.sender != timelock) revert UnauthorizedTimelock(msg.sender);
         _;
     }
 
-    /// @dev Strategy manager can run strategy flows, while admin retains the
+    /// @dev Admin runs fast operational flows, while timelock retains the
     ///      same authority for governance/timelock execution.
-    modifier onlyStrategyOrAdmin() {
+    modifier onlyAdminOrTimelock() {
         address sender = msg.sender;
-        if (sender != admin && sender != strategyManager) revert UnauthorizedStrategyManager(sender);
+        if (sender != timelock && sender != admin) revert UnauthorizedAdmin(sender);
         _;
     }
 
@@ -307,45 +318,58 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ═══════════════════════════ Admin ═══════════════════════════
 
-    /// @notice Transfer admin authority. Current admin only.
-    function setAdmin(address newAdmin) external onlyAdmin {
+    /// @notice Transfer timelock authority. Current timelock only.
+    function setTimelock(address newTimelock) external onlyTimelock {
+        if (newTimelock == address(0)) revert ZeroAddress();
+        emit TimelockChanged(timelock, newTimelock);
+        timelock = newTimelock;
+    }
+
+    /// @notice Set the fast operational admin. Timelock only.
+    function setAdmin(address newAdmin) external onlyTimelock {
         if (newAdmin == address(0)) revert ZeroAddress();
         emit AdminChanged(admin, newAdmin);
         admin = newAdmin;
     }
 
-    /// @notice Set the account allowed to manage strategies. Admin only.
-    function setStrategyManager(address newStrategyManager) external onlyAdmin {
-        if (newStrategyManager == address(0)) revert ZeroAddress();
-        emit StrategyManagerChanged(strategyManager, newStrategyManager);
-        strategyManager = newStrategyManager;
-    }
-
-    /// @notice Set the pause state. Admin only. Intentionally not gated by
-    ///         the pause itself — otherwise admin couldn't unpause.
+    /// @notice Set the pause state. Admin or timelock. Intentionally not gated by
+    ///         the pause itself — otherwise timelock couldn't unpause.
     ///         Out-of-range values revert via Solidity's enum bounds check.
-    function setPauseState(PauseState newState) external onlyAdmin {
+    function setPauseState(PauseState newState) external onlyAdminOrTimelock {
         emit PauseStateChanged(pauseState, newState);
         pauseState = newState;
     }
 
+    /// @notice Set the vesting window applied to future profit reports.
+    ///         Timelock only — a fast key that could shrink the window to
+    ///         seconds could JIT-snipe the next distribution, so this is
+    ///         deliberately not an admin power. Must be in
+    ///         (0, MAX_PROFIT_MAX_UNLOCK_TIME]. The active vesting schedule
+    ///         is unaffected; the new window applies from the next
+    ///         {receiveProfitDistribution}.
+    function setProfitMaxUnlockTime(uint64 newTime) external onlyTimelock {
+        if (newTime == 0 || newTime > MAX_PROFIT_MAX_UNLOCK_TIME) revert InvalidProfitMaxUnlockTime();
+        emit ProfitMaxUnlockTimeChanged(profitMaxUnlockTime, newTime);
+        profitMaxUnlockTime = newTime;
+    }
+
     /// @notice Rescue stray ERC20 tokens accidentally sent to this contract.
-    ///         Admin only. The underlying ({asset}) cannot be rescued; it
+    ///         Timelock only. The underlying ({asset}) cannot be rescued; it
     ///         backs depositor shares. Direct donations of the underlying
     ///         intentionally accrue to share price.
     /// @dev    Not gated by pause: rescue is an emergency function.
-    function rescueToken(IERC20 token, address to, uint256 amount) external nonReentrant onlyAdmin {
+    function rescueToken(IERC20 token, address to, uint256 amount) external nonReentrant onlyTimelock {
         if (to == address(0)) revert ZeroAddress();
         if (address(token) == asset()) revert RescueProtected(address(token));
         token.safeTransfer(to, amount);
         emit TokenRescued(address(token), to, amount);
     }
 
-    /// @notice Rescue native ETH stuck in this contract. Admin only. The
+    /// @notice Rescue native ETH stuck in this contract. Timelock only. The
     ///         contract does not implement `receive`/`fallback`, so this
     ///         only handles out-of-band ETH arrivals.
     /// @dev    Not gated by pause: rescue is an emergency function.
-    function rescueETH(address payable to, uint256 amount) external nonReentrant onlyAdmin {
+    function rescueETH(address payable to, uint256 amount) external nonReentrant onlyTimelock {
         if (to == address(0)) revert ZeroAddress();
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert EthTransferFailed();
@@ -440,23 +464,34 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         super._withdraw(caller, receiver, owner, assets, shares);
     }
 
-    // ═══════════════════════════ Strategy management (admin) ═══════════════════════════
+    // ═══════════════════════════ Strategy management (timelock) ═══════════════════════════
 
-    /// @notice Approve a new strategy. Admin only. Strategy approval is a
-    ///         trusted process — admin is expected to verify the contract
-    ///         implements {IStrategy} correctly off-chain.
-    function addStrategy(IStrategy s) external onlyAdmin {
+    /// @notice Approve a new strategy and insert it at `index` in the
+    ///         withdrawal fallback queue (`strategies[0]` is consulted
+    ///         first). Timelock only. Any `index >= strategies.length` appends.
+    ///         To reposition an existing strategy, {removeStrategy} it and
+    ///         re-add it at the desired index — drain it first if funded.
+    ///         Strategy approval is a trusted process — timelock is expected to
+    ///         verify the contract implements {IStrategy} correctly off-chain.
+    function addStrategy(IStrategy s, uint256 index) external onlyTimelock {
         if (address(s) == address(0)) revert ZeroAddress();
         address underlying = s.underlying();
         if (underlying != asset()) revert StrategyAssetMismatch(s, asset(), underlying);
         (, bool exists) = _findStrategy(s);
         if (exists) revert StrategyAlreadyApproved(s);
+
+        uint256 n = strategies.length;
+        if (index > n) index = n;
         strategies.push(s);
+        for (uint256 i = n; i > index; i--) {
+            strategies[i] = strategies[i - 1];
+        }
+        strategies[index] = s;
         emit StrategyAdded(s);
     }
 
-    /// @notice Remove an approved strategy. Admin only. **Force removal**:
-    ///         no zero-assets precondition — admin can drop a strategy
+    /// @notice Remove an approved strategy. Admin or timelock. **Force removal**:
+    ///         no zero-assets precondition — timelock can drop a strategy
     ///         that's reverting on `totalAssets()` or otherwise stuck,
     ///         unblocking the rest of the vault at the cost of orphaning
     ///         the strategy's reported balance.
@@ -467,50 +502,29 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     ///         loss out of existing depositors. Use {withdrawFromStrategy}
     ///         to drain first; only force-remove when the strategy is
     ///         compromised or its `totalAssets()` is permanently broken.
-    function removeStrategy(IStrategy s) external onlyAdmin {
+    /// @dev    Order-preserving: strategies after the removed slot shift
+    ///         down one position, so the relative priority of the remaining
+    ///         withdrawal queue is unchanged. To reorder, remove and
+    ///         re-{addStrategy} at the desired index (drain first if funded).
+    function removeStrategy(IStrategy s) external onlyAdminOrTimelock {
         (uint256 idx, bool found) = _findStrategy(s);
         if (!found) revert StrategyNotApproved(s);
 
-        uint256 n = strategies.length;
-        strategies[idx] = strategies[n - 1];
+        uint256 last = strategies.length - 1;
+        for (uint256 i = idx; i < last; i++) {
+            strategies[i] = strategies[i + 1];
+        }
         strategies.pop();
         emit StrategyRemoved(s);
     }
 
-    /// @notice Reorder an approved strategy. Strategy role or admin only.
-    ///         Sets the priority of `s` for the withdrawal fallback walk in
-    ///         {_ensureIdle} — `strategies[0]` is consulted first.
-    /// @dev    Shift semantics: strategies between the current and new
-    ///         positions are moved by one slot so the relative order of
-    ///         all other strategies is preserved. Reverts if `s` is not
-    ///         approved or `newIndex` is out of range.
-    function moveStrategy(IStrategy s, uint256 newIndex) external onlyStrategyOrAdmin {
-        (uint256 currentIdx, bool found) = _findStrategy(s);
-        if (!found) revert StrategyNotApproved(s);
-        uint256 n = strategies.length;
-        if (newIndex >= n) revert IndexOutOfRange(newIndex, n);
-        if (currentIdx == newIndex) return;
-
-        if (currentIdx < newIndex) {
-            for (uint256 i = currentIdx; i < newIndex; i++) {
-                strategies[i] = strategies[i + 1];
-            }
-        } else {
-            for (uint256 i = currentIdx; i > newIndex; i--) {
-                strategies[i] = strategies[i - 1];
-            }
-        }
-        strategies[newIndex] = s;
-        emit StrategyMoved(s, currentIdx, newIndex);
-    }
-
     /// @notice Push `amount` of idle USD8 to an approved strategy. Admin
-    ///         only. Capped at {maxDeployableToStrategy} so a total strategy
+    ///         or timelock. Capped at {maxDeployableToStrategy} so a total strategy
     ///         loss can never reduce `_rawAssets()` below `_unvestedProfit()`.
     function depositToStrategy(IStrategy s, uint256 amount)
         external
         nonReentrant
-        onlyStrategyOrAdmin
+        onlyAdminOrTimelock
         whenSystemNotPaused
     {
         (, bool found) = _findStrategy(s);
@@ -524,13 +538,13 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     }
 
     /// @notice Pull `amount` USD8 from an approved strategy back to idle.
-    ///         Admin only.
+    ///         Admin or timelock.
     /// @dev    The emitted `WithdrawnFromStrategy` amount reflects the
     ///         actual delta observed in this vault's USD8 balance.
     function withdrawFromStrategy(IStrategy s, uint256 amount)
         external
         nonReentrant
-        onlyStrategyOrAdmin
+        onlyAdminOrTimelock
         whenSystemNotPaused
     {
         (, bool found) = _findStrategy(s);
@@ -551,7 +565,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     /// @notice Maximum USD8 amount currently deployable to strategies:
     ///         `balanceOf(this) - _unvestedProfit()`. Unvested profit must
-    ///         remain idle; admin's {depositToStrategy} is capped at this.
+    ///         remain idle; timelock's {depositToStrategy} is capped at this.
     function maxDeployableToStrategy() public view returns (uint256) {
         uint256 idle = IERC20(asset()).balanceOf(address(this));
         uint256 unvested = _unvestedProfit();

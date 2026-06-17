@@ -1,6 +1,8 @@
 # USD8 Core
 
-Stablecoin protocol contracts for [usd8.fi](https://usd8.fi).
+Stablecoin protocol contracts for [usd8.fi](https://usd8.fi). 
+
+Please note this repo is under development, codebase is expect to change often, there are no bug bounties, do not report bugs for now.
 
 ## Release scope
 
@@ -39,7 +41,7 @@ The beta release ships the core stablecoin stack:
         ▼                          ▼                     ▼
 ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
 │                     │   │                     │   │                     │
-│ External strategies │   │     SavingsUSD8     │   │      CoverPool      │
+│ External strategies │   │     Savings USD8    │   │      CoverPool      │
 │                     │   │                     │   │                     │
 └─────────────────────┘   └─────────────────────┘   └─────────────────────┘
 ```

@@ -26,30 +26,27 @@ contract TreasuryTest is Test {
     MockERC20 usdc;
 
     address constant USDC_ADDR = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-    address treasuryAdmin = address(0xA11CE);
-    address strategyManager = address(0x57A7);
+    address timelock = address(0xA11CE);
+    address admin = address(0x57A7);
     address alice = address(0xBEEF);
+
+    function _unauthorizedTimelock(address account) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(Treasury.UnauthorizedTimelock.selector, account);
+    }
 
     function _unauthorizedAdmin(address account) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(Treasury.UnauthorizedAdmin.selector, account);
     }
 
-    function _unauthorizedStrategy(address account) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(Treasury.UnauthorizedStrategyManager.selector, account);
-    }
-
     event Minted(address indexed user, uint256 usdcAmount, uint256 usd8Amount);
     event Redeemed(address indexed user, uint256 usd8Amount, uint256 usdcAmount);
     event PauseStateChanged(Treasury.PauseState oldState, Treasury.PauseState newState);
-    event AdminChanged(address indexed oldAdmin, address indexed newAdmin);
-    event StrategyManagerChanged(address indexed oldStrategyManager, address indexed newStrategyManager);
+    event TimelockChanged(address indexed oldAdmin, address indexed newTimelock);
+    event AdminChanged(address indexed oldStrategyManager, address indexed newStrategyManager);
     event StrategyAdded(IStrategy indexed strategy);
     event StrategyRemoved(IStrategy indexed strategy);
-    event StrategyMoved(IStrategy indexed strategy, uint256 fromIndex, uint256 toIndex);
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
     event WithdrawnFromStrategy(IStrategy indexed strategy, uint256 amount);
-    event RevenueRecipientAdded(address indexed recipient, Treasury.RevenueDistributionMode mode);
-    event RevenueRecipientRemoved(address indexed recipient);
     event RevenueDistributed(address indexed recipient, uint256 amount);
     event RevenueHarvested(uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
@@ -66,12 +63,12 @@ contract TreasuryTest is Test {
         bytes memory init = abi.encodeCall(USD8.initialize, (address(this), address(this)));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         usd8 = USD8(address(proxy));
-        treasury = new Treasury(usd8, treasuryAdmin, strategyManager);
+        treasury = new Treasury(usd8, timelock, admin);
         usd8.setTreasury(address(treasury));
 
         assertEq(usd8.treasury(), address(treasury));
-        assertEq(treasury.admin(), treasuryAdmin);
-        assertEq(treasury.strategyManager(), strategyManager);
+        assertEq(treasury.timelock(), timelock);
+        assertEq(treasury.admin(), admin);
     }
 
     function test_ConstantsMatchSpec() public view {
@@ -87,7 +84,7 @@ contract TreasuryTest is Test {
     }
 
     function test_AdminCanSetPauseState() public {
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectEmit(false, false, false, true, address(treasury));
         emit PauseStateChanged(Treasury.PauseState.None, Treasury.PauseState.MintPaused);
         treasury.setPauseState(Treasury.PauseState.MintPaused);
@@ -102,7 +99,7 @@ contract TreasuryTest is Test {
 
     function test_SetPauseStateOutOfRangeReverts() public {
         // Solc rejects out-of-range enum values with Panic(0x21).
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         (bool ok,) = address(treasury).call(abi.encodeWithSignature("setPauseState(uint8)", uint8(4)));
         assertFalse(ok);
     }
@@ -114,7 +111,7 @@ contract TreasuryTest is Test {
         treasury.mintUSD8(1e6);
         vm.stopPrank();
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.setPauseState(Treasury.PauseState.MintPaused);
 
         usdc.mint(alice, 1e6);
@@ -135,7 +132,7 @@ contract TreasuryTest is Test {
         treasury.mintUSD8(1e6);
         vm.stopPrank();
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.setPauseState(Treasury.PauseState.RedeemPaused);
 
         vm.prank(alice);
@@ -157,7 +154,7 @@ contract TreasuryTest is Test {
         treasury.mintUSD8(1e6);
         vm.stopPrank();
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.setPauseState(Treasury.PauseState.SystemPaused);
 
         usdc.mint(alice, 1e6);
@@ -172,7 +169,7 @@ contract TreasuryTest is Test {
     }
 
     function test_PauseCanBeCleared() public {
-        vm.startPrank(treasuryAdmin);
+        vm.startPrank(timelock);
         treasury.setPauseState(Treasury.PauseState.MintPaused);
         treasury.setPauseState(Treasury.PauseState.None);
         vm.stopPrank();
@@ -186,79 +183,80 @@ contract TreasuryTest is Test {
         assertEq(usd8.balanceOf(alice), 1e18);
     }
 
-    function test_AdminCanTransferAdmin() public {
-        address newAdmin = address(0xC0FFEE);
+    function test_TimelockCanTransferTimelock() public {
+        address newTimelock = address(0xC0FFEE);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectEmit(true, true, false, true, address(treasury));
-        emit AdminChanged(treasuryAdmin, newAdmin);
-        treasury.setAdmin(newAdmin);
+        emit TimelockChanged(timelock, newTimelock);
+        treasury.setTimelock(newTimelock);
 
-        assertEq(treasury.admin(), newAdmin);
+        assertEq(treasury.timelock(), newTimelock);
 
-        vm.expectRevert(_unauthorizedAdmin(treasuryAdmin));
-        vm.prank(treasuryAdmin);
+        // Old timelock loses all role-gated access (it is not admin either).
+        vm.expectRevert(_unauthorizedAdmin(timelock));
+        vm.prank(timelock);
         treasury.setPauseState(Treasury.PauseState.MintPaused);
 
-        vm.prank(newAdmin);
+        vm.prank(newTimelock);
         treasury.setPauseState(Treasury.PauseState.SystemPaused);
         assertEq(uint256(treasury.pauseState()), uint256(Treasury.PauseState.SystemPaused));
     }
 
-    function test_NonAdminCannotTransferAdmin() public {
-        vm.expectRevert(_unauthorizedAdmin(alice));
+    function test_NonTimelockCannotTransferTimelock() public {
+        vm.expectRevert(_unauthorizedTimelock(alice));
+        vm.prank(alice);
+        treasury.setTimelock(alice);
+    }
+
+    function test_SetTimelockRejectsZero() public {
+        vm.expectRevert(Treasury.ZeroAddress.selector);
+        vm.prank(timelock);
+        treasury.setTimelock(address(0));
+    }
+
+    function test_TimelockCanSetAdmin() public {
+        address newAdmin = address(0xC0FFEE);
+        MockStrategy strat = new MockStrategy(usdc);
+
+        vm.prank(timelock);
+        vm.expectEmit(true, true, false, true, address(treasury));
+        emit AdminChanged(admin, newAdmin);
+        treasury.setAdmin(newAdmin);
+
+        assertEq(treasury.admin(), newAdmin);
+
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+
+        assertEq(treasury.strategiesLength(), 1);
+    }
+
+    function test_NonTimelockCannotSetAdmin() public {
+        vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
         treasury.setAdmin(alice);
     }
 
     function test_SetAdminRejectsZero() public {
         vm.expectRevert(Treasury.ZeroAddress.selector);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.setAdmin(address(0));
     }
 
-    function test_AdminCanSetStrategyManager() public {
-        address newStrategyManager = address(0xC0FFEE);
+    function test_AdminCanRunStrategyFundFlows() public {
         MockStrategy strat = new MockStrategy(usdc);
-
-        vm.prank(treasuryAdmin);
-        vm.expectEmit(true, true, false, true, address(treasury));
-        emit StrategyManagerChanged(strategyManager, newStrategyManager);
-        treasury.setStrategyManager(newStrategyManager);
-
-        assertEq(treasury.strategyManager(), newStrategyManager);
-
-        vm.prank(treasuryAdmin);
-        treasury.addStrategy(strat);
-
-        assertEq(treasury.strategiesLength(), 1);
-    }
-
-    function test_NonAdminCannotSetStrategyManager() public {
-        vm.expectRevert(_unauthorizedAdmin(alice));
-        vm.prank(alice);
-        treasury.setStrategyManager(alice);
-    }
-
-    function test_SetStrategyManagerRejectsZero() public {
-        vm.expectRevert(Treasury.ZeroAddress.selector);
-        vm.prank(treasuryAdmin);
-        treasury.setStrategyManager(address(0));
-    }
-
-    function test_StrategyManagerCanManageStrategies() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
 
         usdc.mint(address(treasury), 25e6);
 
-        vm.startPrank(strategyManager);
+        vm.startPrank(admin);
         treasury.depositToStrategy(strat, 25e6);
         treasury.withdrawFromStrategy(strat, 25e6);
         vm.stopPrank();
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.removeStrategy(strat);
 
         assertEq(treasury.strategiesLength(), 0);
@@ -273,8 +271,8 @@ contract TreasuryTest is Test {
         assertEq(usd8.balanceOf(alice), 100e18);
         assertEq(usd8.treasury(), address(treasury));
 
-        address treasuryAdminB = address(0xB055);
-        Treasury treasuryB = new Treasury(usd8, treasuryAdminB, treasuryAdminB);
+        address timelockB = address(0xB055);
+        Treasury treasuryB = new Treasury(usd8, timelockB, timelockB);
 
         usd8.setTreasury(address(treasuryB));
 
@@ -300,45 +298,6 @@ contract TreasuryTest is Test {
 
     address constant recipient = address(0xDEED);
 
-    function test_AdminCanAddRevenueRecipient() public {
-        vm.prank(treasuryAdmin);
-        vm.expectEmit(true, false, false, true, address(treasury));
-        emit RevenueRecipientAdded(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
-
-        (bool approved, Treasury.RevenueDistributionMode mode) = treasury.revenueRecipients(recipient);
-        assertTrue(approved);
-        assertEq(uint256(mode), uint256(Treasury.RevenueDistributionMode.DirectTransfer));
-        assertEq(
-            uint256(treasury.revenueDistributionMode(recipient)),
-            uint256(Treasury.RevenueDistributionMode.DirectTransfer)
-        );
-    }
-
-    function test_NonAdminCannotAddRevenueRecipient() public {
-        vm.expectRevert(_unauthorizedAdmin(alice));
-        vm.prank(alice);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
-    }
-
-    function test_AdminCanRemoveRevenueRecipient() public {
-        vm.startPrank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
-        vm.expectEmit(true, false, false, false, address(treasury));
-        emit RevenueRecipientRemoved(recipient);
-        treasury.removeRevenueRecipient(recipient);
-        vm.stopPrank();
-
-        (bool approved,) = treasury.revenueRecipients(recipient);
-        assertFalse(approved);
-    }
-
-    function test_RemoveUnapprovedRevenueRecipientReverts() public {
-        vm.prank(treasuryAdmin);
-        vm.expectRevert(abi.encodeWithSelector(Treasury.RevenueRecipientNotApproved.selector, recipient));
-        treasury.removeRevenueRecipient(recipient);
-    }
-
     function test_DistributeRevenueForwardsUsd8ToRecipient() public {
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
@@ -346,23 +305,22 @@ contract TreasuryTest is Test {
         treasury.mintUSD8(100e6);
         vm.stopPrank();
         usdc.mint(address(treasury), 20e6);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.harvestRevenue();
-        assertEq(usd8.balanceOf(address(treasury)), 20e18);
+        // 20e18 surplus minus the 10 bps buffer (100e18 / 1000 = 0.1e18).
+        assertEq(usd8.balanceOf(address(treasury)), 19.9e18);
 
-        vm.startPrank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
         vm.expectEmit(true, false, false, true, address(treasury));
         emit RevenueDistributed(recipient, 12e18);
-        treasury.distributeRevenue(recipient, 12e18);
-        vm.stopPrank();
+        vm.prank(timelock);
+        treasury.distributeRevenue(recipient, 12e18, Treasury.RevenueDistributionMode.DirectTransfer);
 
         assertEq(usd8.balanceOf(recipient), 12e18);
-        assertEq(usd8.balanceOf(address(treasury)), 8e18);
+        assertEq(usd8.balanceOf(address(treasury)), 7.9e18);
     }
 
     function test_DistributeRevenueToSavingsUsesProfitVesting() public {
-        SavingsUSD8 savings = new SavingsUSD8(usd8, treasuryAdmin, treasuryAdmin, 7 days);
+        SavingsUSD8 savings = new SavingsUSD8(usd8, timelock, timelock);
 
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
@@ -373,44 +331,39 @@ contract TreasuryTest is Test {
         vm.stopPrank();
 
         usdc.mint(address(treasury), 20e6);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.harvestRevenue();
-        assertEq(usd8.balanceOf(address(treasury)), 20e18);
+        // 20e18 surplus minus the 10 bps buffer (100e18 / 1000 = 0.1e18).
+        assertEq(usd8.balanceOf(address(treasury)), 19.9e18);
 
-        vm.startPrank(treasuryAdmin);
-        treasury.addRevenueRecipient(address(savings), Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
-        treasury.distributeRevenue(address(savings), 20e18);
-        vm.stopPrank();
+        vm.prank(timelock);
+        treasury.distributeRevenue(address(savings), 19.9e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
 
         assertEq(usd8.balanceOf(address(treasury)), 0);
-        assertEq(savings.pendingProfit(), 20e18);
-        assertEq(savings.unvestedProfit(), 20e18);
+        assertEq(savings.pendingProfit(), 19.9e18);
+        assertEq(savings.unvestedProfit(), 19.9e18);
         assertEq(savings.totalAssets(), 100e18, "no instant share-price jump");
 
         vm.warp(block.timestamp + 7 days);
-        assertEq(savings.totalAssets(), 120e18);
+        assertEq(savings.totalAssets(), 119.9e18);
     }
 
-    function test_DistributeRevenueToUnapprovedReverts() public {
-        vm.prank(treasuryAdmin);
-        vm.expectRevert(abi.encodeWithSelector(Treasury.RevenueRecipientNotApproved.selector, recipient));
-        treasury.distributeRevenue(recipient, 1e18);
+    function test_DistributeRevenueToZeroAddressReverts() public {
+        vm.prank(timelock);
+        vm.expectRevert(Treasury.ZeroAddress.selector);
+        treasury.distributeRevenue(address(0), 1e18, Treasury.RevenueDistributionMode.DirectTransfer);
     }
 
     function test_DistributeRevenueZeroAmountReverts() public {
-        vm.startPrank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
+        vm.prank(timelock);
         vm.expectRevert(Treasury.ZeroAmount.selector);
-        treasury.distributeRevenue(recipient, 0);
-        vm.stopPrank();
+        treasury.distributeRevenue(recipient, 0, Treasury.RevenueDistributionMode.DirectTransfer);
     }
 
     function test_NonAdminCannotDistributeRevenue() public {
-        vm.prank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
         vm.expectRevert(_unauthorizedAdmin(alice));
         vm.prank(alice);
-        treasury.distributeRevenue(recipient, 1e18);
+        treasury.distributeRevenue(recipient, 1e18, Treasury.RevenueDistributionMode.DirectTransfer);
     }
 
     function test_HarvestRevenueNoOpWhenNoSurplus() public {
@@ -420,26 +373,28 @@ contract TreasuryTest is Test {
         treasury.mintUSD8(100e6);
         vm.stopPrank();
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         uint256 harvested = treasury.harvestRevenue();
         assertEq(harvested, 0);
         assertEq(usd8.balanceOf(address(treasury)), 0);
     }
 
-    function test_HarvestRevenueCapturesSubUsdcSurplus() public {
+    function test_HarvestRevenueRetainsSubBufferSurplus() public {
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
         usdc.approve(address(treasury), 100e6);
         treasury.mintUSD8(100e6);
         vm.stopPrank();
 
+        // Sub-USDC dust redemption leaves a tiny (5e11) surplus that sits far
+        // below the 10 bps buffer (~1e17), so harvest retains all of it.
         vm.prank(alice);
         treasury.redeemUSD8(5e11, 0);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         uint256 harvested = treasury.harvestRevenue();
-        assertEq(harvested, 5e11);
-        assertEq(usd8.balanceOf(address(treasury)), 5e11);
+        assertEq(harvested, 0);
+        assertEq(usd8.balanceOf(address(treasury)), 0);
     }
 
     function test_HarvestRevenueMintsUsd8FromIdleSurplus() public {
@@ -452,17 +407,19 @@ contract TreasuryTest is Test {
 
         uint256 supplyBefore = usd8.totalSupply();
         uint256 reserveBefore = treasury.getReserveBalance();
+        uint256 buffer = supplyBefore / treasury.HARVEST_BUFFER_DIVISOR();
 
         vm.expectEmit(false, false, false, true, address(treasury));
-        emit RevenueHarvested(20e18);
-        vm.prank(treasuryAdmin);
+        emit RevenueHarvested(20e18 - buffer);
+        vm.prank(timelock);
         uint256 harvested = treasury.harvestRevenue();
 
-        assertEq(harvested, 20e18, "minted USD8 equals USDC surplus times 1e12");
-        assertEq(usd8.balanceOf(address(treasury)), 20e18);
+        assertEq(harvested, 20e18 - buffer, "minted USD8 equals surplus minus retained buffer");
+        assertEq(usd8.balanceOf(address(treasury)), 20e18 - buffer);
         assertEq(treasury.getReserveBalance(), reserveBefore);
-        assertEq(usd8.totalSupply(), supplyBefore + 20e18);
-        assertEq(treasury.getReserveBalance() * 1e12, usd8.totalSupply());
+        assertEq(usd8.totalSupply(), supplyBefore + 20e18 - buffer);
+        // Peg sits at supply + buffer after harvest, not exact equality.
+        assertEq(treasury.getReserveBalance() * 1e12, usd8.totalSupply() + buffer);
     }
 
     function test_HarvestRevenueDoesNotTouchStrategies() public {
@@ -473,18 +430,19 @@ contract TreasuryTest is Test {
         vm.stopPrank();
 
         MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
         treasury.depositToStrategy(strat, 100e6);
         vm.stopPrank();
 
         usdc.mint(address(strat), 15e6);
         assertEq(treasury.getReserveBalance(), 115e6);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         uint256 harvested = treasury.harvestRevenue();
-        assertEq(harvested, 15e18);
-        assertEq(usd8.balanceOf(address(treasury)), 15e18);
+        // 15e18 surplus minus the 10 bps buffer (100e18 / 1000 = 0.1e18).
+        assertEq(harvested, 14.9e18);
+        assertEq(usd8.balanceOf(address(treasury)), 14.9e18);
         assertEq(strat.withdrawCallCount(), 0, "strategy not touched");
         assertEq(usdc.balanceOf(address(strat)), 115e6);
         assertEq(usdc.balanceOf(address(treasury)), 0);
@@ -492,36 +450,34 @@ contract TreasuryTest is Test {
 
     function test_SystemPauseBlocksGatedAdminFunctions() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
-        vm.stopPrank();
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.setPauseState(Treasury.PauseState.SystemPaused);
 
         bytes memory pauseErr = abi.encodeWithSelector(Treasury.Paused.selector, Treasury.PauseState.SystemPaused);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(pauseErr);
-        treasury.distributeRevenue(recipient, 1e18);
+        treasury.distributeRevenue(recipient, 1e18, Treasury.RevenueDistributionMode.DirectTransfer);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(pauseErr);
         treasury.harvestRevenue();
 
         usdc.mint(address(treasury), 10e6);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(pauseErr);
         treasury.depositToStrategy(strat, 10e6);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(pauseErr);
         treasury.withdrawFromStrategy(strat, 1);
     }
 
     function test_SystemPauseDoesNotBlockUnpausing() public {
-        vm.startPrank(treasuryAdmin);
+        vm.startPrank(timelock);
         treasury.setPauseState(Treasury.PauseState.SystemPaused);
         treasury.setPauseState(Treasury.PauseState.None);
         vm.stopPrank();
@@ -530,14 +486,14 @@ contract TreasuryTest is Test {
 
     function test_SystemPauseDoesNotBlockAddRemoveStrategy() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.setPauseState(Treasury.PauseState.SystemPaused);
 
-        vm.prank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
         assertEq(treasury.strategiesLength(), 1);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.removeStrategy(strat);
         assertEq(treasury.strategiesLength(), 0);
     }
@@ -554,18 +510,19 @@ contract TreasuryTest is Test {
         vm.prank(alice);
         treasury.harvestRevenue();
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.harvestRevenue();
-        assertEq(usd8.balanceOf(address(treasury)), 5e18);
+        // 5e18 surplus minus the 10 bps buffer (100e18 / 1000 = 0.1e18).
+        assertEq(usd8.balanceOf(address(treasury)), 4.9e18);
     }
 
     // -- Strategy ---------------------------------------------------------
 
     function _approveAndFundStrategy(MockStrategy strat, uint256 amount) internal {
-        vm.prank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
         usdc.mint(address(treasury), amount);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         treasury.depositToStrategy(strat, amount);
     }
 
@@ -575,53 +532,53 @@ contract TreasuryTest is Test {
 
     function test_AdminCanAddStrategy() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectEmit(true, false, false, true, address(treasury));
         emit StrategyAdded(strat);
-        treasury.addStrategy(strat);
+        treasury.addStrategy(strat, type(uint256).max);
 
         assertEq(treasury.strategiesLength(), 1);
         assertEq(address(treasury.strategies(0)), address(strat));
     }
 
     function test_AddStrategyRejectsZeroAddress() public {
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(Treasury.ZeroAddress.selector);
-        treasury.addStrategy(IStrategy(address(0)));
+        treasury.addStrategy(IStrategy(address(0)), type(uint256).max);
     }
 
     function test_AddStrategyRejectsDuplicate() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
         vm.expectRevert(abi.encodeWithSelector(Treasury.StrategyAlreadyApproved.selector, strat));
-        treasury.addStrategy(strat);
+        treasury.addStrategy(strat, type(uint256).max);
         vm.stopPrank();
     }
 
     function test_NonAdminCannotAddStrategy() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.expectRevert(_unauthorizedAdmin(alice));
+        vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
-        treasury.addStrategy(strat);
+        treasury.addStrategy(strat, type(uint256).max);
     }
 
     function test_AddStrategyRejectsWrongUnderlying() public {
         WrongUsdcStrategy bad = new WrongUsdcStrategy();
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(
             abi.encodeWithSelector(
                 Treasury.StrategyAssetMismatch.selector, IStrategy(address(bad)), USDC_ADDR, address(0xDEAD)
             )
         );
-        treasury.addStrategy(IStrategy(address(bad)));
+        treasury.addStrategy(IStrategy(address(bad)), type(uint256).max);
     }
 
     function test_RemoveStrategyForcesRemovalIgnoringFunds() public {
         MockStrategy strat = new MockStrategy(usdc);
         _approveAndFundStrategy(strat, 50e6);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectEmit(true, false, false, true, address(treasury));
         emit StrategyRemoved(strat);
         treasury.removeStrategy(strat);
@@ -634,7 +591,7 @@ contract TreasuryTest is Test {
         MockStrategy strat = new MockStrategy(usdc);
         _approveAndFundStrategy(strat, 50e6);
 
-        vm.startPrank(treasuryAdmin);
+        vm.startPrank(timelock);
         treasury.withdrawFromStrategy(strat, 50e6);
         treasury.removeStrategy(strat);
         vm.stopPrank();
@@ -644,52 +601,38 @@ contract TreasuryTest is Test {
 
     function test_RemoveStrategyNotApprovedReverts() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(abi.encodeWithSelector(Treasury.StrategyNotApproved.selector, strat));
         treasury.removeStrategy(strat);
     }
 
-    function test_MoveStrategy() public {
+    function test_AddStrategyAtIndexAndReorder() public {
         MockStrategy a = new MockStrategy(usdc);
         MockStrategy b = new MockStrategy(usdc);
         MockStrategy c = new MockStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(a);
-        treasury.addStrategy(b);
-        treasury.addStrategy(c);
+        vm.startPrank(timelock);
+        treasury.addStrategy(a, type(uint256).max); // [a]
+        treasury.addStrategy(b, 0); // [b, a] — insert at front
+        treasury.addStrategy(c, 1); // [b, c, a] — insert mid
 
-        // Move c (idx 2) to idx 0 → expect [c, a, b].
-        vm.expectEmit(true, false, false, true, address(treasury));
-        emit StrategyMoved(c, 2, 0);
-        treasury.moveStrategy(c, 0);
+        // Reposition existing: remove + re-add at the target index.
+        // Mid-queue removal must not disturb the order of the others.
+        treasury.removeStrategy(c); // [b, a]
+        treasury.addStrategy(c, 2); // [b, a, c]
+        treasury.removeStrategy(b); // [a, c]
+        treasury.addStrategy(b, 1); // [a, b, c]
         vm.stopPrank();
 
-        assertEq(address(treasury.strategies(0)), address(c));
-        assertEq(address(treasury.strategies(1)), address(a));
-        assertEq(address(treasury.strategies(2)), address(b));
-    }
-
-    function test_MoveStrategyNotApprovedReverts() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(treasuryAdmin);
-        vm.expectRevert(abi.encodeWithSelector(Treasury.StrategyNotApproved.selector, strat));
-        treasury.moveStrategy(strat, 0);
-    }
-
-    function test_MoveStrategyOutOfRangeReverts() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
-        vm.expectRevert(abi.encodeWithSelector(Treasury.IndexOutOfRange.selector, uint256(1), uint256(1)));
-        treasury.moveStrategy(strat, 1);
-        vm.stopPrank();
+        assertEq(address(treasury.strategies(0)), address(a));
+        assertEq(address(treasury.strategies(1)), address(b));
+        assertEq(address(treasury.strategies(2)), address(c));
     }
 
     function test_DepositToStrategy() public {
         MockStrategy strat = new MockStrategy(usdc);
         usdc.mint(address(treasury), 100e6);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
 
         vm.expectEmit(true, false, false, true, address(treasury));
         emit DepositedToStrategy(strat, 100e6);
@@ -704,15 +647,15 @@ contract TreasuryTest is Test {
     function test_DepositToUnapprovedStrategyReverts() public {
         MockStrategy strat = new MockStrategy(usdc);
         usdc.mint(address(treasury), 100e6);
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectRevert(abi.encodeWithSelector(Treasury.StrategyNotApproved.selector, strat));
         treasury.depositToStrategy(strat, 100e6);
     }
 
     function test_DepositZeroReverts() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
         vm.expectRevert(Treasury.ZeroAmount.selector);
         treasury.depositToStrategy(strat, 0);
         vm.stopPrank();
@@ -722,7 +665,7 @@ contract TreasuryTest is Test {
         MockStrategy strat = new MockStrategy(usdc);
         _approveAndFundStrategy(strat, 100e6);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectEmit(true, false, false, true, address(treasury));
         emit WithdrawnFromStrategy(strat, 40e6);
         treasury.withdrawFromStrategy(strat, 40e6);
@@ -734,22 +677,22 @@ contract TreasuryTest is Test {
 
     function test_NonAdminCannotDepositOrWithdraw() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
 
-        vm.expectRevert(_unauthorizedStrategy(alice));
+        vm.expectRevert(_unauthorizedAdmin(alice));
         vm.prank(alice);
         treasury.depositToStrategy(strat, 1);
 
-        vm.expectRevert(_unauthorizedStrategy(alice));
+        vm.expectRevert(_unauthorizedAdmin(alice));
         vm.prank(alice);
         treasury.withdrawFromStrategy(strat, 1);
     }
 
     function test_MintLeavesUsdcIdle() public {
         MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
 
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
@@ -783,9 +726,9 @@ contract TreasuryTest is Test {
 
         MockStrategy a = new MockStrategy(usdc);
         MockStrategy b = new MockStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(a);
-        treasury.addStrategy(b);
+        vm.startPrank(timelock);
+        treasury.addStrategy(a, type(uint256).max);
+        treasury.addStrategy(b, type(uint256).max);
         treasury.depositToStrategy(a, 60e6);
         treasury.depositToStrategy(b, 40e6);
         vm.stopPrank();
@@ -811,8 +754,8 @@ contract TreasuryTest is Test {
         vm.stopPrank();
 
         LossyWithdrawStrategy strat = new LossyWithdrawStrategy(usdc);
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
         treasury.depositToStrategy(strat, 100e6);
         vm.stopPrank();
 
@@ -835,9 +778,9 @@ contract TreasuryTest is Test {
         treasury.mintUSD8(100e6);
         vm.stopPrank();
 
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(a);
-        treasury.addStrategy(b);
+        vm.startPrank(timelock);
+        treasury.addStrategy(a, type(uint256).max);
+        treasury.addStrategy(b, type(uint256).max);
         treasury.depositToStrategy(b, 100e6);
         vm.stopPrank();
 
@@ -857,8 +800,8 @@ contract TreasuryTest is Test {
         treasury.mintUSD8(100e6);
         vm.stopPrank();
 
-        vm.startPrank(treasuryAdmin);
-        treasury.addStrategy(strat);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
         treasury.depositToStrategy(strat, 100e6);
         vm.stopPrank();
 
@@ -885,32 +828,6 @@ contract TreasuryTest is Test {
         assertEq(usdc.balanceOf(address(treasury)), 100e6);
         assertEq(usd8.balanceOf(alice), 100e18);
         assertEq(usd8.totalSupply(), 100e18);
-    }
-
-    function test_PermitAndMintUSD8() public {
-        (address owner, uint256 ownerKey) = makeAddrAndKey("permitOwner");
-        uint256 amount = 100e6;
-        uint256 deadline = block.timestamp + 1 hours;
-
-        usdc.mint(owner, amount);
-
-        bytes32 permitTypehash =
-            keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
-        bytes32 structHash =
-            keccak256(abi.encode(permitTypehash, owner, address(treasury), amount, usdc.nonces(owner), deadline));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, digest);
-
-        vm.expectEmit(true, false, false, true, address(treasury));
-        emit Minted(owner, amount, 100e18);
-        vm.prank(owner);
-        treasury.permitAndMint(amount, deadline, v, r, s);
-
-        assertEq(usdc.balanceOf(owner), 0);
-        assertEq(usdc.allowance(owner, address(treasury)), 0);
-        assertEq(usdc.nonces(owner), 1);
-        assertEq(usdc.balanceOf(address(treasury)), amount);
-        assertEq(usd8.balanceOf(owner), 100e18);
     }
 
     function test_Redeem() public {
@@ -1115,50 +1032,42 @@ contract TreasuryTest is Test {
 
     // -- Rescue -----------------------------------------------------------
 
-    function test_RescueTokenSendsToApprovedRecipient() public {
+    function test_RescueTokenSendsToRecipient() public {
         MockERC20 stray = new MockERC20("Stray", "STR", 18);
         stray.mint(address(treasury), 7e18);
 
-        vm.startPrank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
+        vm.prank(timelock);
         vm.expectEmit(true, true, false, true, address(treasury));
         emit TokenRescued(address(stray), recipient, 7e18);
         treasury.rescueToken(IERC20(address(stray)), recipient, 7e18);
-        vm.stopPrank();
 
         assertEq(stray.balanceOf(recipient), 7e18);
         assertEq(stray.balanceOf(address(treasury)), 0);
     }
 
     function test_RescueTokenRejectsUSDC() public {
-        vm.startPrank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
+        vm.prank(timelock);
         vm.expectRevert(abi.encodeWithSelector(Treasury.RescueProtected.selector, address(usdc)));
         treasury.rescueToken(IERC20(address(usdc)), recipient, 1);
-        vm.stopPrank();
     }
 
     function test_RescueTokenRejectsUSD8() public {
-        vm.startPrank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
+        vm.prank(timelock);
         vm.expectRevert(abi.encodeWithSelector(Treasury.RescueProtected.selector, address(usd8)));
         treasury.rescueToken(IERC20(address(usd8)), recipient, 1);
-        vm.stopPrank();
     }
 
-    function test_RescueTokenRequiresApprovedRecipient() public {
+    function test_RescueTokenRejectsZeroAddress() public {
         MockERC20 stray = new MockERC20("Stray", "STR", 18);
-        vm.prank(treasuryAdmin);
-        vm.expectRevert(abi.encodeWithSelector(Treasury.RevenueRecipientNotApproved.selector, recipient));
-        treasury.rescueToken(IERC20(address(stray)), recipient, 1);
+        vm.prank(timelock);
+        vm.expectRevert(Treasury.ZeroAddress.selector);
+        treasury.rescueToken(IERC20(address(stray)), address(0), 1);
     }
 
-    function test_RescueETHSendsToApprovedRecipient() public {
+    function test_RescueETHSendsToRecipient() public {
         vm.deal(address(treasury), 1 ether);
-        vm.prank(treasuryAdmin);
-        treasury.addRevenueRecipient(recipient, Treasury.RevenueDistributionMode.DirectTransfer);
 
-        vm.prank(treasuryAdmin);
+        vm.prank(timelock);
         vm.expectEmit(true, false, false, true, address(treasury));
         emit ETHRescued(recipient, 1 ether);
         treasury.rescueETH(payable(recipient), 1 ether);
