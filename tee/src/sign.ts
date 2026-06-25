@@ -1,7 +1,14 @@
 // EIP-712 over Settlement(incidentId, root, inputHash). The signing key is
 // generated INSIDE the enclave (see keygen in main.ts) and never leaves; its
 // public address is published in the Nitro attestation document so anyone can
-// confirm CoverPool.claimSigner belongs to this open-source code.
+// confirm CoverPool.teeSigner belongs to this open-source code.
+//
+// TODO(infra): persist the key sealed across enclave restarts. The key must
+// survive a restart without ever existing in plaintext outside the enclave —
+// seal it to the enclave's PCR measurement via AWS KMS (Encrypt under the
+// attested image, Decrypt only on a matching attestation document). Until that
+// lands, the key is passed in via SIGNER_KEY env, which is a TRUSTED-SETUP-ONLY
+// stopgap and not safe for production.
 
 import { privateKeyToAccount } from "viem/accounts";
 import { CONFIG } from "./config.js";

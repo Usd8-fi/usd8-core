@@ -16,13 +16,17 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {SavingsUSD8} from "../src/SavingsUSD8.sol";
+import {CoverPool} from "../src/CoverPool.sol";
+import {DefiInsurance, ICoverPool} from "../src/DefiInsurance.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
 import {AaveV3UsdcStrategy} from "../src/strategies/AaveV3UsdcStrategy.sol";
 import {MorphoVaultStrategy} from "../src/strategies/MorphoVaultStrategy.sol";
 
 /// @title  Deploy
-/// @notice Beta-release deployer: USD8 (proxy + impl), Treasury, SavingsUSD8,
-///         and strategies. CoverPool intentionally out of scope.
+/// @notice Deployer: USD8 (proxy + impl), Treasury, SavingsUSD8, strategies,
+///         CoverPool (the capital base, seeded with two scored tokens — USD8 and
+///         sUSD8), and DefiInsurance (a payout module registered on the pool).
+///         Insured tokens and stake assets are left for governance.
 ///
 /// @dev    Both roles (timelock + admin) land on a single EOA
 ///         ({DEFAULT_ADMIN}) — fine for beta, MUST be migrated to a Safe +
@@ -54,6 +58,16 @@ contract DeployScript is Script {
     ///         rejects the zero address — but equally unspendable.
     address constant SEED_SINK = 0x000000000000000000000000000000000000dEaD;
 
+    /// @notice scorePerTokenPerBlock for the two scored tokens. Small integers
+    ///         (not 1e18-scaled) so cumulative scores stay manageable; sUSD8
+    ///         earns 10× plain USD8 to reward staking.
+    uint128 constant USD8_SCORE_RATE = 1;
+    uint128 constant SUSD8_SCORE_RATE = 10;
+
+    /// @notice Already-deployed USD8Booster ERC-1155 collection (mainnet). Wired
+    ///         into CoverPool at init as the canonical booster.
+    address constant USD8_BOOSTER = 0x6f74Ce39Bb1D75C56E2fe5f349a6A5f51ce6f12d;
+
     struct Deployed {
         address usd8Impl;
         USD8 usd8;
@@ -62,6 +76,10 @@ contract DeployScript is Script {
         AaveV3UsdcStrategy aaveStrat;
         MorphoVaultStrategy morphoStrat1;
         MorphoVaultStrategy morphoStrat2;
+        address coverPoolImpl;
+        CoverPool coverPool;
+        address defiInsuranceImpl;
+        DefiInsurance defiInsurance;
     }
 
     function run() external {
@@ -108,6 +126,41 @@ contract DeployScript is Script {
         d.usd8.approve(address(d.savings), seedUsd8);
         d.savings.deposit(seedUsd8, SEED_SINK);
 
+        // CoverPool impl + ERC-1967 proxy — the shared capital base. USD8 is the
+        // reward token; the pool holds the insurance-score ledger and the canonical
+        // booster collection (the already-deployed {USD8_BOOSTER}). Deployer holds
+        // both roles; seed scored tokens.
+        CoverPool cpImpl = new CoverPool();
+        d.coverPoolImpl = address(cpImpl);
+        d.coverPool = CoverPool(
+            address(
+                new ERC1967Proxy(
+                    address(cpImpl),
+                    abi.encodeCall(CoverPool.initialize, (IERC20(address(d.usd8)), deployer, deployer, USD8_BOOSTER))
+                )
+            )
+        );
+
+        // Scored tokens: holding sUSD8 earns 10× plain USD8. Scoring starts now.
+        uint64 scoreStart = uint64(block.number);
+        d.coverPool.addScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE, scoreStart);
+        d.coverPool.addScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE, scoreStart);
+
+        // DefiInsurance impl + proxy — the first insurance product (a pool
+        // payout module). Register it on the pool so it can lock, pay, and spend
+        // score. Insured tokens are left for governance to add.
+        DefiInsurance diImpl = new DefiInsurance();
+        d.defiInsuranceImpl = address(diImpl);
+        d.defiInsurance = DefiInsurance(
+            address(
+                new ERC1967Proxy(
+                    address(diImpl),
+                    abi.encodeCall(DefiInsurance.initialize, (ICoverPool(address(d.coverPool)), deployer, deployer))
+                )
+            )
+        );
+        d.coverPool.setPayoutModule(address(d.defiInsurance), true);
+
         // Aave v3 USDC strategy at Treasury index 0.
         d.aaveStrat = new AaveV3UsdcStrategy(address(d.treasury));
         d.treasury.addStrategy(IStrategy(address(d.aaveStrat)), type(uint256).max);
@@ -121,7 +174,6 @@ contract DeployScript is Script {
             d.morphoStrat2 = new MorphoVaultStrategy(address(d.treasury), IERC4626(morphoVault2));
             d.treasury.addStrategy(IStrategy(address(d.morphoStrat2)), type(uint256).max);
         }
-
     }
 
     function _handOffRoles(Deployed memory d, address admin) internal {
@@ -134,6 +186,12 @@ contract DeployScript is Script {
 
         d.savings.setAdmin(admin);
         d.savings.setTimelock(admin);
+
+        d.coverPool.setAdmin(admin);
+        d.coverPool.setTimelock(admin);
+
+        d.defiInsurance.setAdmin(admin);
+        d.defiInsurance.setTimelock(admin);
     }
 
     function _logResults(Deployed memory d, address admin, address morphoVault1, address morphoVault2) internal pure {
@@ -146,6 +204,14 @@ contract DeployScript is Script {
         console2.log("");
         console2.log("=== SavingsUSD8 ===");
         console2.log("Address:           ", address(d.savings));
+        console2.log("");
+        console2.log("=== CoverPool ===");
+        console2.log("Implementation:    ", d.coverPoolImpl);
+        console2.log("Proxy:             ", address(d.coverPool));
+        console2.log("");
+        console2.log("=== DefiInsurance ===");
+        console2.log("Implementation:    ", d.defiInsuranceImpl);
+        console2.log("Proxy:             ", address(d.defiInsurance));
         console2.log("");
         console2.log("=== Strategies ===");
         console2.log("AaveV3UsdcStrategy:", address(d.aaveStrat));

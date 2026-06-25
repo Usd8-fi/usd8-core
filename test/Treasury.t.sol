@@ -337,7 +337,9 @@ contract TreasuryTest is Test {
         assertEq(usd8.balanceOf(address(treasury)), 19.9e18);
 
         vm.prank(timelock);
-        treasury.distributeRevenue(address(savings), 19.9e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
+        treasury.distributeRevenue(
+            address(savings), 19.9e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution
+        );
 
         assertEq(usd8.balanceOf(address(treasury)), 0);
         assertEq(savings.pendingProfit(), 19.9e18);

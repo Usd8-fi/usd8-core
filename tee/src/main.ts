@@ -17,7 +17,11 @@ import {
   readInputEvents,
   firstClaimBlockOf,
   blockAtTimestamp,
-  feedUsd1e18,
+  incidentConfigOf,
+  priceUsd1e18,
+  decimalsOf,
+  historyScoreLedgerOf,
+  historyScoreSpentOf,
 } from "./chain.js";
 import { CONFIG, CONFIG_VERSION } from "./config.js";
 import { settle, computeInputHash, type Settlement } from "./compute.js";
@@ -33,20 +37,16 @@ async function buildSettlement(incidentId: bigint): Promise<Settlement> {
   const client = makeClient(rpc());
 
   const inc = (await client.readContract({
-    address: CONFIG.coverPool,
+    address: CONFIG.defiInsurance,
     abi: COVER_POOL_ABI,
     functionName: "incidents",
     args: [incidentId],
-  })) as readonly [`0x${string}`, bigint, bigint, `0x${string}`, `0x${string}`, bigint, bigint];
+  })) as readonly [`0x${string}`, bigint, `0x${string}`, `0x${string}`, bigint, bigint, bigint, bigint];
 
   const insuredToken = inc[0];
-  const windowEnd = inc[2];
-  const onchainInputHash = inc[4];
-
-  const cfg = CONFIG.insuredTokens.find(
-    (t) => t.token.toLowerCase() === insuredToken.toLowerCase()
-  );
-  if (!cfg) throw new Error(`insured token ${insuredToken} not in config`);
+  const windowEnd = inc[1];
+  const onchainInputHash = inc[3];
+  const referenceBlock = inc[7]; // admin-pinned pre-incident block
 
   // Deterministic block anchors: window-end block found from its timestamp,
   // and the incident's first-claim block. Every read below pins one of these,
@@ -65,20 +65,17 @@ async function buildSettlement(incidentId: bigint): Promise<Settlement> {
     );
   }
 
-  // All config + pool reads pinned to windowEndBlock for reproducibility.
-  const coverageBps = (await client.readContract({
-    address: CONFIG.coverPool,
-    abi: COVER_POOL_ABI,
-    functionName: "coverageBps",
-    args: [insuredToken],
-    blockNumber: windowEndBlock,
-  })) as bigint;
+  // Settlement config: the snapshot frozen on-chain when the incident opened.
+  // Nothing settlement-relevant lives in this codebase — it is all read here.
+  const cfg = await incidentConfigOf(client, incidentId);
+  const insuredDecimals = await decimalsOf(client, insuredToken);
 
-  // Stake-asset list + balances + USD prices, in CoverPool order.
+  // Stake-asset list + balances + USD prices, in CoverPool order. Feeds come
+  // from the contract (coverPoolAssets.usdPriceFeed); pinned to windowEndBlock.
   const nAssets = (await client.readContract({
     address: CONFIG.coverPool,
     abi: COVER_POOL_ABI,
-    functionName: "assetListLength",
+    functionName: "coverPoolAssetListLength",
     blockNumber: windowEndBlock,
   })) as bigint;
   const assetOrder: `0x${string}`[] = [];
@@ -89,7 +86,7 @@ async function buildSettlement(incidentId: bigint): Promise<Settlement> {
     const a = (await client.readContract({
       address: CONFIG.coverPool,
       abi: COVER_POOL_ABI,
-      functionName: "assetList",
+      functionName: "coverPoolAssetList",
       args: [i],
       blockNumber: windowEndBlock,
     })) as `0x${string}`;
@@ -100,22 +97,41 @@ async function buildSettlement(incidentId: bigint): Promise<Settlement> {
       args: [a],
       blockNumber: windowEndBlock,
     })) as bigint;
-    const sa = CONFIG.stakeAssets.find((s) => s.token.toLowerCase() === a.toLowerCase());
-    if (!sa) throw new Error(`stake asset ${a} not in config`);
+    const assetState = (await client.readContract({
+      address: CONFIG.coverPool,
+      abi: COVER_POOL_ABI,
+      functionName: "coverPoolAssets",
+      args: [a],
+      blockNumber: windowEndBlock,
+    })) as readonly [bigint, bigint, bigint, bigint, bigint, bigint, `0x${string}`, bigint];
+    const feed = assetState[6]; // usdPriceFeed
     assetOrder.push(a);
     assetBalances.push(bal);
-    assetUsd1e18.push(await feedUsd1e18(client, sa.usdFeed, windowEndBlock));
-    assetDecimals.push(sa.decimals);
+    assetUsd1e18.push(await priceUsd1e18(client, feed, windowEndBlock));
+    assetDecimals.push(await decimalsOf(client, a));
+  }
+
+  // History score already spent per user, from the shared USD8 ledger, pinned
+  // at windowEndBlock. available = earned − spent. Cached per user.
+  const ledger = await historyScoreLedgerOf(client);
+  const spentCache = new Map<string, bigint>();
+  const spentOf = (user: `0x${string}`) => spentCache.get(user.toLowerCase()) ?? 0n;
+  for (const e of events) {
+    const key = e.user.toLowerCase();
+    if (spentCache.has(key)) continue;
+    spentCache.set(key, await historyScoreSpentOf(client, ledger, e.user, windowEndBlock));
   }
 
   return settle(client, incidentId, cfg, events, {
-    firstClaimBlock,
+    insuredToken,
+    insuredDecimals,
+    referenceBlock,
     windowEndBlock,
-    coverageBps,
     assetOrder,
     assetBalances,
     assetUsd1e18,
     assetDecimals,
+    spentOf,
   });
 }
 
@@ -134,7 +150,8 @@ function printTable(s: Settlement) {
       escrowAmount: r.escrowAmount.toString(),
       eligibleAmount: r.eligibleAmount.toString(),
       lossUsd: r.lossUsd.toString(),
-      score: r.score.toString(),
+      earnedScore: r.earnedScore.toString(),
+      scoreSpent: r.scoreSpent.toString(),
       payoutUsd: r.payoutUsd.toString(),
       amounts: r.amounts.map((a) => a.toString()),
     })),

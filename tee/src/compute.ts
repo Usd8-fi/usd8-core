@@ -1,19 +1,24 @@
 // The settlement algorithm. Pure given chain reads — every step here is
-// recomputable by anyone, which is what the dispute window verifies.
+// recomputable by anyone from the per-incident config snapshot, which is what
+// the dispute window verifies.
 
 import { encodeAbiParameters, keccak256, type PublicClient } from "viem";
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
-import { CONFIG, type InsuredTokenConfig } from "./config.js";
 import {
+  WAD,
   ratioAt,
-  feedUsd1e18,
+  priceUsd1e18,
   minBalanceOver,
-  twabOver,
+  tokenBlockIntegral,
+  type IncidentConfig,
   type InputEvent,
 } from "./chain.js";
 
-const WAD = 10n ** 18n;
 const BPS = 10_000n;
+// Hard-coded booster policy, mirrors CoverPool.BOOSTER_BOOST_BPS: each committed
+// unit of booster id 0 adds +1% to the history-score multiplier.
+const BOOSTER_ID = 0n;
+const BOOSTER_BOOST_BPS = 100n;
 
 export interface SettledRow {
   claimId: bigint;
@@ -21,7 +26,8 @@ export interface SettledRow {
   escrowAmount: bigint;
   eligibleAmount: bigint;
   lossUsd: bigint; // 1e18
-  score: bigint;
+  earnedScore: bigint; // total available-to-spend before this claim
+  scoreSpent: bigint; // min(requested, available) — the payout weight, recorded on-chain
   payoutUsd: bigint; // 1e18, post-κ, post-share
   amounts: bigint[]; // aligned to stake-asset list
 }
@@ -39,9 +45,9 @@ export interface Settlement {
 /**
  * Replicate the contract's running claimant-table commitment by replaying the
  * register/cancel events in true chain order. Each `register` chains
- * `keccak256(abi.encode(h, claimId, user, amount))`; each `cancel` chains
- * `keccak256(abi.encode(h, claimId, "CANCEL"))` — byte-identical to
- * CoverPool's `registerClaim`/`cancelClaim`.
+ * `keccak256(abi.encode(h, claimId, user, escrow, scoreToSpend, boosterIds,
+ * boosterAmounts))`; each `cancel` chains `keccak256(abi.encode(h, claimId,
+ * "CANCEL"))` — byte-identical to CoverPool's `_registerClaim`/`cancelClaim`.
  */
 export function computeInputHash(events: InputEvent[]): `0x${string}` {
   let h: `0x${string}` = `0x${"00".repeat(32)}`;
@@ -49,8 +55,16 @@ export function computeInputHash(events: InputEvent[]): `0x${string}` {
     if (e.kind === "register") {
       h = keccak256(
         encodeAbiParameters(
-          [{ type: "bytes32" }, { type: "uint256" }, { type: "address" }, { type: "uint128" }],
-          [h, e.claimId, e.user, e.amount]
+          [
+            { type: "bytes32" },
+            { type: "uint256" },
+            { type: "address" },
+            { type: "uint128" },
+            { type: "uint256" },
+            { type: "uint256[]" },
+            { type: "uint256[]" },
+          ],
+          [h, e.claimId, e.user, e.amount, e.scoreToSpend, e.boosterIds, e.boosterAmounts]
         )
       );
     } else {
@@ -66,63 +80,53 @@ export function computeInputHash(events: InputEvent[]): `0x${string}` {
 }
 
 /**
- * Detect the incident block B: the pre-cliff edge. Scan sampled blocks in
- * [first-claim − maxLookback, windowEnd]; B is the sample with the maximum
- * ratio such that the ratio within the following dropWindow falls below
- * (1 − θ) × ratio(B). Returns null if no qualifying cliff exists — the
- * whole incident is then invalid and MUST NOT be signed (void path).
+ * TWAP of the token→underlying ratio over [referenceBlock − twapLookback,
+ * referenceBlock], sampled. The reference block is the admin-pinned pre-incident
+ * point ({Incident.referenceBlock}); TWAPing a short window before it smooths
+ * any single-block oracle glitch. This is the "before" value losses are
+ * measured against — no on-chain drop detection (the admin already opened).
  */
-export async function detectIncidentBlock(
-  client: PublicClient,
-  cfg: InsuredTokenConfig,
-  firstClaimBlock: bigint,
-  windowEndBlock: bigint
-): Promise<{ b: bigint; ratioAtB: bigint } | null> {
-  const lookbackBlocks = cfg.maxLookbackSec / CONFIG.secondsPerBlock;
-  const dropBlocks = cfg.dropWindowSec / CONFIG.secondsPerBlock;
-  const start = firstClaimBlock > lookbackBlocks ? firstClaimBlock - lookbackBlocks : 1n;
-  const step = CONFIG.sampleStepBlocks;
-
-  // Sample the ratio series once.
-  const samples: { block: bigint; ratio: bigint }[] = [];
-  for (let b = start; b <= windowEndBlock; b += step) {
-    samples.push({ block: b, ratio: await ratioAt(client, cfg, b) });
-  }
-
-  let best: { b: bigint; ratioAtB: bigint } | null = null;
-  for (let i = 0; i < samples.length; i++) {
-    const s = samples[i];
-    const threshold = (s.ratio * (BPS - cfg.thetaBps)) / BPS;
-    // Does any sample within dropWindow after s fall below threshold?
-    let cliff = false;
-    for (let j = i + 1; j < samples.length && samples[j].block <= s.block + dropBlocks; j++) {
-      if (samples[j].ratio <= threshold) {
-        cliff = true;
-        break;
-      }
-    }
-    if (cliff && (best === null || s.ratio > best.ratioAtB)) {
-      best = { b: s.block, ratioAtB: s.ratio };
-    }
-  }
-  return best;
-}
-
-/** TWAP of the ratio over [B − W, B], sampled. */
-export async function twapRatioBefore(
-  client: PublicClient,
-  cfg: InsuredTokenConfig,
-  b: bigint
-): Promise<bigint> {
-  const wBlocks = cfg.twapLookbackSec / CONFIG.secondsPerBlock;
-  const start = b > wBlocks ? b - wBlocks : 1n;
+export async function twapRatioBefore(client: PublicClient, cfg: IncidentConfig, b: bigint): Promise<bigint> {
+  const w = cfg.params.twapLookbackBlocks;
+  const start = b > w ? b - w : 1n;
   let sum = 0n;
   let n = 0n;
-  for (let blk = start; blk <= b; blk += CONFIG.sampleStepBlocks) {
-    sum += await ratioAt(client, cfg, blk);
+  for (let blk = start; blk <= b; blk += cfg.params.sampleStepBlocks) {
+    sum += await ratioAt(client, cfg.underlyingConversionAddress, cfg.underlyingConversionCallData, blk);
     n += 1n;
   }
   return n === 0n ? 0n : sum / n;
+}
+
+/**
+ * USD8 history score EARNED by `user` to the window-end block: the cumulative
+ * token·block integral of each scored token from its `startBlock`, summed and
+ * weighted by its on-chain rate, then boosted. This is the gross figure;
+ * already-spent score (from the on-chain ledger) is subtracted by the caller.
+ * Non-expiring (not a time-weighted average), so holding longer always grows
+ * it. Each committed unit of booster id 0 adds BOOSTER_BOOST_BPS per unit.
+ */
+export async function earnedScoreOf(
+  client: PublicClient,
+  cfg: IncidentConfig,
+  user: `0x${string}`,
+  boosterIds: bigint[],
+  boosterAmounts: bigint[],
+  windowEndBlock: bigint
+): Promise<bigint> {
+  let score = 0n;
+  for (const st of cfg.scoredTokens) {
+    if (st.startBlock >= windowEndBlock) continue;
+    const integral = await tokenBlockIntegral(client, st.token, user, st.startBlock, windowEndBlock);
+    score += integral * st.scorePerTokenPerBlock;
+  }
+  // Booster multiplier: each committed unit of id 0 adds BOOSTER_BOOST_BPS
+  // (every other id weighs 0). multiplier = (BPS + Σ amount × bps) / BPS.
+  let boostBps = 0n;
+  for (let i = 0; i < boosterIds.length; i++) {
+    if (boosterIds[i] === BOOSTER_ID) boostBps += boosterAmounts[i] * BOOSTER_BOOST_BPS;
+  }
+  return (score * (BPS + boostBps)) / BPS;
 }
 
 /**
@@ -132,31 +136,30 @@ export async function twapRatioBefore(
 export async function settle(
   client: PublicClient,
   incidentId: bigint,
-  cfg: InsuredTokenConfig,
+  cfg: IncidentConfig,
   events: InputEvent[],
   opts: {
-    firstClaimBlock: bigint;
+    insuredToken: `0x${string}`;
+    insuredDecimals: number;
+    referenceBlock: bigint; // admin-pinned pre-incident block (Incident.referenceBlock)
     windowEndBlock: bigint;
-    coverageBps: bigint;
     assetOrder: `0x${string}`[];
     assetBalances: bigint[]; // pool totalAssets per asset at windowEndBlock
     assetUsd1e18: bigint[]; // USD price per whole token at windowEndBlock
     assetDecimals: number[];
+    spentOf: (user: `0x${string}`) => bigint; // history score already spent (on-chain ledger)
   }
 ): Promise<Settlement> {
   const inputHash = computeInputHash(events);
 
-  const cliff = await detectIncidentBlock(client, cfg, opts.firstClaimBlock, opts.windowEndBlock);
-  if (!cliff) throw new Error("no qualifying ratio cliff: incident invalid, do not sign");
-  const twap = await twapRatioBefore(client, cfg, cliff.b);
+  // Pre-incident value, anchored at the admin-pinned reference block (no
+  // on-chain drop detection — the admin already opened the incident).
+  const refBlock = opts.referenceBlock;
+  const twap = await twapRatioBefore(client, cfg, refBlock);
   // Underlying USD pinned to window-end block — reproducible.
-  const underlyingUsd = await feedUsd1e18(client, cfg.underlyingUsdFeed, opts.windowEndBlock);
+  const underlyingUsd = await priceUsd1e18(client, cfg.priceOracle, opts.windowEndBlock);
 
-  const marginBlocks = cfg.holdingMarginSec / CONFIG.secondsPerBlock;
-  const holdFrom = cliff.b > marginBlocks ? cliff.b - marginBlocks : 1n;
-  const scoreBlocks = CONFIG.scoreLookbackSec / CONFIG.secondsPerBlock;
-  const scoreFrom =
-    opts.windowEndBlock > scoreBlocks ? opts.windowEndBlock - scoreBlocks : 1n;
+  const holdFrom = refBlock > cfg.params.holdingMarginBlocks ? refBlock - cfg.params.holdingMarginBlocks : 1n;
 
   // Per-claim eligibility, valuation, score (live = registered, not cancelled).
   const live = events
@@ -166,20 +169,25 @@ export async function settle(
   for (const e of live) {
     // Eligible = continuous min holding since B − margin, capped at escrow.
     // Min-balance replay makes cross-claimant double-counting impossible.
-    const minHeld = await minBalanceOver(client, cfg.token, e.user, holdFrom, opts.windowEndBlock);
+    const minHeld = await minBalanceOver(client, opts.insuredToken, e.user, holdFrom, opts.windowEndBlock);
     const eligible = minHeld < e.amount ? minHeld : e.amount;
-    // lossUsd = eligible × TWAP ratio × underlying USD price.
-    const lossUsd =
-      (((eligible * twap) / WAD) * underlyingUsd) / 10n ** BigInt(cfg.underlyingDecimals);
-    // USD8 history score = time-weighted USD8 balance over the lookback.
-    const score = await twabOver(client, CONFIG.usd8, e.user, scoreFrom, opts.windowEndBlock);
+    // lossUsd = eligible × TWAP ratio × underlying USD price (1e18).
+    const lossUsd = (((eligible * twap) / WAD) * underlyingUsd) / 10n ** BigInt(opts.insuredDecimals);
+    // Earned score to date, minus what's already been spent on prior claims.
+    const earned = await earnedScoreOf(client, cfg, e.user, e.boosterIds, e.boosterAmounts, opts.windowEndBlock);
+    const spent = opts.spentOf(e.user);
+    const available = earned > spent ? earned - spent : 0n;
+    // The claimant spends what they requested, capped to availability (option A:
+    // over-request just caps; no waste protection). This is their payout weight.
+    const scoreSpent = e.scoreToSpend < available ? e.scoreToSpend : available;
     rows.push({
       claimId: e.claimId,
       user: e.user,
       escrowAmount: e.amount,
       eligibleAmount: eligible,
       lossUsd,
-      score,
+      earnedScore: earned,
+      scoreSpent,
       payoutUsd: 0n,
       amounts: [],
     });
@@ -188,20 +196,21 @@ export async function settle(
   // Pool USD value.
   let poolUsd = 0n;
   for (let i = 0; i < opts.assetOrder.length; i++) {
-    poolUsd +=
-      (opts.assetBalances[i] * opts.assetUsd1e18[i]) / 10n ** BigInt(opts.assetDecimals[i]);
+    poolUsd += (opts.assetBalances[i] * opts.assetUsd1e18[i]) / 10n ** BigInt(opts.assetDecimals[i]);
   }
-  const totalScore = rows.reduce((a, r) => a + (r.lossUsd > 0n ? r.score : 0n), 0n);
+  // Payout weight is the SPENT score (not earned): claimants apportion by what
+  // they choose to spend this incident.
+  const totalSpent = rows.reduce((a, r) => a + (r.lossUsd > 0n ? r.scoreSpent : 0n), 0n);
 
-  // payoutUsd = min(score-share × poolUsd, κ × lossUsd); split per asset
+  // payoutUsd = min(spent-share × poolUsd, κ × lossUsd); split per asset
   // pro-rata to the pool mix.
   for (const r of rows) {
-    if (r.lossUsd === 0n || totalScore === 0n) {
+    if (r.lossUsd === 0n || totalSpent === 0n) {
       r.amounts = opts.assetOrder.map(() => 0n);
       continue;
     }
-    const share = (r.score * poolUsd) / totalScore;
-    const cap = (r.lossUsd * opts.coverageBps) / BPS;
+    const share = (r.scoreSpent * poolUsd) / totalSpent;
+    const cap = (r.lossUsd * cfg.coverageBps) / BPS;
     r.payoutUsd = share < cap ? share : cap;
     r.amounts = opts.assetOrder.map((_, i) =>
       poolUsd === 0n ? 0n : (r.payoutUsd * opts.assetBalances[i]) / poolUsd
@@ -209,15 +218,15 @@ export async function settle(
   }
 
   // OZ standard merkle tree — leaf encoding matches CoverPool exactly:
-  // keccak256(bytes.concat(keccak256(abi.encode(incidentId, claimId, user, amounts)))).
+  // keccak256(bytes.concat(keccak256(abi.encode(incidentId, claimId, user, amounts, scoreSpent)))).
   const tree = StandardMerkleTree.of(
-    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts] as const) as unknown as any[][],
-    ["uint256", "uint256", "address", "uint256[]"]
+    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent] as const) as unknown as any[][],
+    ["uint256", "uint256", "address", "uint256[]", "uint256"]
   );
 
   return {
     incidentId,
-    incidentBlock: cliff.b,
+    incidentBlock: refBlock,
     twapRatio: twap,
     inputHash,
     root: tree.root as `0x${string}`,
@@ -228,8 +237,8 @@ export async function settle(
 
 export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
   const tree = StandardMerkleTree.of(
-    s.rows.map((r) => [s.incidentId, r.claimId, r.user, r.amounts] as const) as unknown as any[][],
-    ["uint256", "uint256", "address", "uint256[]"]
+    s.rows.map((r) => [s.incidentId, r.claimId, r.user, r.amounts, r.scoreSpent] as const) as unknown as any[][],
+    ["uint256", "uint256", "address", "uint256[]", "uint256"]
   );
   for (const [i, v] of tree.entries()) {
     if ((v as any[])[1] === claimId) return tree.getProof(i) as `0x${string}`[];
