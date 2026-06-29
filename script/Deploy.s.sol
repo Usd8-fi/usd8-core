@@ -78,7 +78,6 @@ contract DeployScript is Script {
         MorphoVaultStrategy morphoStrat2;
         address coverPoolImpl;
         CoverPool coverPool;
-        address defiInsuranceImpl;
         DefiInsurance defiInsurance;
     }
 
@@ -146,19 +145,10 @@ contract DeployScript is Script {
         d.coverPool.addScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE, scoreStart);
         d.coverPool.addScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE, scoreStart);
 
-        // DefiInsurance impl + proxy — the first insurance product (a pool
-        // payout module). Register it on the pool so it can lock, pay, and spend
-        // score. Insured tokens are left for governance to add.
-        DefiInsurance diImpl = new DefiInsurance();
-        d.defiInsuranceImpl = address(diImpl);
-        d.defiInsurance = DefiInsurance(
-            address(
-                new ERC1967Proxy(
-                    address(diImpl),
-                    abi.encodeCall(DefiInsurance.initialize, (ICoverPool(address(d.coverPool)), deployer, deployer))
-                )
-            )
-        );
+        // DefiInsurance — the first insurance product (a pool payout module).
+        // Non-upgradeable, deployed directly. Register it on the pool so it can
+        // lock, pay, and spend score. Insured tokens are left for governance to add.
+        d.defiInsurance = new DefiInsurance(ICoverPool(address(d.coverPool)), deployer, deployer);
         d.coverPool.setPayoutModule(address(d.defiInsurance), true);
 
         // Aave v3 USDC strategy at Treasury index 0.
@@ -210,8 +200,7 @@ contract DeployScript is Script {
         console2.log("Proxy:             ", address(d.coverPool));
         console2.log("");
         console2.log("=== DefiInsurance ===");
-        console2.log("Implementation:    ", d.defiInsuranceImpl);
-        console2.log("Proxy:             ", address(d.defiInsurance));
+        console2.log("Address:           ", address(d.defiInsurance));
         console2.log("");
         console2.log("=== Strategies ===");
         console2.log("AaveV3UsdcStrategy:", address(d.aaveStrat));

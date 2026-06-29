@@ -17,5 +17,6 @@ docs/
 .DS_Store
 **/.DS_Store
 
-# TEE service dependencies
-tee/node_modules/
+# Off-chain settlement package
+offchain/node_modules/
+offchain/dist/

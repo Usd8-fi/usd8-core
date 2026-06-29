@@ -420,7 +420,7 @@ contract Treasury is ReentrancyGuardTransient {
     ///         down one position, so the relative priority of the remaining
     ///         withdrawal queue is unchanged. To reorder, remove and
     ///         re-{addStrategy} at the desired index (drain first if funded).
-    function removeStrategy(IStrategy s) external onlyAdminOrTimelock {
+    function removeStrategy(IStrategy s) external onlyTimelock {
         (uint256 idx, bool found) = _findStrategy(s);
         if (!found) revert StrategyNotApproved(s);
 

@@ -196,9 +196,6 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
     ///         reserve as recoverable while committed rewards stay untouchable.
     uint256 public rewardReserve;
 
-    /// @dev Reserved storage slots for future upgrades (sequential storage).
-    uint256[50] private __gap;
-
     // ─────────────────────────── Errors ──────────────────────────
 
     error ZeroAmount();
@@ -219,6 +216,7 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
     error CooldownNotElapsed();
     error PoolFrozen();
     error NotPayoutModule(address caller);
+    error NotActivePayoutModule(address caller);
     error NotSweepable(uint256 requested, uint256 available);
 
     // ─────────────────────────── Events ──────────────────────────
@@ -354,11 +352,16 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
     }
 
     /// @notice Set the canonical booster NFT collection that payout modules use
-    ///         for score-boost commits. Timelock only. Zero disables booster
-    ///         commits (existing escrowed boosters are unaffected — do not change
-    ///         this while a module still holds boosters from the prior collection).
+    ///         for score-boost commits. Timelock only; blocked while the pool is
+    ///         frozen for an incident. Zero disables future commits.
+    /// @dev    Safe to repoint regardless: each claim snapshots the collection it
+    ///         escrowed into ({DefiInsurance.Claim.boosterCollection}) and
+    ///         burns/returns against that snapshot, so a change never strands
+    ///         already-escrowed boosters — even ones recovered long after via
+    ///         {withdrawNonFinalizedClaim}. The freeze here is belt-and-suspenders.
     /// @param newBooster  New booster NFT address (zero to disable).
     function setBoosterNFT(address newBooster) external onlyTimelock {
+        if (_frozen()) revert PoolFrozen();
         emit BoosterNFTSet(boosterNFT, newBooster);
         boosterNFT = newBooster;
     }
@@ -411,7 +414,8 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
     }
 
     /// @notice Pay a settlement row out of pooled capital to a claimant AND record
-    ///         the insurance score the claim consumed. Payout module only. Score
+    ///         the insurance score the claim consumed. Active payout module only
+    ///         (the one currently holding the {lockPool} lock). Score
     ///         spend is bound to the payout here — it can never be recorded
     ///         without a claim payout, and the recorded amount is the payout
     ///         weight. `amounts` aligns to {coverPoolAssetList} (frozen for the
@@ -427,9 +431,13 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
     ///                     capped to the claimant's availability off-chain).
     function payClaim(address to, uint256[] calldata amounts, uint256 scoreSpent)
         external
-        onlyPayoutModule
         nonReentrant
     {
+        // Only the module that currently holds the lock may move capital — not any
+        // sibling registered module. (We can't also require the pool be frozen here:
+        // the payout module marks the final claim resolved before calling, so the
+        // incident reads inactive on the last finalize.)
+        if (msg.sender != activePayoutModule) revert NotActivePayoutModule(msg.sender);
         uint256 n = coverPoolAssetList.length;
         uint256 m = amounts.length < n ? amounts.length : n;
         for (uint256 i = 0; i < m; i++) {
@@ -549,7 +557,19 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
         uint256 received = _pullToken(asset, msg.sender, amount);
         if (received == 0) revert ZeroAmount();
 
-        sharesMinted = s.totalShares == 0 ? received : (received * s.totalShares) / s.totalAssets;
+        // Price-per-share = totalAssets / totalShares. A claim payout can drain an
+        // asset to totalAssets == 0 while shares are still outstanding (e.g. a holder
+        // who never exits). The normal branch would then divide by zero and brick the
+        // asset forever: no one can stake, and the asset can't be removed while shares
+        // remain. So when fully drained, mint as if each existing share is worth ~0 —
+        // received * totalShares — which lets fresh capital recapitalize the asset. The
+        // dead shares collectively reclaim only received/(1+received) < 1 base unit (a
+        // sub-wei rounding crumb, independent of how many dead shares exist).
+        sharesMinted = s.totalShares == 0
+            ? received
+            : s.totalAssets == 0
+                ? received * s.totalShares
+                : (received * s.totalShares) / s.totalAssets;
 
         s.totalAssets += received;
         s.totalShares += sharesMinted;
@@ -621,7 +641,12 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
         s.totalAssets -= assetsOut;
         delete unstakeRequests[asset][msg.sender];
 
-        asset.safeTransfer(msg.sender, assetsOut);
+        // assetsOut can round to 0 only when a claim payout has driven this
+        // asset's totalAssets far below totalShares (shares are then worth ~0).
+        // Still burn the shares so the staker can exit; skip the transfer both
+        // because there's nothing to send and because some ERC20s revert on a
+        // zero-value transfer (which would otherwise brick the exit).
+        if (assetsOut > 0) asset.safeTransfer(msg.sender, assetsOut);
         emit Unstaked(asset, msg.sender, r.shares, assetsOut);
     }
 
@@ -832,9 +857,23 @@ contract CoverPool is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, 
         return s.rewardPerShareStored + ((t - s.lastUpdateTime) * uint256(s.rewardRate) * REWARD_SCALE) / earningShares;
     }
 
-    /// @dev Roll `s.rewardPerShareStored` forward to now.
+    /// @dev Roll `s.rewardPerShareStored` forward to now. When no shares are
+    ///      earning (the whole base is unstaking or absent), the emission that
+    ///      would have streamed over the elapsed interval has no recipients;
+    ///      rather than strand it, defer it by pushing `periodFinish` out by the
+    ///      same span so it re-streams once an earning base returns
+    ///      (Synthetix-style carry-forward) — otherwise that USD8 would be locked
+    ///      in `rewardReserve` forever.
     function _checkpointReward(CoverPoolAssetState storage s) internal {
-        s.rewardPerShareStored = _rewardPerShare(s);
+        uint256 earningShares = uint256(s.totalShares) - s.unstakingShares;
+        uint256 t = block.timestamp < s.periodFinish ? block.timestamp : s.periodFinish;
+        if (t > s.lastUpdateTime) {
+            if (earningShares == 0) {
+                if (s.rewardRate != 0) s.periodFinish += uint64(t - s.lastUpdateTime);
+            } else {
+                s.rewardPerShareStored += ((t - s.lastUpdateTime) * uint256(s.rewardRate) * REWARD_SCALE) / earningShares;
+            }
+        }
         s.lastUpdateTime = uint64(block.timestamp < s.periodFinish ? block.timestamp : s.periodFinish);
     }
 

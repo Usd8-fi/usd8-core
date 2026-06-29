@@ -1,0 +1,26 @@
+{
+  "name": "usd8-offchain-settlement",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Open-source off-chain settlement computation for USD8 DeFi insurance. Anyone can run it locally to reproduce an incident's payout merkle root and verify a submitted root from chain history.",
+  "scripts": {
+    "build": "tsc",
+    "compute": "node dist/main.js compute",
+    "verify": "node dist/main.js verify",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@openzeppelin/merkle-tree": "^1.0.8",
+    "viem": "^2.53.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0",
+    "vitest": "^3.0.0"
+  },
+  "overrides": {
+    "ws": "^8.21.0",
+    "uuid": "^11.1.1"
+  }
+}

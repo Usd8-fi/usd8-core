@@ -39,7 +39,7 @@ contract CoverPoolTest is Test {
     address constant FEED = address(0xFEED); // dummy USD feed (off-chain only, unused on-chain)
 
     function setUp() public {
-        vm.roll(1000); // so openIncident's referenceBlock (block.number - 1) is a valid past block
+        vm.roll(1000); // so openClaimIncident's referenceBlock (block.number - 1) is a valid past block
         usdc = new MockERC20("USDC", "USDC", 6);
         dai = new MockERC20("DAI", "DAI", 18);
         wbtc = new MockERC20("WBTC", "WBTC", 8);
@@ -78,9 +78,7 @@ contract CoverPoolTest is Test {
     }
 
     function _deployDefi(ICoverPool pool_, address timelock_, address admin_) internal returns (DefiInsurance) {
-        DefiInsurance impl = new DefiInsurance();
-        bytes memory initData = abi.encodeCall(DefiInsurance.initialize, (pool_, timelock_, admin_));
-        return DefiInsurance(address(new ERC1967Proxy(address(impl), initData)));
+        return new DefiInsurance(pool_, timelock_, admin_);
     }
 
     function _stake(address who, MockERC20 token, uint256 amount) internal returns (uint256 sharesMinted) {
@@ -112,7 +110,7 @@ contract CoverPoolTest is Test {
 
         if (!_hasJoinableIncident(address(insuredToken))) {
             vm.prank(admin);
-            defi.openIncident(IERC20(address(insuredToken)), uint64(block.number - 1));
+            defi.openClaimIncident(IERC20(address(insuredToken)), uint64(block.number - 1));
         }
         vm.prank(user);
         claimId = defi.joinClaim(IERC20(address(insuredToken)), amount, 0, new uint256[](0), new uint256[](0));
@@ -376,6 +374,14 @@ contract CoverPoolTest is Test {
         vm.stopPrank();
     }
 
+    function test_ZeroSampleStepReverts() public {
+        DefiInsurance.SettlementParams memory p =
+            DefiInsurance.SettlementParams({twapLookbackBlocks: 50, holdingMarginBlocks: 20, sampleStepBlocks: 0});
+        vm.prank(admin);
+        vm.expectRevert(DefiInsurance.InvalidSettlementParams.selector);
+        defi.setSettlementParams(p);
+    }
+
     function test_IncidentConfigSnapshotAtOpen() public {
         DefiInsurance.SettlementParams memory p =
             DefiInsurance.SettlementParams({twapLookbackBlocks: 50, holdingMarginBlocks: 20, sampleStepBlocks: 5});
@@ -570,6 +576,33 @@ contract CoverPoolTest is Test {
         assertApproxEqAbs(pool.earned(IERC20(address(usdc)), bob), 25e18, 1e10);
     }
 
+    function test_RewardCarriesForwardWhenEarningBaseEmpties() public {
+        _stake(alice, usdc, 100e6);
+        _notify(usdc, 70e18); // 70 USD8 over 7 days = 10/day, alice solo
+
+        vm.warp(block.timestamp + 1 days); // day 1: alice earns ~10
+
+        // Alice queues her full position -> the asset's earning base is now 0.
+        vm.prank(alice);
+        pool.requestUnstake(IERC20(address(usdc)), 100e6);
+
+        // 3 days pass with zero earning base. Pre-fix this emission was stranded
+        // in rewardReserve forever; now it must be carried forward.
+        vm.warp(block.timestamp + 3 days);
+
+        vm.prank(alice);
+        pool.cancelUnstakeRequest(IERC20(address(usdc))); // base returns; gap deferred
+
+        // Warp well past the (extended) stream end so everything pays out.
+        vm.warp(block.timestamp + 14 days);
+
+        // Alice is the only staker across the whole stream, so she must ultimately
+        // receive the entire 70 USD8 — the 3 zero-base days were re-streamed, not lost.
+        vm.prank(alice);
+        uint256 got = pool.withdrawYield(IERC20(address(usdc)));
+        assertApproxEqAbs(got, 70e18, 1e12);
+    }
+
     function test_CancelUnstakeResumesEarning() public {
         _stake(alice, usdc, 100e6);
         _stake(bob, usdc, 100e6);
@@ -656,9 +689,9 @@ contract CoverPoolTest is Test {
         assertEq(defi.nextClaimId(), 1); // starts at 1
         uint256 cid = _registerClaim(bob, lp1, 50e18);
         assertEq(cid, 1); // first claim id is 1, NOT 2
-        (address user,,,,) = defi.claims(1);
+        (address user,,,,,) = defi.claims(1);
         assertEq(user, bob); // record stored at claims[1]
-        (address u2,,,,) = defi.claims(2);
+        (address u2,,,,,) = defi.claims(2);
         assertEq(u2, address(0)); // claims[2] is empty
         assertEq(defi.nextClaimId(), 2); // now points at 2 for the next claim
     }
@@ -675,7 +708,7 @@ contract CoverPoolTest is Test {
         MockERC20 lp3 = new MockERC20("LP3", "LP3", 18);
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.InsuredTokenNotApproved.selector, IERC20(address(lp3))));
-        defi.openIncident(IERC20(address(lp3)), uint64(block.number - 1));
+        defi.openClaimIncident(IERC20(address(lp3)), uint64(block.number - 1));
     }
 
     function test_RegisterClaimWithoutOpenIncidentReverts() public {
@@ -690,7 +723,28 @@ contract CoverPoolTest is Test {
     function test_OpenIncidentOnlyAdmin() public {
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.UnauthorizedAdmin.selector, bob));
         vm.prank(bob);
-        defi.openIncident(IERC20(address(lp1)), uint64(block.number - 1));
+        defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
+    }
+
+    function test_OneClaimPerAccountPerIncident() public {
+        uint256 cid = _registerClaim(bob, lp1, 50e18); // opens incident 1, bob joins
+
+        // A second claim by bob in the same incident reverts.
+        lp1.mint(bob, 20e18);
+        vm.startPrank(bob);
+        lp1.approve(address(defi), 20e18);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.DuplicateClaim.selector, uint256(1)));
+        defi.joinClaim(IERC20(address(lp1)), 20e18, 0, new uint256[](0), new uint256[](0));
+        vm.stopPrank();
+
+        // After cancelling, bob may re-file within the window.
+        vm.prank(bob);
+        defi.cancelClaim(cid);
+        vm.startPrank(bob);
+        lp1.approve(address(defi), 20e18);
+        uint256 cid2 = defi.joinClaim(IERC20(address(lp1)), 20e18, 0, new uint256[](0), new uint256[](0));
+        vm.stopPrank();
+        assertGt(cid2, cid);
     }
 
     function test_ClaimAfterWindowReverts() public {
@@ -714,7 +768,7 @@ contract CoverPoolTest is Test {
         vm.prank(admin);
         defi.addInsuredToken(IERC20(address(lp1)), 8000, FEED, address(0), "");
         uint256 cid = _registerClaim(carol, lp1, 30e18);
-        (, uint256 incidentId,,,) = defi.claims(cid);
+        (, uint256 incidentId,,,,) = defi.claims(cid);
         assertEq(incidentId, 2);
         assertEq(defi.activeIncidentId(), 2);
     }
@@ -982,7 +1036,7 @@ contract CoverPoolTest is Test {
     function test_PayoutClampedToPoolBalance() public {
         // Root says pay 500 USDC but the pool only holds 100 -> bob gets 100,
         // never more. Staking is frozen during the incident, so the balance
-        // can't have grown past what the TEE computed against.
+        // can't have grown past what the settlement computed against.
         _stake(alice, usdc, 100e6);
         uint256 cid = _registerClaim(bob, lp1, 50e18);
         vm.warp(block.timestamp + 5 days + 1);
@@ -1013,6 +1067,50 @@ contract CoverPoolTest is Test {
         vm.prank(carol);
         pool.stake(IERC20(address(usdc)), 100e6);
         assertGt(pool.userShares(IERC20(address(usdc)), carol), 0);
+    }
+
+    // This test contract acts as a payout module; it must answer incidentActive()
+    // (false = pool not frozen, so staking stays open after the drained payout).
+    function incidentActive() external pure returns (bool) {
+        return false;
+    }
+
+    function test_PayClaimOnlyByActiveModule() public {
+        _stake(alice, usdc, 100e6);
+        // bob is a registered payout module but never acquired the lock.
+        vm.prank(admin);
+        pool.setPayoutModule(bob, true);
+        uint256[] memory amounts = new uint256[](3);
+        amounts[0] = 10e6;
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(CoverPool.NotActivePayoutModule.selector, bob));
+        pool.payClaim(address(0xdead), amounts, 0);
+    }
+
+    function test_FullyDrainedAssetStaysStakeable() public {
+        _stake(alice, usdc, 100e6); // 100e6 shares, 1:1
+
+        // Drain usdc to exactly zero via a payout, leaving alice's shares outstanding.
+        vm.prank(admin);
+        pool.setPayoutModule(address(this), true);
+        pool.lockPool(); // become the active payout module (required by payClaim)
+        uint256[] memory amounts = new uint256[](3); // [usdc, dai, wbtc]
+        amounts[0] = 100e6;
+        pool.payClaim(address(0xdead), amounts, 0);
+        assertEq(pool.totalAssets(IERC20(address(usdc))), 0);
+        assertGt(pool.totalShares(IERC20(address(usdc))), 0);
+
+        // Recapitalization must not revert (would div-by-zero pre-fix). New staker
+        // mints received * totalShares and recovers ~everything; dead shares keep <1 wei.
+        uint256 minted = _stake(carol, usdc, 50e6);
+        assertEq(minted, 50e6 * 100e6);
+
+        vm.startPrank(carol);
+        pool.requestUnstake(IERC20(address(usdc)), minted);
+        vm.warp(block.timestamp + 7 days + 1);
+        uint256 out = pool.completeUnstake(IERC20(address(usdc)));
+        vm.stopPrank();
+        assertEq(out, 50e6 - 1); // ≤1-wei rounding crumb to the dead shares
     }
 
     function test_AdminSweepsForfeitedInsuredTokens() public {
@@ -1111,7 +1209,7 @@ contract CoverPoolTest is Test {
         token.mint(user, amount);
         booster.mint(user, id, qty);
         vm.prank(admin);
-        defi.openIncident(IERC20(address(token)), uint64(block.number - 1));
+        defi.openClaimIncident(IERC20(address(token)), uint64(block.number - 1));
         uint256[] memory ids = new uint256[](1);
         uint256[] memory amounts = new uint256[](1);
         ids[0] = id;
@@ -1157,7 +1255,7 @@ contract CoverPoolTest is Test {
         // available; here the settlement just attests scoreSpent in the leaf).
         lp1.mint(bob, 50e18);
         vm.prank(admin);
-        defi.openIncident(IERC20(address(lp1)), uint64(block.number - 1));
+        defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
         vm.startPrank(bob);
         lp1.approve(address(defi), 50e18);
         uint256 cid = defi.joinClaim(IERC20(address(lp1)), 50e18, 500, new uint256[](0), new uint256[](0));
@@ -1194,13 +1292,45 @@ contract CoverPoolTest is Test {
         assertEq(booster.balanceOf(bob, 1), 3);
     }
 
+    function test_SetBoosterNFTBlockedDuringIncident() public {
+        _registerClaim(bob, lp1, 50e18); // opens an incident -> pool frozen
+        vm.prank(admin);
+        vm.expectRevert(CoverPool.PoolFrozen.selector);
+        pool.setBoosterNFT(address(0xBEEF));
+
+        // Resolves after the dispute period -> setting reopens.
+        vm.warp(block.timestamp + 5 days + 4 days + 1);
+        vm.prank(admin);
+        pool.setBoosterNFT(address(0xBEEF));
+        assertEq(pool.boosterNFT(), address(0xBEEF));
+    }
+
+    function test_BoosterReturnUsesSnapshotAfterCollectionChange() public {
+        // bob escrows 3 of booster id 1 from the original collection.
+        uint256 cid = _openWithBooster(bob, lp1, 50e18, 1, 3);
+
+        // Incident voids (no root past the submit deadline) -> pool unfreezes.
+        vm.warp(block.timestamp + 5 days + 4 days + 1);
+
+        // Governance repoints the pool's booster collection to a fresh one.
+        MockERC1155 boosterB = new MockERC1155();
+        vm.prank(admin);
+        pool.setBoosterNFT(address(boosterB));
+
+        // Withdraw returns bob's boosters from the ORIGINAL collection (snapshot),
+        // not the new one (which holds nothing) — no revert, no stranding.
+        vm.prank(bob);
+        defi.withdrawNonFinalizedClaim(cid);
+        assertEq(booster.balanceOf(bob, 1), 3);
+    }
+
     function test_BoosterCommitRequiresNftSet() public {
         vm.prank(admin);
         pool.setBoosterNFT(address(0));
 
         booster.mint(bob, 1, 1);
         vm.prank(admin);
-        defi.openIncident(IERC20(address(lp1)), uint64(block.number - 1));
+        defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
         uint256[] memory ids = new uint256[](1);
         uint256[] memory amounts = new uint256[](1);
         ids[0] = 1;
@@ -1217,7 +1347,7 @@ contract CoverPoolTest is Test {
     function test_BoosterArityMismatchReverts() public {
         booster.mint(bob, 1, 1);
         vm.prank(admin);
-        defi.openIncident(IERC20(address(lp1)), uint64(block.number - 1));
+        defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
         uint256[] memory ids = new uint256[](1);
         ids[0] = 1;
         uint256[] memory amounts = new uint256[](2); // length mismatch
@@ -1328,7 +1458,7 @@ contract CoverPoolTest is Test {
         // even by the admin on a different insured token.
         vm.prank(admin);
         vm.expectRevert(DefiInsurance.IncidentsActive.selector);
-        defi.openIncident(IERC20(address(lp2)), uint64(block.number - 1));
+        defi.openClaimIncident(IERC20(address(lp2)), uint64(block.number - 1));
     }
 
     function test_NewIncidentOpensAfterPriorResolves() public {

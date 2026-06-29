@@ -16,8 +16,8 @@ import {
 
 const BPS = 10_000n;
 // Hard-coded booster policy, mirrors CoverPool.BOOSTER_BOOST_BPS: each committed
-// unit of booster id 0 adds +1% to the history-score multiplier.
-const BOOSTER_ID = 0n;
+// unit of booster id 1 adds +1% to the insurance-score multiplier.
+const BOOSTER_ID = 1n;
 const BOOSTER_BOOST_BPS = 100n;
 
 export interface SettledRow {
@@ -34,7 +34,7 @@ export interface SettledRow {
 
 export interface Settlement {
   incidentId: bigint;
-  incidentBlock: bigint; // B — detected cliff edge
+  referenceBlock: bigint; // admin-pinned pre-incident block losses are valued against
   twapRatio: bigint;
   inputHash: `0x${string}`;
   root: `0x${string}`;
@@ -47,7 +47,7 @@ export interface Settlement {
  * register/cancel events in true chain order. Each `register` chains
  * `keccak256(abi.encode(h, claimId, user, escrow, scoreToSpend, boosterIds,
  * boosterAmounts))`; each `cancel` chains `keccak256(abi.encode(h, claimId,
- * "CANCEL"))` — byte-identical to CoverPool's `_registerClaim`/`cancelClaim`.
+ * "CANCEL"))` — byte-identical to DefiInsurance's `joinClaim`/`cancelClaim`.
  */
 export function computeInputHash(events: InputEvent[]): `0x${string}` {
   let h: `0x${string}` = `0x${"00".repeat(32)}`;
@@ -87,6 +87,7 @@ export function computeInputHash(events: InputEvent[]): `0x${string}` {
  * measured against — no on-chain drop detection (the admin already opened).
  */
 export async function twapRatioBefore(client: PublicClient, cfg: IncidentConfig, b: bigint): Promise<bigint> {
+  if (cfg.params.sampleStepBlocks === 0n) throw new Error("invalid settlement params: sampleStepBlocks is zero");
   const w = cfg.params.twapLookbackBlocks;
   const start = b > w ? b - w : 1n;
   let sum = 0n;
@@ -99,12 +100,16 @@ export async function twapRatioBefore(client: PublicClient, cfg: IncidentConfig,
 }
 
 /**
- * USD8 history score EARNED by `user` to the window-end block: the cumulative
+ * USD8 insurance score EARNED by `user` as of `asOfBlock`: the cumulative
  * token·block integral of each scored token from its `startBlock`, summed and
  * weighted by its on-chain rate, then boosted. This is the gross figure;
  * already-spent score (from the on-chain ledger) is subtracted by the caller.
  * Non-expiring (not a time-weighted average), so holding longer always grows
- * it. Each committed unit of booster id 0 adds BOOSTER_BOOST_BPS per unit.
+ * it. Each committed unit of booster id 1 adds BOOSTER_BOOST_BPS per unit.
+ *
+ * Anchored at the pre-incident `referenceBlock` (not window-end): otherwise a
+ * claimant could pile scored tokens into their wallet DURING the claim window
+ * to inflate their token·block integral and grab a larger payout share.
  */
 export async function earnedScoreOf(
   client: PublicClient,
@@ -112,15 +117,15 @@ export async function earnedScoreOf(
   user: `0x${string}`,
   boosterIds: bigint[],
   boosterAmounts: bigint[],
-  windowEndBlock: bigint
+  asOfBlock: bigint
 ): Promise<bigint> {
   let score = 0n;
   for (const st of cfg.scoredTokens) {
-    if (st.startBlock >= windowEndBlock) continue;
-    const integral = await tokenBlockIntegral(client, st.token, user, st.startBlock, windowEndBlock);
+    if (st.startBlock >= asOfBlock) continue;
+    const integral = await tokenBlockIntegral(client, st.token, user, st.startBlock, asOfBlock);
     score += integral * st.scorePerTokenPerBlock;
   }
-  // Booster multiplier: each committed unit of id 0 adds BOOSTER_BOOST_BPS
+  // Booster multiplier: each committed unit of id 1 adds BOOSTER_BOOST_BPS
   // (every other id weighs 0). multiplier = (BPS + Σ amount × bps) / BPS.
   let boostBps = 0n;
   for (let i = 0; i < boosterIds.length; i++) {
@@ -130,8 +135,8 @@ export async function earnedScoreOf(
 }
 
 /**
- * Full settlement for one incident. Throws if the incident has no valid
- * cliff (caller must NOT sign anything — that is the void path).
+ * Full settlement for one incident: the claimant table, per-asset payout
+ * amounts, and the merkle root the admin submits / anyone verifies.
  */
 export async function settle(
   client: PublicClient,
@@ -147,7 +152,7 @@ export async function settle(
     assetBalances: bigint[]; // pool totalAssets per asset at windowEndBlock
     assetUsd1e18: bigint[]; // USD price per whole token at windowEndBlock
     assetDecimals: number[];
-    spentOf: (user: `0x${string}`) => bigint; // history score already spent (on-chain ledger)
+    spentOf: (user: `0x${string}`) => bigint; // insurance score already spent (on-chain ledger)
   }
 ): Promise<Settlement> {
   const inputHash = computeInputHash(events);
@@ -167,14 +172,25 @@ export async function settle(
     .filter((e) => !events.some((c) => c.kind === "cancel" && c.claimId === e.claimId));
   const rows: SettledRow[] = [];
   for (const e of live) {
-    // Eligible = continuous min holding since B − margin, capped at escrow.
-    // Min-balance replay makes cross-claimant double-counting impossible.
-    const minHeld = await minBalanceOver(client, opts.insuredToken, e.user, holdFrom, opts.windowEndBlock);
+    // Eligible = continuous min holding over [B − margin, joinBlock − 1], capped
+    // at escrow. The window ends one block BEFORE this claim's joinClaim — which
+    // escrows the insured token out of the wallet in the same block as the
+    // register event — so the escrow transfer never depresses the min, yet the
+    // claimant must have held continuously from before the incident right up to
+    // filing. This closes the [referenceBlock, joinBlock] gap (no sell-at-par-
+    // then-rebuy-cheap), while the LOSS is still priced at the pre-incident
+    // referenceBlock (twap above). Extending the window can only lower the min,
+    // never raise it, so honest continuous holders are unaffected. Min-balance
+    // replay makes cross-claimant double-counting impossible.
+    const minHeld = await minBalanceOver(client, opts.insuredToken, e.user, holdFrom, e.blockNumber - 1n);
     const eligible = minHeld < e.amount ? minHeld : e.amount;
     // lossUsd = eligible × TWAP ratio × underlying USD price (1e18).
     const lossUsd = (((eligible * twap) / WAD) * underlyingUsd) / 10n ** BigInt(opts.insuredDecimals);
-    // Earned score to date, minus what's already been spent on prior claims.
-    const earned = await earnedScoreOf(client, cfg, e.user, e.boosterIds, e.boosterAmounts, opts.windowEndBlock);
+    // Earned score as of referenceBlock, minus what's already been spent on
+    // prior claims. Pinned pre-incident (like eligibility) so the claim window
+    // can't be used to farm fresh score. The contract caps each account to one
+    // live claim per incident, so a user's whole budget maps to a single row.
+    const earned = await earnedScoreOf(client, cfg, e.user, e.boosterIds, e.boosterAmounts, opts.referenceBlock);
     const spent = opts.spentOf(e.user);
     const available = earned > spent ? earned - spent : 0n;
     // The claimant spends what they requested, capped to availability (option A:
@@ -217,16 +233,11 @@ export async function settle(
     );
   }
 
-  // OZ standard merkle tree — leaf encoding matches CoverPool exactly:
-  // keccak256(bytes.concat(keccak256(abi.encode(incidentId, claimId, user, amounts, scoreSpent)))).
-  const tree = StandardMerkleTree.of(
-    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent] as const) as unknown as any[][],
-    ["uint256", "uint256", "address", "uint256[]", "uint256"]
-  );
+  const tree = settlementTree(incidentId, rows);
 
   return {
     incidentId,
-    incidentBlock: refBlock,
+    referenceBlock: refBlock,
     twapRatio: twap,
     inputHash,
     root: tree.root as `0x${string}`,
@@ -235,11 +246,25 @@ export async function settle(
   };
 }
 
-export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
-  const tree = StandardMerkleTree.of(
-    s.rows.map((r) => [s.incidentId, r.claimId, r.user, r.amounts, r.scoreSpent] as const) as unknown as any[][],
-    ["uint256", "uint256", "address", "uint256[]", "uint256"]
+// Leaf encoding — SINGLE source of truth. The on-chain leaf in
+// DefiInsurance.finalizeClaim (keccak256(bytes.concat(keccak256(abi.encode(
+// incidentId, claimId, user, amounts, scoreSpent))))) and the FFI helper both
+// mirror this exact tuple and type order; drift here breaks every on-chain proof.
+export const LEAF_ENCODING = ["uint256", "uint256", "address", "uint256[]", "uint256"] as const;
+
+/** Build the OZ StandardMerkleTree over settlement rows using {LEAF_ENCODING}. */
+export function settlementTree(
+  incidentId: bigint,
+  rows: { claimId: bigint; user: `0x${string}`; amounts: bigint[]; scoreSpent: bigint }[]
+) {
+  return StandardMerkleTree.of(
+    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent]) as unknown as any[][],
+    LEAF_ENCODING as unknown as string[]
   );
+}
+
+export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
+  const tree = settlementTree(s.incidentId, s.rows);
   for (const [i, v] of tree.entries()) {
     if ((v as any[])[1] === claimId) return tree.getProof(i) as `0x${string}`[];
   }

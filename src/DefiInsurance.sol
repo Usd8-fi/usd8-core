@@ -14,8 +14,6 @@ import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 
 /// @notice Minimal view of the deployed ERC-1155 USD8Booster: standard
@@ -64,9 +62,11 @@ interface ICoverPool {
 ///         off-chain from {Incident.inputHash}; anyone reproduces it and the
 ///         admin/timelock can {voidSettlement} a bad root within the dispute
 ///         window (deny-only — never redirects funds).
-/// @dev    UUPS upgradeable; timelock authorizes upgrades. Holds insured-token
+/// @dev    Non-upgradeable. To change it, deploy a fresh instance and re-point
+///         CoverPool's payout-module registry (only between incidents — the old
+///         instance still custodies escrow + open claims). Holds insured-token
 ///         escrow and booster NFTs (ERC1155Holder).
-contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, ERC1155Holder {
+contract DefiInsurance is ReentrancyGuardTransient, ERC1155Holder {
     using SafeERC20 for IERC20;
 
     // ─────────────────────────── State (roles + pool) ───────────────────────────
@@ -173,12 +173,17 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
     /// @param insuredTokenAmount  Insured token escrowed at registration.
     /// @param finalized           True once {finalizeClaim} has paid out.
     /// @param closed              True once cancelled or withdrawn.
+    /// @param boosterCollection   The {ICoverPool.boosterNFT} address at join time
+    ///                            (snapshotted so burn/return always hit the exact
+    ///                            collection the boosters were escrowed in, even if
+    ///                            the pool later repoints it). Zero if no boosters.
     struct Claim {
         address user;
         uint256 incidentId;
         uint128 insuredTokenAmount;
         bool finalized;
         bool closed;
+        address boosterCollection;
     }
 
     /// @notice All claims by id. Id 0 is reserved.
@@ -186,6 +191,13 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
 
     /// @notice Next claim id to assign. Starts at 1.
     uint256 public nextClaimId;
+
+    /// @notice Whether an account already has a live claim on an incident. At
+    ///         most one claim per (incident, account): set on {joinClaim},
+    ///         cleared on {cancelClaim}. This caps each account's insurance-score
+    ///         spend at its single available budget — a user can't split into
+    ///         multiple claims to multiply their score-weighted payout share.
+    mapping(uint256 incidentId => mapping(address account => bool)) public hasActiveClaim;
 
     /// @notice Booster units ((id, amount) pairs of the pool's booster
     ///         collection) escrowed by a claim while open, as parallel arrays.
@@ -231,7 +243,7 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
     ///         active and snapshot per incident at open.
     SettlementParams public settlementParams;
 
-    /// @notice Full settlement config snapshot taken at {openIncident}, used
+    /// @notice Full settlement config snapshot taken at {openClaimIncident}, used
     ///         off-chain (and any disputer) for the incident's computation. Pins
     ///         all tunable config so a later change can never alter an in-flight
     ///         or settled incident. `scoredTokens` is snapshot from the pool.
@@ -253,9 +265,6 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
     /// @notice Settlement config snapshot per incident, frozen at open.
     mapping(uint256 incidentId => IncidentConfig) internal incidentConfig;
 
-    /// @dev Reserved storage slots for future upgrades (sequential storage).
-    uint256[50] private __gap;
-
     // ─────────────────────────── Errors ──────────────────────────
 
     error ZeroAmount();
@@ -273,6 +282,7 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
     error BoosterArityMismatch();
     error UnauthorizedClaim(uint256 claimId);
     error ClaimAlreadyResolved(uint256 claimId);
+    error DuplicateClaim(uint256 incidentId);
     error NotActiveIncident(uint256 incidentId);
     error OutsideSettlementPhase(uint256 incidentId);
     error RootAlreadySet(uint256 incidentId);
@@ -282,6 +292,7 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
     error ClaimNotWithdrawable(uint256 claimId);
     error IncidentsActive();
     error NotSweepable(uint256 requested, uint256 available);
+    error InvalidSettlementParams();
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -322,21 +333,19 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
         _;
     }
 
-    // ─────────────────────────── Constructor / initializer ─────────────────────
+    // ─────────────────────────── Constructor ─────────────────────
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
-
-    /// @notice Initialize the proxy. Callable once.
-    /// @param _coverPool       CoverPool capital base (non-zero). This contract must
-    ///                    be registered as a payout module on it (`setPayoutModule`).
-    /// @param _timelock   Slow governance role; authorizes UUPS upgrades. Its
-    ///                    `minDelay` MUST be comfortably under {DISPUTE_PERIOD}
-    ///                    so it can {voidSettlement} a bad root in time.
+    /// @notice Deploy the (non-upgradeable) insurance product. To replace it,
+    ///         deploy a fresh DefiInsurance and re-point CoverPool's payout-module
+    ///         registry — done only while no incident is in flight, since the old
+    ///         contract still custodies escrow and any open claims.
+    /// @param _coverPool  CoverPool capital base (non-zero). This contract must be
+    ///                    registered as a payout module on it (`setPayoutModule`).
+    /// @param _timelock   Slow governance role. Its `minDelay` MUST be comfortably
+    ///                    under {DISPUTE_PERIOD} so it can {voidSettlement} a bad
+    ///                    root in time.
     /// @param _admin      Fast operational role.
-    function initialize(ICoverPool _coverPool, address _timelock, address _admin) external initializer {
+    constructor(ICoverPool _coverPool, address _timelock, address _admin) {
         if (address(_coverPool) == address(0) || _timelock == address(0) || _admin == address(0)) revert ZeroAddress();
         coverPool = _coverPool;
         timelock = _timelock;
@@ -344,8 +353,6 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
         nextIncidentId = 1;
         nextClaimId = 1;
     }
-
-    function _authorizeUpgrade(address) internal override onlyTimelock {}
 
     // ═══════════════════════════ Insured token management (timelock) ═══════════════════════════
 
@@ -444,6 +451,8 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
     /// @param p  New settlement windows. See {SettlementParams}.
     function setSettlementParams(SettlementParams calldata p) external onlyTimelock {
         if (_hasActiveIncident()) revert IncidentsActive();
+        // sampleStepBlocks is the TWAP loop stride off-chain; 0 would never advance.
+        if (p.sampleStepBlocks == 0) revert InvalidSettlementParams();
         settlementParams = p;
         emit SettlementParamsSet(p);
     }
@@ -474,7 +483,7 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
     /// @param  referenceBlock  Pre-incident block (`< block.number`, non-zero)
     ///                         the admin pins as the "before" valuation point.
     /// @return incidentId      The newly opened incident id.
-    function openIncident(IERC20 insuredToken, uint64 referenceBlock)
+    function openClaimIncident(IERC20 insuredToken, uint64 referenceBlock)
         external
         onlyAdminOrTimelock
         returns (uint256 incidentId)
@@ -548,6 +557,10 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
             if (sameToken) revert ClaimWindowClosed(insuredToken, incidents[incidentId].windowEndTime);
             revert NoOpenIncident(insuredToken);
         }
+        // One live claim per account per incident: stops a user splitting one
+        // insurance-score budget across many claims to inflate their payout share.
+        if (hasActiveClaim[incidentId][msg.sender]) revert DuplicateClaim(incidentId);
+        hasActiveClaim[incidentId][msg.sender] = true;
 
         uint128 escrow = uint128(_pullToken(insuredToken, msg.sender, insuredTokenAmount));
         if (escrow == 0) revert ZeroAmount();
@@ -555,7 +568,12 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
 
         claimId = nextClaimId++;
         claims[claimId] = Claim({
-            user: msg.sender, incidentId: incidentId, insuredTokenAmount: escrow, finalized: false, closed: false
+            user: msg.sender,
+            incidentId: incidentId,
+            insuredTokenAmount: escrow,
+            finalized: false,
+            closed: false,
+            boosterCollection: address(0)
         });
 
         if (boosterIds.length != 0) {
@@ -565,6 +583,7 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
             IERC1155Burnable(booster).safeBatchTransferFrom(msg.sender, address(this), boosterIds, boosterAmounts, "");
             _claimBoosterIds[claimId] = boosterIds;
             _claimBoosterAmounts[claimId] = boosterAmounts;
+            claims[claimId].boosterCollection = booster; // snapshot for burn/return
         }
 
         Incident storage incRef = incidents[incidentId];
@@ -597,6 +616,7 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
 
         c.closed = true;
         inc.resolvedCount += 1;
+        hasActiveClaim[c.incidentId][msg.sender] = false; // may re-file within the window
         inc.inputHash = keccak256(abi.encode(inc.inputHash, claimId, "CANCEL"));
         escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
@@ -682,8 +702,9 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
         escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
 
         // Burn the committed booster batch — consumed on payout. No-op if none.
+        // Burn from the collection snapshotted at join, not the pool's current one.
         if (_claimBoosterIds[claimId].length != 0) {
-            IERC1155Burnable(coverPool.boosterNFT()).burnBatch(
+            IERC1155Burnable(c.boosterCollection).burnBatch(
                 address(this), _claimBoosterIds[claimId], _claimBoosterAmounts[claimId]
             );
             delete _claimBoosterIds[claimId];
@@ -698,11 +719,12 @@ contract DefiInsurance is Initializable, UUPSUpgradeable, ReentrancyGuardTransie
         emit ClaimFinalized(claimId, msg.sender);
     }
 
-    /// @dev Return a claim's committed booster batch to `to` (cancel/withdraw).
+    /// @dev Return a claim's committed booster batch to `to` (cancel/withdraw),
+    ///      from the collection snapshotted at join — not the pool's current one.
     function _returnBoosters(uint256 claimId, address to) internal {
         uint256[] storage ids = _claimBoosterIds[claimId];
         if (ids.length == 0) return;
-        IERC1155Burnable(coverPool.boosterNFT()).safeBatchTransferFrom(
+        IERC1155Burnable(claims[claimId].boosterCollection).safeBatchTransferFrom(
             address(this), to, ids, _claimBoosterAmounts[claimId], ""
         );
         delete _claimBoosterIds[claimId];

@@ -1,15 +1,14 @@
-// All chain reads. Inside the enclave these go through the parent's
-// vsock→TCP proxy; TLS terminates in here, so the parent can delay or drop
-// traffic but never tamper with it.
+// All chain reads. Plain read-only RPC calls against a public archive node.
 
 import { createPublicClient, http, parseAbi, parseAbiItem, type PublicClient } from "viem";
 import { CONFIG } from "./config.js";
 
 export const WAD = 10n ** 18n;
 
-// CoverPool surface the TEE reads. All settlement config comes from the
-// per-incident snapshot (getIncidentConfig); per-stake-asset price feeds from
-// coverPoolAssets(...).usdPriceFeed; the claimant's score floor from scoreEpoch.
+// Contract surface this tool reads. Settlement config comes from the
+// per-incident snapshot (DefiInsurance.getIncidentConfig); per-stake-asset
+// price feeds from coverPoolAssets(...).usdPriceFeed; spent score from the
+// CoverPool ledger.
 export const COVER_POOL_ABI = parseAbi([
   "function incidents(uint256) view returns (address insuredToken, uint64 windowEndTime, bytes32 root, bytes32 inputHash, uint256 claimCount, uint256 resolvedCount, uint64 rootSubmittedAt, uint64 referenceBlock)",
   "function claims(uint256) view returns (address user, uint256 incidentId, uint128 insuredTokenAmount, bool finalized, bool closed)",
@@ -37,7 +36,7 @@ const ERC20_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function decimals() view returns (uint8)",
 ]);
-const LEDGER_ABI = parseAbi(["function historyScoreSpent(address) view returns (uint256)"]);
+const LEDGER_ABI = parseAbi(["function insuranceScoreSpent(address) view returns (uint256)"]);
 
 // Mirror of the on-chain config structs (see CoverPool).
 export interface SettlementParams {
@@ -71,7 +70,7 @@ export interface InputEvent {
   claimId: bigint;
   user: `0x${string}`;
   amount: bigint; // register only (escrow actually received)
-  scoreToSpend: bigint; // register only — requested history score to spend
+  scoreToSpend: bigint; // register only — requested insurance score to spend
   boosterIds: bigint[]; // register only — committed booster tier ids
   boosterAmounts: bigint[]; // register only — units per id (parallel)
   blockNumber: bigint;
@@ -234,13 +233,13 @@ export async function decimalsOf(client: PublicClient, token: `0x${string}`): Pr
   return (await client.readContract({ address: token, abi: ERC20_ABI, functionName: "decimals" })) as number;
 }
 
-/** The history-score spend ledger — the CoverPool itself holds it. */
-export async function historyScoreLedgerOf(_client: PublicClient): Promise<`0x${string}`> {
+/** The insurance-score spend ledger — the CoverPool itself holds it. */
+export async function insuranceScoreLedgerOf(_client: PublicClient): Promise<`0x${string}`> {
   return CONFIG.coverPool;
 }
 
-/** How much history score `user` has already spent, pinned at `blockNumber`. */
-export async function historyScoreSpentOf(
+/** How much insurance score `user` has already spent, pinned at `blockNumber`. */
+export async function insuranceScoreSpentOf(
   client: PublicClient,
   ledger: `0x${string}`,
   user: `0x${string}`,
@@ -250,7 +249,7 @@ export async function historyScoreSpentOf(
   return (await client.readContract({
     address: ledger,
     abi: LEDGER_ABI,
-    functionName: "historyScoreSpent",
+    functionName: "insuranceScoreSpent",
     args: [user],
     blockNumber,
   })) as bigint;
@@ -307,7 +306,7 @@ export async function minBalanceOver(
 
 /**
  * Cumulative token·block integral of `who`'s `token` balance over [fromBlock,
- * toBlock] — `Σ balance × blockDuration`. This is the USD8 history-score
+ * toBlock] — `Σ balance × blockDuration`. This is the USD8 insurance-score
  * primitive: a NON-expiring accumulator (not a time-weighted average), so
  * holding longer always grows the score. Event-replayed; weighted by block
  * distance; result is in token-base-units × blocks.

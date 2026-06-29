@@ -137,11 +137,4 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
         emit TreasuryChanged(treasury, newTreasury);
         treasury = newTreasury;
     }
-
-    // ═══════════════════════════ Storage gaps ═══════════════════════════
-
-    /// @dev Reserved storage slots for future variables added in upgrades.
-    ///      Prevents storage-layout conflicts with future OZ library versions
-    ///      that may append state to the parent contracts.
-    uint256[48] private __gap;
 }

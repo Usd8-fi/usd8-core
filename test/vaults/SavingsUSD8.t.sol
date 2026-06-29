@@ -246,7 +246,7 @@ contract SavingsUSD8Test is Test {
         vault.addStrategy(s, type(uint256).max);
     }
 
-    function test_AdminCanRunFastOpsButNotAddStrategy() public {
+    function test_AdminCanMoveFundsButNotCurateStrategies() public {
         MockUSD8Strategy s = new MockUSD8Strategy(usd8);
         _approve(s);
 
@@ -256,19 +256,27 @@ contract SavingsUSD8Test is Test {
         vault.deposit(25e18, alice);
         vm.stopPrank();
 
-        // Fast ops: fund moves and force-removal.
+        // Fast ops: fund moves are admin-allowed.
         vm.startPrank(admin);
         vault.depositToStrategy(s, 25e18);
         vault.withdrawFromStrategy(s, 25e18);
-        vault.removeStrategy(s);
         vm.stopPrank();
-        assertEq(vault.strategiesLength(), 0);
 
-        // Strategy approval is timelock-only.
+        // Curation is timelock-only: admin can neither add nor remove a strategy
+        // (removal can orphan funded assets -> unbacked shares, so it's gated).
+        vm.expectRevert(_unauthorizedTimelock(admin));
+        vm.prank(admin);
+        vault.removeStrategy(s);
+
         MockUSD8Strategy s2 = new MockUSD8Strategy(usd8);
         vm.expectRevert(_unauthorizedTimelock(admin));
         vm.prank(admin);
         vault.addStrategy(s2, type(uint256).max);
+
+        // Timelock can remove.
+        vm.prank(timelock);
+        vault.removeStrategy(s);
+        assertEq(vault.strategiesLength(), 0);
     }
 
     function test_DepositToStrategyAndIncludeInRawAssets() public {
