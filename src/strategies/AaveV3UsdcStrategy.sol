@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -36,7 +36,7 @@ interface IAaveV3Pool {
 ///
 ///         Atomic withdrawal: Aave's withdraw either delivers the
 ///         requested amount exactly or reverts. A return value less
-///         than `amount` is treated as a strategy bug and reverts
+///         than amount is treated as a strategy bug and reverts
 ///         explicitly via {WithdrawShort}.
 ///
 ///         Liquidity caveat: Aave's withdraw can revert under high
@@ -98,7 +98,7 @@ contract AaveV3UsdcStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Caller (Treasury) is expected to have pushed `amount` USDC
+    /// @dev Caller (Treasury) is expected to have pushed amount USDC
     ///      to this contract immediately before this call.
     function deploy(uint256 amount) external onlyTreasury {
         AAVE_POOL.supply(address(USDC), amount, address(this), 0);

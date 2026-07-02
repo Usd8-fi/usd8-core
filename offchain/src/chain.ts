@@ -12,7 +12,7 @@ export const WAD = 10n ** 18n;
 export const COVER_POOL_ABI = parseAbi([
   "function incidents(uint256) view returns (address insuredToken, uint64 windowEndTime, bytes32 root, bytes32 inputHash, uint256 claimCount, uint256 resolvedCount, uint64 rootSubmittedAt, uint64 referenceBlock)",
   "function claims(uint256) view returns (address user, uint256 incidentId, uint128 insuredTokenAmount, bool finalized, bool closed)",
-  "function getIncidentConfig(uint256) view returns ((uint256 coverageBps, address priceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData, (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks) params, (address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[] scoredTokens))",
+  "function getIncidentConfig(uint256) view returns ((uint256 coverageBps, address underlyingPriceOracle, address adapter, (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks) params, (address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[] scoredTokens))",
   "function getClaimBoosters(uint256) view returns (uint256[])",
   "function coverPoolAssetListLength() view returns (uint256)",
   "function coverPoolAssetList(uint256) view returns (address)",
@@ -21,7 +21,7 @@ export const COVER_POOL_ABI = parseAbi([
 ]);
 
 export const CLAIM_REGISTERED = parseAbiItem(
-  "event ClaimRegistered(uint256 indexed claimId, uint256 indexed incidentId, address indexed user, uint128 insuredTokenAmount, uint256 scoreToSpend, uint256[] boosterIds, uint256[] boosterAmounts)"
+  "event ClaimRegistered(uint256 indexed claimId, uint256 indexed incidentId, address indexed user, uint128 insuredTokenAmount, uint256 scoreToSpend, uint256 boosterAmount)"
 );
 export const CLAIM_CANCELLED = parseAbiItem("event ClaimCancelled(uint256 indexed claimId, address indexed user)");
 export const ERC20_TRANSFER = parseAbiItem(
@@ -51,9 +51,8 @@ export interface ScoredToken {
 }
 export interface IncidentConfig {
   coverageBps: bigint;
-  priceOracle: `0x${string}`;
-  underlyingConversionAddress: `0x${string}`;
-  underlyingConversionCallData: `0x${string}`;
+  underlyingPriceOracle: `0x${string}`;
+  adapter: `0x${string}`;
   params: SettlementParams;
   scoredTokens: ScoredToken[];
 }
@@ -71,8 +70,7 @@ export interface InputEvent {
   user: `0x${string}`;
   amount: bigint; // register only (escrow actually received)
   scoreToSpend: bigint; // register only — requested insurance score to spend
-  boosterIds: bigint[]; // register only — committed booster tier ids
-  boosterAmounts: bigint[]; // register only — units per id (parallel)
+  boosterAmount: bigint; // register only — units of the canonical booster committed
   blockNumber: bigint;
   logIndex: number;
 }
@@ -115,8 +113,7 @@ export async function readInputEvents(
       user: r.args.user!,
       amount: r.args.insuredTokenAmount!,
       scoreToSpend: r.args.scoreToSpend!,
-      boosterIds: [...(r.args.boosterIds ?? [])],
-      boosterAmounts: [...(r.args.boosterAmounts ?? [])],
+      boosterAmount: r.args.boosterAmount ?? 0n,
       blockNumber: r.blockNumber!,
       logIndex: r.logIndex!,
     })),
@@ -128,8 +125,7 @@ export async function readInputEvents(
         user: c.args.user!,
         amount: 0n,
         scoreToSpend: 0n,
-        boosterIds: [] as bigint[],
-        boosterAmounts: [] as bigint[],
+        boosterAmount: 0n,
         blockNumber: c.blockNumber!,
         logIndex: c.logIndex!,
       })),
@@ -186,20 +182,18 @@ export async function blockAtTimestamp(client: PublicClient, ts: bigint): Promis
 }
 
 /**
- * Insured-token → underlying ratio at `blockNumber`, as the contract's recipe
- * specifies: `staticcall(conversionAddress, conversionCallData)` → uint256
- * (WAD-normalized underlying-per-token). `address(0)` ⇒ identity (the token IS
- * the underlying, e.g. an LP), ratio = 1e18.
+ * Insured-token → underlying ratio at `blockNumber`: the token's
+ * IInsuredTokenAdapter.valuationRate() (WAD-normalized underlying per 1e18
+ * token). `address(0)` ⇒ identity (the token IS the underlying), ratio = 1e18.
  */
-export async function ratioAt(
-  client: PublicClient,
-  conversionAddress: `0x${string}`,
-  conversionCallData: `0x${string}`,
-  blockNumber: bigint
-): Promise<bigint> {
-  if (conversionAddress === "0x0000000000000000000000000000000000000000") return WAD;
-  const res = await client.call({ to: conversionAddress, data: conversionCallData, blockNumber });
-  return BigInt(res.data ?? "0x0");
+export async function ratioAt(client: PublicClient, adapter: `0x${string}`, blockNumber: bigint): Promise<bigint> {
+  if (adapter === "0x0000000000000000000000000000000000000000") return WAD;
+  return (await client.readContract({
+    address: adapter,
+    abi: parseAbi(["function valuationRate() view returns (uint256)"]),
+    functionName: "valuationRate",
+    blockNumber,
+  })) as bigint;
 }
 
 /**

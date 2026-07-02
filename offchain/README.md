@@ -1,8 +1,12 @@
 # USD8 — off-chain settlement computation
 
-When a covered DeFi incident is opened, the admin computes the claim-payout
-**merkle root** off-chain and submits it on-chain (`DefiInsurance.settleIncident`).
-This tool is that computation — fully open-source and deterministic.
+When a covered DeFi incident is opened, this computation produces the
+claim-payout **merkle root**. In production it runs inside a TEE whose key
+signs the result (EIP-712 `Settlement`, see `settlementTypedData` in
+`compute.ts`), so anyone can submit it on-chain
+(`DefiInsurance.settleIncidentSigned`); the admin/timelock path
+(`settleIncident`) remains as a fallback. The tool is fully open-source and
+deterministic.
 
 There is **no trusted operator and no special hardware**. Everything the
 computation needs is read from chain state (the per-incident config snapshot,
@@ -67,7 +71,7 @@ claimant passes to `DefiInsurance.finalizeClaim`.
    `inputHash` equals the value the contract stored — a reordered or partial
    table is rejected before anything else runs.
 2. **Pre-incident value**: TWAP the insured token→underlying ratio over a
-   window ending at the admin-pinned `referenceBlock`, times the underlying's
+   window ending at the incident's `referenceBlock`, times the underlying's
    USD price at the window-end block.
 3. **Per claim**: the continuous **minimum balance** of the insured token held
    over `[referenceBlock − holdingMargin, joinBlock − 1]` (which also dedupes
@@ -87,8 +91,8 @@ claimant passes to `DefiInsurance.finalizeClaim`.
    `(incidentId, claimId, user, amounts, scoreSpent)` — the exact leaf
    encoding `finalizeClaim` verifies.
 
-All tunable parameters (coverage κ, TWAP/holding windows, the value-conversion
-recipe, the price oracle, the scored-token set) are read per-incident from the
+All tunable parameters (coverage κ, TWAP/holding windows, the rate adapter,
+the price oracle, the scored-token set) are read per-incident from the
 on-chain snapshot, not hard-coded here — so two people running this at
 different times get the identical root.
 

@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @dev Fee-on-transfer ERC20 for tests: burns `feeBps` of every transfer to a
+/// @dev Fee-on-transfer ERC20 for tests: burns feeBps of every transfer to a
 ///      sink so the recipient receives less than the sent amount.
 contract MockFeeToken is ERC20 {
     uint256 public immutable feeBps;

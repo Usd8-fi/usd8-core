@@ -1,6 +1,6 @@
 // Bootstrap pointers ONLY: the contract addresses to read from. All settlement
 // parameters live on-chain (read per-incident via DefiInsurance.getIncidentConfig)
-// — coverage κ, windows, the value-conversion recipe, the price oracle, the
+// — coverage κ, windows, the rate adapter, the price oracle, the
 // scored-token set — so the settlement is reproducible from chain state alone by
 // anyone. Version it.
 

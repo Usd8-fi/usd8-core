@@ -1,7 +1,7 @@
 // Off-chain settlement for USD8 DeFi insurance — runnable by anyone, locally.
 //
 //   compute <incidentId>   recompute the settlement table + merkle root + per-claim
-//                          proofs (the root the admin submits; the proofs claimants
+//                          proofs (the root the TEE signs / admin submits; the proofs claimants
 //                          finalize with)
 //   verify  <incidentId>   recompute and compare to the root the admin submitted
 //                          on-chain — prints MATCH / MISMATCH (exit 1 on mismatch)
@@ -57,7 +57,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   const windowEnd = inc[1];
   const onchainRoot = inc[2];
   const onchainInputHash = inc[3];
-  const referenceBlock = inc[7]; // admin-pinned pre-incident block
+  const referenceBlock = inc[7]; // pre-incident block (HWM block or admin-pinned)
 
   // Deterministic block anchors: the window-end block (found from its
   // timestamp) and the incident's first-claim block. Every read below pins one

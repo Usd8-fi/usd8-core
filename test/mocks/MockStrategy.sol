@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -14,7 +14,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IStrategy} from "../../src/interfaces/IStrategy.sol";
 
 /// @notice Minimal test strategy. Records call counts and reports its
-///         current USDC balance as `totalAssets`. A test helper can mint
+///         current USDC balance as totalAssets. A test helper can mint
 ///         extra USDC to this address to simulate yield.
 contract MockStrategy is IStrategy {
     using SafeERC20 for IERC20;
@@ -23,9 +23,14 @@ contract MockStrategy is IStrategy {
     uint256 public deployedAmount;
     uint256 public deployCallCount;
     uint256 public withdrawCallCount;
+    bool public withdrawReverts; // simulate a stuck strategy (paused/compromised)
 
     constructor(IERC20 _usdc) {
         usdc = _usdc;
+    }
+
+    function setWithdrawReverts(bool v) external {
+        withdrawReverts = v;
     }
 
     function deploy(uint256 amount) external override {
@@ -35,6 +40,7 @@ contract MockStrategy is IStrategy {
 
     function withdraw(uint256 amount) external override {
         withdrawCallCount += 1;
+        require(!withdrawReverts, "stuck");
         usdc.safeTransfer(msg.sender, amount);
     }
 

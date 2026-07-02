@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -21,25 +21,27 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 ///         and burn USD8; transfers and approvals follow the standard ERC20
 ///         semantics from OpenZeppelin v5.
 /// @dev    USD8 keeps authority minimal:
-///         - `timelock` — single-key authority that sets the Treasury address
-///           and authorizes UUPS upgrades. Single-step transfer; cannot be
-///           set to address(0).
-///         - `treasury` — the only account allowed to mint and burn.
+///         - timelock — the governance authority that sets the Treasury
+///           address and authorizes UUPS upgrades (an EOA, multisig, or
+///           TimelockController — deployer's choice). Single-step transfer;
+///           cannot be set to address(0).
+///         - treasury — the only account allowed to mint and burn.
 ///
 ///         Security choices:
-///         - The implementation contract calls `_disableInitializers` in its
+///         - The implementation contract calls _disableInitializers in its
 ///           constructor, so it cannot be initialized standalone and only the
 ///           proxy holds live state.
 ///         - Treasury is stored independently of timelock, so timelock handover
 ///           does not disturb synchronous mint/redeem flows.
 ///         - Zero-address mint/burn targets are rejected by OpenZeppelin's
-///           `_mint` / `_burn` (`ERC20InvalidReceiver` /
-///           `ERC20InvalidSender`).
+///           _mint / _burn (ERC20InvalidReceiver /
+///           ERC20InvalidSender).
 ///         - No external calls are made by mint or burn, so no reentrancy
 ///           surface is introduced beyond standard ERC20 behavior.
 /// @custom:security-contact rick@usd8.fi
 contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUpgradeable {
-    /// @notice Single-key timelock. Sets {treasury} and authorizes UUPS upgrades.
+    /// @notice Governance authority (EOA, multisig, or TimelockController). Sets
+    ///         {treasury} and authorizes UUPS upgrades.
     address public timelock;
 
     /// @notice Account allowed to mint and burn USD8. Intended holder: Treasury.
@@ -98,12 +100,12 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
 
     // ═══════════════════════════ Treasury actions mint/burn ═══════════════════════════
 
-    /// @notice Mint `amount` USD8 to `to`. Callable only by {treasury}.
+    /// @notice Mint amount USD8 to to. Callable only by {treasury}.
     function mint(address to, uint256 amount) external onlyTreasury {
         _mint(to, amount);
     }
 
-    /// @notice Burn `amount` USD8 from `from`. Callable only by {treasury}.
+    /// @notice Burn amount USD8 from from. Callable only by {treasury}.
     function burn(address from, uint256 amount) external onlyTreasury {
         _burn(from, amount);
     }
@@ -111,13 +113,13 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     // ═══════════════════════════ Internal helpers & modifiers ═══════════════════════════
 
     /// @dev USD8 intentionally does NOT support ERC-2771 meta-transactions.
-    ///      Both role checks use `msg.sender` directly rather than
-    ///      `_msgSender()`. Do not add `ERC2771ContextUpgradeable` to the
+    ///      Both role checks use msg.sender directly rather than
+    ///      _msgSender(). Do not add ERC2771ContextUpgradeable to the
     ///      inheritance chain without revisiting these call sites — a
-    ///      trusted forwarder would otherwise allow `msg.sender` to be a
-    ///      relayer address that doesn't match `timelock` or `treasury`.
+    ///      trusted forwarder would otherwise allow msg.sender to be a
+    ///      relayer address that doesn't match timelock or treasury.
     ///      Gasless flows are intended to go through the standard
-    ///      `permit` + `transferFrom` relayer pattern instead.
+    ///      permit + transferFrom relayer pattern instead.
     modifier onlyTimelock() {
         if (msg.sender != timelock) revert UnauthorizedTimelock(msg.sender);
         _;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -19,7 +19,7 @@ import {IStrategy} from "../interfaces/IStrategy.sol";
 ///         MetaMorpho (ERC4626) vault on Ethereum mainnet — e.g., the
 ///         Gauntlet USDC Prime or Steakhouse USDC curated vaults — and
 ///         tracks the position via the vault's share balance.
-/// @dev    Generic over any ERC4626 vault whose `asset()` is USDC.
+/// @dev    Generic over any ERC4626 vault whose asset() is USDC.
 ///         Deploy one instance per vault you want to wire into the
 ///         Treasury (vault address is immutable per-instance).
 ///
@@ -30,9 +30,9 @@ import {IStrategy} from "../interfaces/IStrategy.sol";
 ///           this strategy and admin can deploy a replacement targeting
 ///           a different vault.
 ///
-///         Atomic withdrawal: MetaMorpho's `withdraw` walks its
+///         Atomic withdrawal: MetaMorpho's withdraw walks its
 ///         configured Morpho Blue markets in the curator's withdrawal
-///         queue order and either delivers the full `amount` or reverts.
+///         queue order and either delivers the full amount or reverts.
 ///         {WithdrawShort} catches any spec-violating vault that
 ///         under-delivers without reverting.
 ///
@@ -45,7 +45,7 @@ import {IStrategy} from "../interfaces/IStrategy.sol";
 ///         Fees: some MetaMorpho vaults take performance fees by minting
 ///         fee shares to the curator on profit accrual. This dilutes
 ///         this contract's share slightly but is reflected automatically
-///         in `convertToAssets(balanceOf(this))`. Vaults with deposit-
+///         in convertToAssets(balanceOf(this)). Vaults with deposit-
 ///         time or withdraw-time fees will trigger {Treasury-
 ///         reserveSupplyStatusCheck} on the next mint/redeem if the
 ///         surplus shrinks — admin should vet for fee structure before
@@ -71,7 +71,7 @@ contract MorphoVaultStrategy is IStrategy {
     /// @notice Thrown when a zero address is supplied where one is not allowed.
     error ZeroAddress();
 
-    /// @notice Thrown when the supplied vault's `asset()` is not USDC.
+    /// @notice Thrown when the supplied vault's asset() is not USDC.
     error VaultAssetMismatch(address expected, address actual);
 
     /// @notice Thrown when the vault returns fewer USDC than requested.
@@ -85,7 +85,7 @@ contract MorphoVaultStrategy is IStrategy {
 
     /// @param _treasury The Treasury contract that owns this strategy.
     /// @param _vault    The MetaMorpho / ERC4626 vault to deposit into.
-    ///                  Must report `asset() == USDC`.
+    ///                  Must report asset() == USDC.
     constructor(address _treasury, IERC4626 _vault) {
         if (_treasury == address(0) || address(_vault) == address(0)) revert ZeroAddress();
         address vaultAsset = _vault.asset();
@@ -108,9 +108,9 @@ contract MorphoVaultStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev Caller (Treasury) is expected to have pushed `amount` USDC
+    /// @dev Caller (Treasury) is expected to have pushed amount USDC
     ///      to this contract immediately before this call. The vault
-    ///      mints shares to this contract (`receiver = address(this)`).
+    ///      mints shares to this contract (receiver = address(this)).
     function deploy(uint256 amount) external onlyTreasury {
         vault.deposit(amount, address(this));
         emit Deployed(amount);
@@ -118,7 +118,7 @@ contract MorphoVaultStrategy is IStrategy {
 
     /// @inheritdoc IStrategy
     /// @dev Routes the vault's USDC payout directly to {treasury} via
-    ///      `receiver = treasury`, avoiding a temporary balance here.
+    ///      receiver = treasury, avoiding a temporary balance here.
     ///      Balance-delta check defends against a non-spec-compliant
     ///      vault under-delivering without reverting.
     function withdraw(uint256 amount) external onlyTreasury {
@@ -130,7 +130,7 @@ contract MorphoVaultStrategy is IStrategy {
     }
 
     /// @inheritdoc IStrategy
-    /// @dev `convertToAssets(balanceOf(this))` reflects principal,
+    /// @dev convertToAssets(balanceOf(this)) reflects principal,
     ///      accrued yield, and curator-fee dilution at the current
     ///      vault share price.
     function totalAssets() external view returns (uint256) {

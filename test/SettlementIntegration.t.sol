@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -15,6 +15,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {CoverPool} from "../src/CoverPool.sol";
 import {DefiInsurance, ICoverPool} from "../src/DefiInsurance.sol";
 import {USD8} from "../src/USD8.sol";
+import {IInsuredTokenAdapter} from "../src/interfaces/IInsuredTokenAdapter.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockERC1155} from "./mocks/MockERC1155.sol";
 
@@ -23,7 +24,7 @@ import {MockERC1155} from "./mocks/MockERC1155.sol";
 /// merkle root and the per-claim proofs — and prove they reproduce the on-chain
 /// inputHash, settle, and pay each claimant exactly the off-chain amounts.
 ///
-/// Opt-in (keeps the default `forge test` green and FFI-free):
+/// Opt-in (keeps the default forge test green and FFI-free):
 ///   cd offchain && npm run build
 ///   RUN_INTEGRATION=1 forge test --ffi --match-path test/SettlementIntegration.t.sol -vv
 contract SettlementIntegrationTest is Test {
@@ -62,8 +63,8 @@ contract SettlementIntegrationTest is Test {
 
         vm.startPrank(admin);
         pool.setPayoutModule(address(defi), true);
-        pool.addCoverPoolAsset(IERC20(address(usdc)), FEED, 0);
-        defi.addInsuredToken(IERC20(address(lp)), 8000, FEED, address(0), "");
+        pool.addCoverPoolAsset(IERC20(address(usdc)), FEED, 0, 0);
+        defi.addInsuredToken(IERC20(address(lp)), 8000, FEED, IInsuredTokenAdapter(address(0)));
         vm.stopPrank();
 
         // Underwrite the pool with 1,000 USDC.
@@ -93,8 +94,7 @@ contract SettlementIntegrationTest is Test {
             _addr(bob, carol), // users
             _u256(100e18, 100e18), // escrows
             _u256(60, 40), // scoreToSpend
-            _empty2(), // boosterIds[][]
-            _empty2() // boosterAmounts[][]
+            _u256(0, 0) // boosterAmounts (none)
         );
         bytes32 ffiInputHash = abi.decode(_ffi("inputhash", hashPayload, ""), (bytes32));
         (,,, bytes32 onchainInputHash,,,,) = defi.incidents(incidentId);
@@ -137,7 +137,7 @@ contract SettlementIntegrationTest is Test {
         lp.mint(who, amount);
         vm.startPrank(who);
         lp.approve(address(defi), amount);
-        claimId = defi.joinClaim(IERC20(address(lp)), amount, score, new uint256[](0), new uint256[](0));
+        claimId = defi.joinClaim(IERC20(address(lp)), amount, score, 0);
         vm.stopPrank();
     }
 
@@ -167,11 +167,5 @@ contract SettlementIntegrationTest is Test {
         r = new address[](2);
         r[0] = a;
         r[1] = b;
-    }
-
-    function _empty2() internal pure returns (uint256[][] memory r) {
-        r = new uint256[][](2);
-        r[0] = new uint256[](0);
-        r[1] = new uint256[](0);
     }
 }

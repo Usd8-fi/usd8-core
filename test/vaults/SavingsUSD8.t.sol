@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -15,7 +15,7 @@ import {USD8} from "../../src/USD8.sol";
 import {SavingsUSD8} from "../../src/SavingsUSD8.sol";
 import {IStrategy} from "../../src/interfaces/IStrategy.sol";
 
-/// @dev Minimal USD8-denominated mock strategy mirroring `test/mocks/MockStrategy.sol`
+/// @dev Minimal USD8-denominated mock strategy mirroring test/mocks/MockStrategy.sol
 ///      but for the USD8 token instead of USDC.
 contract MockUSD8Strategy is IStrategy {
     USD8 public immutable usd8;
@@ -655,7 +655,7 @@ contract SavingsUSD8Test is Test {
     }
 }
 
-/// @dev Strategy whose `underlying()` returns a non-USD8 / non-USDC address,
+/// @dev Strategy whose underlying() returns a non-USD8 / non-USDC address,
 ///      used to exercise StrategyAssetMismatch in both vaults.
 contract WrongUnderlyingStrategy is IStrategy {
     function underlying() external pure override returns (address) {

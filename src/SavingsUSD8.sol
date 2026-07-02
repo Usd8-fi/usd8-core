@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -28,9 +28,9 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///         yield, which is received via {receiveProfitDistribution} and vests
 ///         smoothly into the share price.
 /// @dev    Synthetic-totalAssets ("Pattern B") implementation: no shares
-///         are minted or burned for vesting. `totalAssets()` returns idle
+///         are minted or burned for vesting. totalAssets() returns idle
 ///         USD8 + strategy assets minus the still-unvested reported profit.
-///         `_withdraw()` pulls any shortfall from strategies in array order
+///         _withdraw() pulls any shortfall from strategies in array order
 ///         before the standard ERC4626 transfer, matching {Treasury}.
 ///
 ///         Strategy management mirrors the {Treasury} contract — same
@@ -43,10 +43,10 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     // ─────────────────────────── Types ───────────────────────────
 
     /// @notice Pause-state values. Mutually exclusive.
-    ///         - `None`           : deposit and withdraw allowed.
-    ///         - `SystemPaused`   : all user actions and admin fund moves blocked.
-    ///         - `DepositPaused`  : deposit/mint blocked; withdraw/redeem allowed.
-    ///         - `WithdrawPaused` : withdraw/redeem blocked; deposit/mint allowed.
+    ///         - None           : deposit and withdraw allowed.
+    ///         - SystemPaused   : all user actions and admin fund moves blocked.
+    ///         - DepositPaused  : deposit/mint blocked; withdraw/redeem allowed.
+    ///         - WithdrawPaused : withdraw/redeem blocked; deposit/mint allowed.
     enum PauseState {
         None,
         SystemPaused,
@@ -65,7 +65,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     ///         force-removal, and revenue harvest/distribution.
     address public admin;
 
-    /// @notice Current pause state. Defaults to `None` on deployment.
+    /// @notice Current pause state. Defaults to None on deployment.
     ///         Settable by admin or timelock via {setPauseState}.
     PauseState public pauseState;
 
@@ -125,10 +125,10 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     ///         Treasury should retain the surplus until users have entered.
     error NoDepositors();
 
-    /// @notice Thrown by {depositToStrategy} when `amount` exceeds the
+    /// @notice Thrown by {depositToStrategy} when amount exceeds the
     ///         deployable balance (idle minus still-unvested profit).
     ///         Unvested profit must remain idle so a strategy loss can
-    ///         never push `_rawAssets()` below `_unvestedProfit()`, which
+    ///         never push _rawAssets() below _unvestedProfit(), which
     ///         would brick {totalAssets} and every ERC4626 entrypoint.
     error ExceedsDeployable(uint256 amount, uint256 deployable);
 
@@ -144,7 +144,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
 
     /// @notice Emitted when admin pulls USD8 from a strategy back to idle.
-    ///         `amount` is the actual delta observed in this vault's USD8
+    ///         amount is the actual delta observed in this vault's USD8
     ///         balance, not the requested amount.
     event WithdrawnFromStrategy(IStrategy indexed strategy, uint256 amount);
 
@@ -171,23 +171,23 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ─────────────────────────── Modifiers ───────────────────────
 
-    /// @dev Reverts {Paused} if `pauseState` is `SystemPaused` or `DepositPaused`.
+    /// @dev Reverts {Paused} if pauseState is SystemPaused or DepositPaused.
     modifier whenDepositNotPaused() {
         PauseState s = pauseState;
         if (s == PauseState.SystemPaused || s == PauseState.DepositPaused) revert Paused(s);
         _;
     }
 
-    /// @dev Reverts {Paused} if `pauseState` is `SystemPaused` or `WithdrawPaused`.
+    /// @dev Reverts {Paused} if pauseState is SystemPaused or WithdrawPaused.
     modifier whenWithdrawNotPaused() {
         PauseState s = pauseState;
         if (s == PauseState.SystemPaused || s == PauseState.WithdrawPaused) revert Paused(s);
         _;
     }
 
-    /// @dev Reverts {Paused} if `pauseState` is `SystemPaused`. Applied to
-    ///      profit reporting and strategy fund moves. `setPauseState` and
-    ///      strategy curation (`addStrategy`/`removeStrategy`) are NOT gated.
+    /// @dev Reverts {Paused} if pauseState is SystemPaused. Applied to
+    ///      profit reporting and strategy fund moves. setPauseState and
+    ///      strategy curation (addStrategy/removeStrategy) are NOT gated.
     modifier whenSystemNotPaused() {
         if (pauseState == PauseState.SystemPaused) revert Paused(PauseState.SystemPaused);
         _;
@@ -228,15 +228,15 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ═══════════════════════════ Profit distribution ═══════════════════════════
 
-    /// @notice Receive `amount` of USD8 as profit distribution. Pulls
-    ///         atomically via `transferFrom` (caller must approve). The
+    /// @notice Receive amount of USD8 as profit distribution. Pulls
+    ///         atomically via transferFrom (caller must approve). The
     ///         amount vests linearly over the weighted-average duration
     ///         combining any remaining unvested portion with a fresh
-    ///         `profitMaxUnlockTime` window.
+    ///         profitMaxUnlockTime window.
     /// @dev    Permissionless — anyone may donate. The weighted-average
     ///         schedule reset means tiny calls don't significantly extend
     ///         the end-time, so there's no griefing vector.
-    ///         Reverts {NoDepositors} when `totalSupply() == 0` to prevent
+    ///         Reverts {NoDepositors} when totalSupply() == 0 to prevent
     ///         profit being stranded in a vault with no shares (and to
     ///         block the inflation-DoS path on the next depositor).
     function receiveProfitDistribution(uint256 amount) external override nonReentrant whenSystemNotPaused {
@@ -245,8 +245,8 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         if (totalSupply() == 0) revert NoDepositors();
 
         // Clear stale schedule storage if the previous vesting window has
-        // fully elapsed. `_unvestedProfit()` already returns 0 in this case
-        // and the math below works regardless, but clearing keeps `pendingProfit`
+        // fully elapsed. _unvestedProfit() already returns 0 in this case
+        // and the math below works regardless, but clearing keeps pendingProfit
         // honest as a live indicator instead of a frozen historical value.
         if (pendingProfit != 0 && block.timestamp >= profitEndTime) {
             pendingProfit = 0;
@@ -279,7 +279,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     // ═══════════════════════════ Vesting math ═══════════════════════════
 
     /// @notice Current unvested profit. Decreases linearly to zero as
-    ///         `block.timestamp` advances toward `profitEndTime`.
+    ///         block.timestamp advances toward profitEndTime.
     function unvestedProfit() external view returns (uint256) {
         return _unvestedProfit();
     }
@@ -305,7 +305,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     }
 
     /// @dev Idle USD8 in this contract plus every approved strategy's
-    ///      reported `totalAssets`. The vesting overlay subtracts the
+    ///      reported totalAssets. The vesting overlay subtracts the
     ///      unvested-profit portion in {totalAssets}.
     function _rawAssets() internal view returns (uint256) {
         uint256 total = IERC20(asset()).balanceOf(address(this));
@@ -366,7 +366,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     }
 
     /// @notice Rescue native ETH stuck in this contract. Timelock only. The
-    ///         contract does not implement `receive`/`fallback`, so this
+    ///         contract does not implement receive/fallback, so this
     ///         only handles out-of-band ETH arrivals.
     /// @dev    Not gated by pause: rescue is an emergency function.
     function rescueETH(address payable to, uint256 amount) external nonReentrant onlyTimelock {
@@ -378,8 +378,8 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ═══════════════════════════ ERC4626 entry points ═══════════════════════════
 
-    /// @dev `nonReentrant` on all four user-facing entry points. The override
-    ///      of `_withdraw` calls `strategy.withdraw` via `_ensureIdle`, which
+    /// @dev nonReentrant on all four user-facing entry points. The override
+    ///      of _withdraw calls strategy.withdraw via _ensureIdle, which
     ///      is the reentry surface a malicious strategy could exploit.
     function deposit(uint256 assets, address receiver)
         public
@@ -449,9 +449,9 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         return super.maxRedeem(owner);
     }
 
-    /// @dev Pull `assets` of underlying from strategies into idle before
+    /// @dev Pull assets of underlying from strategies into idle before
     ///      the standard ERC4626 burn-and-transfer. Strategies are walked
-    ///      in `strategies` array order; idle is consumed first.
+    ///      in strategies array order; idle is consumed first.
     function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)
         internal
         override
@@ -466,9 +466,9 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ═══════════════════════════ Strategy management (timelock) ═══════════════════════════
 
-    /// @notice Approve a new strategy and insert it at `index` in the
-    ///         withdrawal fallback queue (`strategies[0]` is consulted
-    ///         first). Timelock only. Any `index >= strategies.length` appends.
+    /// @notice Approve a new strategy and insert it at index in the
+    ///         withdrawal fallback queue (strategies[0] is consulted
+    ///         first). Timelock only. Any index >= strategies.length appends.
     ///         To reposition an existing strategy, {removeStrategy} it and
     ///         re-add it at the desired index — drain it first if funded.
     ///         Strategy approval is a trusted process — timelock is expected to
@@ -492,23 +492,22 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     /// @notice Remove an approved strategy. Admin or timelock. **Force removal**:
     ///         no zero-assets precondition — timelock can drop a strategy
-    ///         that's reverting on `totalAssets()` or otherwise stuck,
+    ///         that's reverting on totalAssets() or otherwise stuck,
     ///         unblocking the rest of the vault at the cost of orphaning
     ///         the strategy's reported balance.
     /// @dev    DANGER: removing a strategy that still holds funds
     ///         permanently strands those funds. The strategy's
-    ///         `totalAssets()` no longer contributes to {_rawAssets} and
+    ///         totalAssets() no longer contributes to {_rawAssets} and
     ///         the share price drops by the orphaned amount, taking the
     ///         loss out of existing depositors. Use {withdrawFromStrategy}
     ///         to drain first; only force-remove when the strategy is
-    ///         compromised or its `totalAssets()` is permanently broken.
+    ///         compromised or its totalAssets() is permanently broken.
     /// @dev    Order-preserving: strategies after the removed slot shift
     ///         down one position, so the relative priority of the remaining
     ///         withdrawal queue is unchanged. To reorder, remove and
     ///         re-{addStrategy} at the desired index (drain first if funded).
     function removeStrategy(IStrategy s) external onlyTimelock {
-        (uint256 idx, bool found) = _findStrategy(s);
-        if (!found) revert StrategyNotApproved(s);
+        uint256 idx = _findApprovedStrategy(s);
 
         uint256 last = strategies.length - 1;
         for (uint256 i = idx; i < last; i++) {
@@ -518,17 +517,16 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         emit StrategyRemoved(s);
     }
 
-    /// @notice Push `amount` of idle USD8 to an approved strategy. Admin
+    /// @notice Push amount of idle USD8 to an approved strategy. Admin
     ///         or timelock. Capped at {maxDeployableToStrategy} so a total strategy
-    ///         loss can never reduce `_rawAssets()` below `_unvestedProfit()`.
+    ///         loss can never reduce _rawAssets() below _unvestedProfit().
     function depositToStrategy(IStrategy s, uint256 amount)
         external
         nonReentrant
         onlyAdminOrTimelock
         whenSystemNotPaused
     {
-        (, bool found) = _findStrategy(s);
-        if (!found) revert StrategyNotApproved(s);
+        _findApprovedStrategy(s);
         if (amount == 0) revert ZeroAmount();
         uint256 deployable = maxDeployableToStrategy();
         if (amount > deployable) revert ExceedsDeployable(amount, deployable);
@@ -537,9 +535,9 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         emit DepositedToStrategy(s, amount);
     }
 
-    /// @notice Pull `amount` USD8 from an approved strategy back to idle.
+    /// @notice Pull amount USD8 from an approved strategy back to idle.
     ///         Admin or timelock.
-    /// @dev    The emitted `WithdrawnFromStrategy` amount reflects the
+    /// @dev    The emitted WithdrawnFromStrategy amount reflects the
     ///         actual delta observed in this vault's USD8 balance.
     function withdrawFromStrategy(IStrategy s, uint256 amount)
         external
@@ -547,8 +545,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         onlyAdminOrTimelock
         whenSystemNotPaused
     {
-        (, bool found) = _findStrategy(s);
-        if (!found) revert StrategyNotApproved(s);
+        _findApprovedStrategy(s);
         if (amount == 0) revert ZeroAmount();
         IERC20 underlying = IERC20(asset());
         uint256 balanceBefore = underlying.balanceOf(address(this));
@@ -564,7 +561,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
     }
 
     /// @notice Maximum USD8 amount currently deployable to strategies:
-    ///         `balanceOf(this) - _unvestedProfit()`. Unvested profit must
+    ///         balanceOf(this) - _unvestedProfit(). Unvested profit must
     ///         remain idle; timelock's {depositToStrategy} is capped at this.
     function maxDeployableToStrategy() public view returns (uint256) {
         uint256 idle = IERC20(asset()).balanceOf(address(this));
@@ -574,12 +571,12 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
 
     // ═══════════════════════════ Internal helpers ═══════════════════════════
 
-    /// @dev Top up idle balance to at least `amount` by pulling from
+    /// @dev Top up idle balance to at least amount by pulling from
     ///      strategies in array order. Re-reads idle after each pull so
     ///      a strategy that delivers short doesn't cause the next
     ///      iteration to under-ask. If idle + all strategies is still
     ///      insufficient after the walk, the caller's subsequent
-    ///      `safeTransfer` will revert.
+    ///      safeTransfer will revert.
     function _ensureIdle(uint256 amount) internal {
         uint256 n = strategies.length;
         for (uint256 i = 0; i < n; i++) {
@@ -596,7 +593,7 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
         }
     }
 
-    /// @dev Linear scan of `strategies` for `s`. O(n), small N expected.
+    /// @dev Linear scan of strategies for s. O(n), small N expected.
     function _findStrategy(IStrategy s) internal view returns (uint256 idx, bool found) {
         uint256 n = strategies.length;
         for (uint256 i = 0; i < n; i++) {
@@ -605,5 +602,14 @@ contract SavingsUSD8 is ERC4626, ERC20Permit, ReentrancyGuardTransient, IProfitD
             }
         }
         return (0, false);
+    }
+
+    /// @dev Return the index of an approved strategy, reverting StrategyNotApproved
+    ///      if it isn't in the set. Shared find-or-revert for the deposit,
+    ///      withdraw, and remove paths (callers that don't need the index ignore it).
+    function _findApprovedStrategy(IStrategy s) internal view returns (uint256 idx) {
+        bool found;
+        (idx, found) = _findStrategy(s);
+        if (!found) revert StrategyNotApproved(s);
     }
 }

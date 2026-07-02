@@ -19,19 +19,18 @@ function emit(type: string, value: unknown): void {
 
 if (cmd === "inputhash") {
   // (uint256[] claimIds, address[] users, uint256[] escrows, uint256[] scoreToSpends,
-  //  uint256[][] boosterIds, uint256[][] boosterAmounts) — registers in chain order.
-  const [ids, users, escrows, spends, bIds, bAmts] = decodeAbiParameters(
-    [{ type: "uint256[]" }, { type: "address[]" }, { type: "uint256[]" }, { type: "uint256[]" }, { type: "uint256[][]" }, { type: "uint256[][]" }],
+  //  uint256[] boosterAmounts) — registers in chain order.
+  const [ids, users, escrows, spends, bAmts] = decodeAbiParameters(
+    [{ type: "uint256[]" }, { type: "address[]" }, { type: "uint256[]" }, { type: "uint256[]" }, { type: "uint256[]" }],
     hex
-  ) as [bigint[], `0x${string}`[], bigint[], bigint[], bigint[][], bigint[][]];
+  ) as [bigint[], `0x${string}`[], bigint[], bigint[], bigint[]];
   const events: InputEvent[] = ids.map((id, i) => ({
     kind: "register",
     claimId: id,
     user: users[i],
     amount: escrows[i],
     scoreToSpend: spends[i],
-    boosterIds: [...bIds[i]],
-    boosterAmounts: [...bAmts[i]],
+    boosterAmount: bAmts[i],
     blockNumber: 0n,
     logIndex: 0,
   }));

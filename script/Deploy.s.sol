@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -11,37 +11,66 @@ pragma solidity 0.8.28;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {SavingsUSD8} from "../src/SavingsUSD8.sol";
 import {CoverPool} from "../src/CoverPool.sol";
 import {DefiInsurance, ICoverPool} from "../src/DefiInsurance.sol";
-import {IStrategy} from "../src/interfaces/IStrategy.sol";
-import {AaveV3UsdcStrategy} from "../src/strategies/AaveV3UsdcStrategy.sol";
-import {MorphoVaultStrategy} from "../src/strategies/MorphoVaultStrategy.sol";
 
 /// @title  Deploy
-/// @notice Deployer: USD8 (proxy + impl), Treasury, SavingsUSD8, strategies,
-///         CoverPool (the capital base, seeded with two scored tokens — USD8 and
-///         sUSD8), and DefiInsurance (a payout module registered on the pool).
-///         Insured tokens and stake assets are left for governance.
+/// @notice Deployer: USD8 (proxy + impl), Treasury, SavingsUSD8, CoverPool (the
+///         capital base, seeded with two scored tokens — USD8 and sUSD8), and
+///         DefiInsurance (a payout module registered on the pool). Insured
+///         tokens, stake assets, and Treasury strategies are left for governance
+///         to add after deployment.
 ///
 /// @dev    Both roles (timelock + admin) land on a single EOA
 ///         ({DEFAULT_ADMIN}) — fine for beta, MUST be migrated to a Safe +
 ///         TimelockController before opening to real user volume. Override
-///         the admin per-run with the `OVERRIDE_ADMIN` env var (useful for
+///         the admin per-run with the OVERRIDE_ADMIN env var (useful for
 ///         testnet deploys with a different signer).
 ///
 ///         Optional env vars:
 ///           OVERRIDE_ADMIN   — replace the hardcoded {DEFAULT_ADMIN}.
-///           MORPHO_VAULT_1   — first MetaMorpho USDC vault address.
-///           MORPHO_VAULT_2   — second MetaMorpho USDC vault address.
 ///
-///         Testnet runs (Tenderly Virtual TestNet, a mainnet fork) use
-///         the same script unchanged — Aave v3 USDC and Morpho vaults are
-///         all present at their mainnet addresses on the fork.
+/// ════════════════════════════ HARD RULES ════════════════════════════
+/// Operational invariants that are NOT (all) enforced on-chain. Whoever
+/// deploys and governs the system MUST uphold these:
+///
+///  1. TIMELOCK DELAY < DISPUTE_PERIOD. The governance timelock's minDelay
+///     must be strictly less than DefiInsurance.DISPUTE_PERIOD, so a
+///     timelock-initiated voidSettlement can still execute inside the
+///     dispute window. Otherwise a bad root cannot be vetoed in time.
+///
+///  2. SEED EVERY COVER-POOL STAKE ASSET, NEVER WITHDRAWN. When a stake
+///     asset is added, the team must stake a permanent amount that is never
+///     unstaked, so the asset's earning base stays > 0 forever. This keeps
+///     reward emission from ever stranding (the empty-base carry-forward
+///     edge never triggers) and prevents the asset from being share-drained
+///     to a bricked state.
+///
+///  3. SWAP PAYOUT MODULES, NEVER LEAVE NONE. The admin may only replace the
+///     active payout module via setPayoutModule; never deregister the active
+///     module without registering a replacement.
+///
+///  4. NO DEFIINSURANCE WIRING CHANGES DURING AN ACTIVE INCIDENT. Do not
+///     change/upgrade or re-point the DefiInsurance payout module registered
+///     on CoverPool while an incident is in flight.
+///
+///  5. ONE INCIDENT AT A TIME — WAIT OUT FINALIZATION. Do not open a new
+///     incident until the prior incident's finalization window has fully
+///     closed. Keeps incidents cleanly isolated (the pool is only ever frozen
+///     for / paid out of a single incident at once).
+///
+///  6. setTimelock IS IRREVERSIBLE — TRIPLE-CHECK THE ADDRESS. setTimelock is
+///     single-step on every contract, and the timelock holds UUPS upgrade
+///     authority (USD8, CoverPool). A wrong or typo'd address permanently and
+///     unrecoverably loses governance AND upgradeability for that contract.
+///     Before calling, verify the new timelock is a live, correctly-owned
+///     address/contract — on every contract. (admin is recoverable by the
+///     timelock; the timelock itself is not.)
+/// ═════════════════════════════════════════════════════════════════════
 contract DeployScript is Script {
     /// @notice Single EOA used as timelock + admin on every contract.
     address constant DEFAULT_ADMIN = 0xB2E999D531D45a9115dA7706adFc651999f3c1F1;
@@ -54,15 +83,17 @@ contract DeployScript is Script {
     ///         Deployer must hold at least this much USDC at run time.
     uint256 constant SEED_USDC = 100e6;
 
-    /// @notice Burn sink for the seed shares. Not `address(0)` — ERC20 `_mint`
+    /// @notice Burn sink for the seed shares. Not address(0) — ERC20 _mint
     ///         rejects the zero address — but equally unspendable.
     address constant SEED_SINK = 0x000000000000000000000000000000000000dEaD;
 
-    /// @notice scorePerTokenPerBlock for the two scored tokens. Small integers
-    ///         (not 1e18-scaled) so cumulative scores stay manageable; sUSD8
-    ///         earns 10× plain USD8 to reward staking.
-    uint128 constant USD8_SCORE_RATE = 1;
-    uint128 constant SUSD8_SCORE_RATE = 10;
+    /// @notice scorePerTokenPerBlock for the two scored tokens, 1e18-scaled
+    ///         (1e18 ⇒ 1.0 score/token/block). Set for a 12s-block chain
+    ///         (7200 blocks/day) so a whole token accrues, per day: USD8 → 1.0
+    ///         (1e18/7200), sUSD8 → 0.1 (1e18/72000). Frontend shows rate ×
+    ///         7200 / 1e18.
+    uint128 constant USD8_SCORE_RATE = 138888888888889; // 1e18 / 7200  ≈ 1.0/day
+    uint128 constant SUSD8_SCORE_RATE = 13888888888889; // 1e18 / 72000 ≈ 0.1/day
 
     /// @notice Already-deployed USD8Booster ERC-1155 collection (mainnet). Wired
     ///         into CoverPool at init as the canonical booster.
@@ -73,9 +104,6 @@ contract DeployScript is Script {
         USD8 usd8;
         Treasury treasury;
         SavingsUSD8 savings;
-        AaveV3UsdcStrategy aaveStrat;
-        MorphoVaultStrategy morphoStrat1;
-        MorphoVaultStrategy morphoStrat2;
         address coverPoolImpl;
         CoverPool coverPool;
         DefiInsurance defiInsurance;
@@ -83,21 +111,16 @@ contract DeployScript is Script {
 
     function run() external {
         address admin = vm.envOr("OVERRIDE_ADMIN", DEFAULT_ADMIN);
-        address morphoVault1 = vm.envOr("MORPHO_VAULT_1", address(0));
-        address morphoVault2 = vm.envOr("MORPHO_VAULT_2", address(0));
 
         vm.startBroadcast();
-        Deployed memory d = _deployAndWire(msg.sender, morphoVault1, morphoVault2);
+        Deployed memory d = _deployAndWire(msg.sender);
         _handOffRoles(d, admin);
         vm.stopBroadcast();
 
-        _logResults(d, admin, morphoVault1, morphoVault2);
+        _logResults(d, admin);
     }
 
-    function _deployAndWire(address deployer, address morphoVault1, address morphoVault2)
-        internal
-        returns (Deployed memory d)
-    {
+    function _deployAndWire(address deployer) internal returns (Deployed memory d) {
         // USD8 impl + ERC-1967 proxy. Deployer is initial admin AND placeholder
         // treasury so we can wire the real Treasury below.
         USD8 impl = new USD8();
@@ -151,19 +174,8 @@ contract DeployScript is Script {
         d.defiInsurance = new DefiInsurance(ICoverPool(address(d.coverPool)), deployer, deployer);
         d.coverPool.setPayoutModule(address(d.defiInsurance), true);
 
-        // Aave v3 USDC strategy at Treasury index 0.
-        d.aaveStrat = new AaveV3UsdcStrategy(address(d.treasury));
-        d.treasury.addStrategy(IStrategy(address(d.aaveStrat)), type(uint256).max);
-
-        // Optional MetaMorpho USDC strategies behind Aave.
-        if (morphoVault1 != address(0)) {
-            d.morphoStrat1 = new MorphoVaultStrategy(address(d.treasury), IERC4626(morphoVault1));
-            d.treasury.addStrategy(IStrategy(address(d.morphoStrat1)), type(uint256).max);
-        }
-        if (morphoVault2 != address(0)) {
-            d.morphoStrat2 = new MorphoVaultStrategy(address(d.treasury), IERC4626(morphoVault2));
-            d.treasury.addStrategy(IStrategy(address(d.morphoStrat2)), type(uint256).max);
-        }
+        // Treasury strategies (Aave / Morpho) are NOT deployed here — governance
+        // adds them post-deployment via Treasury.addStrategy.
     }
 
     function _handOffRoles(Deployed memory d, address admin) internal {
@@ -184,7 +196,7 @@ contract DeployScript is Script {
         d.defiInsurance.setTimelock(admin);
     }
 
-    function _logResults(Deployed memory d, address admin, address morphoVault1, address morphoVault2) internal pure {
+    function _logResults(Deployed memory d, address admin) internal pure {
         console2.log("=== USD8 ===");
         console2.log("Implementation:    ", d.usd8Impl);
         console2.log("Proxy:             ", address(d.usd8));
@@ -201,17 +213,6 @@ contract DeployScript is Script {
         console2.log("");
         console2.log("=== DefiInsurance ===");
         console2.log("Address:           ", address(d.defiInsurance));
-        console2.log("");
-        console2.log("=== Strategies ===");
-        console2.log("AaveV3UsdcStrategy:", address(d.aaveStrat));
-        if (address(d.morphoStrat1) != address(0)) {
-            console2.log("MorphoVault (1):   ", address(d.morphoStrat1));
-            console2.log("  -> vault:        ", morphoVault1);
-        }
-        if (address(d.morphoStrat2) != address(0)) {
-            console2.log("MorphoVault (2):   ", address(d.morphoStrat2));
-            console2.log("  -> vault:        ", morphoVault2);
-        }
         console2.log("");
         console2.log("=== Admin (all roles) ===");
         console2.log("Address:           ", admin);

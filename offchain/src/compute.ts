@@ -15,10 +15,14 @@ import {
 } from "./chain.js";
 
 const BPS = 10_000n;
-// Hard-coded booster policy, mirrors CoverPool.BOOSTER_BOOST_BPS: each committed
-// unit of booster id 1 adds +1% to the insurance-score multiplier.
-const BOOSTER_ID = 1n;
+// Hard-coded booster policy, mirrors DefiInsurance.BOOSTER_BOOST_BPS: each
+// committed booster unit adds +1% to the insurance-score multiplier.
 const BOOSTER_BOOST_BPS = 100n;
+// scorePerTokenPerBlock is stored 1e18-scaled: 1e18 ⇒ 1.0 score/token/block.
+// Because the rate multiplies a raw (1e18-decimal) balance, this /SCORE_SCALE
+// cancels the token's 1e18 and yields score in WAD (1e18 = 1.0), applied once
+// at the end of the sum.
+const SCORE_SCALE = WAD;
 
 export interface SettledRow {
   claimId: bigint;
@@ -34,7 +38,7 @@ export interface SettledRow {
 
 export interface Settlement {
   incidentId: bigint;
-  referenceBlock: bigint; // admin-pinned pre-incident block losses are valued against
+  referenceBlock: bigint; // pre-incident block losses are valued against (HWM block or admin-pinned)
   twapRatio: bigint;
   inputHash: `0x${string}`;
   root: `0x${string}`;
@@ -45,9 +49,9 @@ export interface Settlement {
 /**
  * Replicate the contract's running claimant-table commitment by replaying the
  * register/cancel events in true chain order. Each `register` chains
- * `keccak256(abi.encode(h, claimId, user, escrow, scoreToSpend, boosterIds,
- * boosterAmounts))`; each `cancel` chains `keccak256(abi.encode(h, claimId,
- * "CANCEL"))` — byte-identical to DefiInsurance's `joinClaim`/`cancelClaim`.
+ * `keccak256(abi.encode(h, claimId, user, escrow, scoreToSpend, boosterAmount))`;
+ * each `cancel` chains `keccak256(abi.encode(h, claimId, "CANCEL"))` —
+ * byte-identical to DefiInsurance's `joinClaim`/`cancelClaim`.
  */
 export function computeInputHash(events: InputEvent[]): `0x${string}` {
   let h: `0x${string}` = `0x${"00".repeat(32)}`;
@@ -61,10 +65,9 @@ export function computeInputHash(events: InputEvent[]): `0x${string}` {
             { type: "address" },
             { type: "uint128" },
             { type: "uint256" },
-            { type: "uint256[]" },
-            { type: "uint256[]" },
+            { type: "uint256" },
           ],
-          [h, e.claimId, e.user, e.amount, e.scoreToSpend, e.boosterIds, e.boosterAmounts]
+          [h, e.claimId, e.user, e.amount, e.scoreToSpend, e.boosterAmount]
         )
       );
     } else {
@@ -81,10 +84,11 @@ export function computeInputHash(events: InputEvent[]): `0x${string}` {
 
 /**
  * TWAP of the token→underlying ratio over [referenceBlock − twapLookback,
- * referenceBlock], sampled. The reference block is the admin-pinned pre-incident
- * point ({Incident.referenceBlock}); TWAPing a short window before it smooths
+ * referenceBlock], sampled. The reference block is the pre-incident point
+ * ({Incident.referenceBlock}): the high-water-mark block for triggered opens,
+ * admin-pinned on the fallback path. TWAPing a short window before it smooths
  * any single-block oracle glitch. This is the "before" value losses are
- * measured against — no on-chain drop detection (the admin already opened).
+ * measured against.
  */
 export async function twapRatioBefore(client: PublicClient, cfg: IncidentConfig, b: bigint): Promise<bigint> {
   if (cfg.params.sampleStepBlocks === 0n) throw new Error("invalid settlement params: sampleStepBlocks is zero");
@@ -93,7 +97,7 @@ export async function twapRatioBefore(client: PublicClient, cfg: IncidentConfig,
   let sum = 0n;
   let n = 0n;
   for (let blk = start; blk <= b; blk += cfg.params.sampleStepBlocks) {
-    sum += await ratioAt(client, cfg.underlyingConversionAddress, cfg.underlyingConversionCallData, blk);
+    sum += await ratioAt(client, cfg.adapter, blk);
     n += 1n;
   }
   return n === 0n ? 0n : sum / n;
@@ -105,7 +109,7 @@ export async function twapRatioBefore(client: PublicClient, cfg: IncidentConfig,
  * weighted by its on-chain rate, then boosted. This is the gross figure;
  * already-spent score (from the on-chain ledger) is subtracted by the caller.
  * Non-expiring (not a time-weighted average), so holding longer always grows
- * it. Each committed unit of booster id 1 adds BOOSTER_BOOST_BPS per unit.
+ * it. Each committed booster unit adds BOOSTER_BOOST_BPS to the multiplier.
  *
  * Anchored at the pre-incident `referenceBlock` (not window-end): otherwise a
  * claimant could pile scored tokens into their wallet DURING the claim window
@@ -115,8 +119,7 @@ export async function earnedScoreOf(
   client: PublicClient,
   cfg: IncidentConfig,
   user: `0x${string}`,
-  boosterIds: bigint[],
-  boosterAmounts: bigint[],
+  boosterAmount: bigint,
   asOfBlock: bigint
 ): Promise<bigint> {
   let score = 0n;
@@ -125,18 +128,15 @@ export async function earnedScoreOf(
     const integral = await tokenBlockIntegral(client, st.token, user, st.startBlock, asOfBlock);
     score += integral * st.scorePerTokenPerBlock;
   }
-  // Booster multiplier: each committed unit of id 1 adds BOOSTER_BOOST_BPS
-  // (every other id weighs 0). multiplier = (BPS + Σ amount × bps) / BPS.
-  let boostBps = 0n;
-  for (let i = 0; i < boosterIds.length; i++) {
-    if (boosterIds[i] === BOOSTER_ID) boostBps += boosterAmounts[i] * BOOSTER_BOOST_BPS;
-  }
-  return (score * (BPS + boostBps)) / BPS;
+  // Booster multiplier: each committed unit adds BOOSTER_BOOST_BPS.
+  // multiplier = (BPS + amount × bps) / BPS. Divide by SCORE_SCALE here so the
+  // rate's hundredths convention applies once, at full precision.
+  return (score * (BPS + boosterAmount * BOOSTER_BOOST_BPS)) / (BPS * SCORE_SCALE);
 }
 
 /**
  * Full settlement for one incident: the claimant table, per-asset payout
- * amounts, and the merkle root the admin submits / anyone verifies.
+ * amounts, and the merkle root the TEE signs (or admin submits) / anyone verifies.
  */
 export async function settle(
   client: PublicClient,
@@ -146,7 +146,7 @@ export async function settle(
   opts: {
     insuredToken: `0x${string}`;
     insuredDecimals: number;
-    referenceBlock: bigint; // admin-pinned pre-incident block (Incident.referenceBlock)
+    referenceBlock: bigint; // pre-incident block (Incident.referenceBlock: HWM block or admin-pinned)
     windowEndBlock: bigint;
     assetOrder: `0x${string}`[];
     assetBalances: bigint[]; // pool totalAssets per asset at windowEndBlock
@@ -157,12 +157,12 @@ export async function settle(
 ): Promise<Settlement> {
   const inputHash = computeInputHash(events);
 
-  // Pre-incident value, anchored at the admin-pinned reference block (no
-  // on-chain drop detection — the admin already opened the incident).
+  // Pre-incident value, anchored at Incident.referenceBlock (the high-water-
+  // mark block for triggered opens; admin-pinned on the fallback path).
   const refBlock = opts.referenceBlock;
   const twap = await twapRatioBefore(client, cfg, refBlock);
   // Underlying USD pinned to window-end block — reproducible.
-  const underlyingUsd = await priceUsd1e18(client, cfg.priceOracle, opts.windowEndBlock);
+  const underlyingUsd = await priceUsd1e18(client, cfg.underlyingPriceOracle, opts.windowEndBlock);
 
   const holdFrom = refBlock > cfg.params.holdingMarginBlocks ? refBlock - cfg.params.holdingMarginBlocks : 1n;
 
@@ -190,7 +190,7 @@ export async function settle(
     // prior claims. Pinned pre-incident (like eligibility) so the claim window
     // can't be used to farm fresh score. The contract caps each account to one
     // live claim per incident, so a user's whole budget maps to a single row.
-    const earned = await earnedScoreOf(client, cfg, e.user, e.boosterIds, e.boosterAmounts, opts.referenceBlock);
+    const earned = await earnedScoreOf(client, cfg, e.user, e.boosterAmount, opts.referenceBlock);
     const spent = opts.spentOf(e.user);
     const available = earned > spent ? earned - spent : 0n;
     // The claimant spends what they requested, capped to availability (option A:
@@ -269,4 +269,29 @@ export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
     if ((v as any[])[1] === claimId) return tree.getProof(i) as `0x${string}`[];
   }
   throw new Error(`claim ${claimId} not in settlement`);
+}
+
+// EIP-712 payload the TEE signs for DefiInsurance.settleIncidentSigned —
+// SINGLE source of truth mirroring SETTLEMENT_TYPEHASH on-chain. inputHash and
+// claimCount bind the signature to the exact claimant table that was scored.
+// Sign with viem: walletClient.signTypedData(settlementTypedData(...)).
+export function settlementTypedData(
+  chainId: number,
+  defiInsurance: `0x${string}`,
+  s: Pick<Settlement, "incidentId" | "root" | "inputHash">,
+  claimCount: bigint
+) {
+  return {
+    domain: { name: "DefiInsurance", version: "1", chainId, verifyingContract: defiInsurance },
+    types: {
+      Settlement: [
+        { name: "incidentId", type: "uint256" },
+        { name: "root", type: "bytes32" },
+        { name: "inputHash", type: "bytes32" },
+        { name: "claimCount", type: "uint256" },
+      ],
+    },
+    primaryType: "Settlement",
+    message: { incidentId: s.incidentId, root: s.root, inputHash: s.inputHash, claimCount },
+  } as const;
 }

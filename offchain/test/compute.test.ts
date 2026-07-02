@@ -37,16 +37,15 @@ const ZERO = "0x0000000000000000000000000000000000000000" as const;
 
 const cfg: IncidentConfig = {
   coverageBps: 8000n, // κ = 80%
-  priceOracle: ORACLE,
-  underlyingConversionAddress: ZERO,
-  underlyingConversionCallData: "0x",
+  underlyingPriceOracle: ORACLE,
+  adapter: ZERO,
   params: { twapLookbackBlocks: 10n, holdingMarginBlocks: 5n, sampleStepBlocks: 5n },
-  scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: 1n, startBlock: 0n }],
+  scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n }], // 1e18 = 1.0/token/block
 };
 
 function reg(claimId: bigint, user: `0x${string}`, amount: bigint, scoreToSpend: bigint): InputEvent {
   // joinBlock after referenceBlock (100): bob joins at 105, carol at 106.
-  return { kind: "register", claimId, user, amount, scoreToSpend, boosterIds: [], boosterAmounts: [], blockNumber: 104n + claimId, logIndex: 0 };
+  return { kind: "register", claimId, user, amount, scoreToSpend, boosterAmount: 0n, blockNumber: 104n + claimId, logIndex: 0 };
 }
 
 function baseOpts(assetBalance: bigint) {
@@ -140,7 +139,7 @@ describe("settle — payout math", () => {
     setEarned();
     const withCancel: InputEvent[] = [
       ...events,
-      { kind: "cancel", claimId: 2n, user: CAROL, amount: 0n, scoreToSpend: 0n, boosterIds: [], boosterAmounts: [], blockNumber: 5n, logIndex: 0 },
+      { kind: "cancel", claimId: 2n, user: CAROL, amount: 0n, scoreToSpend: 0n, boosterAmount: 0n, blockNumber: 5n, logIndex: 0 },
     ];
     const s = await settle({} as any, 1n, cfg, withCancel, baseOpts(100n * WAD));
     expect(s.rows.map((r) => r.claimId)).toEqual([1n]); // carol dropped
@@ -150,16 +149,12 @@ describe("settle — payout math", () => {
 describe("earnedScoreOf — booster multiplier", () => {
   it("no boosters → integral × rate", async () => {
     h.integrals.set(BOB.toLowerCase(), 60n);
-    expect(await earnedScoreOf({} as any, cfg, BOB, [], [], 110n)).toEqual(60n);
+    expect(await earnedScoreOf({} as any, cfg, BOB, 0n, 110n)).toEqual(60n);
   });
-  it("booster id 1 adds +100bps per unit", async () => {
+  it("each booster unit adds +100bps", async () => {
     h.integrals.set(BOB.toLowerCase(), 60n);
     // 2 units ⇒ +200bps ⇒ 60 × 10200/10000 = 61 (floored)
-    expect(await earnedScoreOf({} as any, cfg, BOB, [1n], [2n], 110n)).toEqual(61n);
-  });
-  it("non-1 booster ids are ignored", async () => {
-    h.integrals.set(BOB.toLowerCase(), 60n);
-    expect(await earnedScoreOf({} as any, cfg, BOB, [2n], [5n], 110n)).toEqual(60n);
+    expect(await earnedScoreOf({} as any, cfg, BOB, 2n, 110n)).toEqual(61n);
   });
 });
 
@@ -174,7 +169,7 @@ describe("computeInputHash", () => {
     expect(computeInputHash([a, b])).not.toEqual(computeInputHash([b, a]));
   });
   it("a cancel changes the hash", () => {
-    const cancel: InputEvent = { kind: "cancel", claimId: 1n, user: BOB, amount: 0n, scoreToSpend: 0n, boosterIds: [], boosterAmounts: [], blockNumber: 3n, logIndex: 0 };
+    const cancel: InputEvent = { kind: "cancel", claimId: 1n, user: BOB, amount: 0n, scoreToSpend: 0n, boosterAmount: 0n, blockNumber: 3n, logIndex: 0 };
     expect(computeInputHash([a])).not.toEqual(computeInputHash([a, cancel]));
   });
 });

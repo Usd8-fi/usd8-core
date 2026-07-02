@@ -141,4 +141,8 @@ Each contract has a `@custom:security-contact rick@usd8.fi` natspec tag. Reports
 
 ## License
 
-MIT
+Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE). The code is
+source-available: you may audit, modify, test, and make non-production use of it
+freely, but production/commercial use requires a commercial license from the
+Licensor until the **Change Date (2030-07-01)**, on which each version converts
+to the **MIT** license.

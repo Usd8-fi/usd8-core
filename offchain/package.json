@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Open-source off-chain settlement computation for USD8 DeFi insurance. Anyone can run it locally to reproduce an incident's payout merkle root and verify a submitted root from chain history.",
+  "license": "BUSL-1.1",
+  "description": "Off-chain settlement computation for USD8 DeFi insurance. Anyone can run it locally to reproduce an incident's payout merkle root and verify a submitted root from chain history.",
   "scripts": {
     "build": "tsc",
     "compute": "node dist/main.js compute",

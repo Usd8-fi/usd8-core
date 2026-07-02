@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
@@ -448,6 +448,67 @@ contract TreasuryTest is Test {
         assertEq(strat.withdrawCallCount(), 0, "strategy not touched");
         assertEq(usdc.balanceOf(address(strat)), 115e6);
         assertEq(usdc.balanceOf(address(treasury)), 0);
+    }
+
+    /// @dev A redeem funded from an ERC-4626-style strategy whose withdraw leaks
+    ///      sub-USDC dust (ceil shares vs floor totalAssets) drops the reserve a
+    ///      hair beyond the payout. The reserveSupplyStatusCheck tolerates up to
+    ///      one USDC unit per strategy, so it doesn't false-revert; a larger
+    ///      shortfall is a real worsening and still reverts.
+    function test_RedeemToleratesStrategyWithdrawDust() public {
+        // 100 USDC in -> 100e18 USD8, all deployed to a lossy strategy; +10 USDC
+        // "yield" donated so the system is healthy with a 10e18 surplus.
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(treasury), 100e6);
+        treasury.mintUSD8(100e6);
+        vm.stopPrank();
+
+        LossyWithdrawStrategy strat = new LossyWithdrawStrategy(usdc);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+        treasury.depositToStrategy(strat, 100e6); // idle -> 0
+        vm.stopPrank();
+        usdc.mint(address(strat), 10e6); // simulated yield -> 10e18 surplus
+
+        // Withdraw leaks exactly 1 USDC unit: reserve drops one unit beyond the
+        // payout, surplus dips by 1e12. tol = 1 strategy * 1e12 covers it, so the
+        // redeem succeeds instead of false-reverting (pre-fix it would revert).
+        strat.setLossOnNextWithdraw(1);
+        vm.prank(alice);
+        treasury.redeemUSD8(50e18, 0);
+        assertEq(usdc.balanceOf(alice), 50e6);
+
+        // A shortfall beyond the per-strategy dust bound is a real worsening.
+        strat.setLossOnNextWithdraw(2);
+        vm.prank(alice);
+        vm.expectRevert(); // ReserveSupplyStatusWorsened
+        treasury.redeemUSD8(10e18, 0);
+    }
+
+    /// @dev When idle can't cover a redeem and every strategy that reports funds
+    ///      is stuck (paused/compromised → withdraw reverts), the walk can't top
+    ///      up, so redeem fails with a clear InsufficientLiquidity, not a generic
+    ///      transfer revert. Funds are safe: the burn rolls back with the tx.
+    function test_RedeemRevertsInsufficientLiquidityWhenStrategyStuck() public {
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(treasury), 100e6);
+        treasury.mintUSD8(100e6);
+        vm.stopPrank();
+
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+        treasury.depositToStrategy(strat, 100e6); // idle -> 0, strategy holds 100e6
+        vm.stopPrank();
+        strat.setWithdrawReverts(true); // strategy still reports 100e6 but can't deliver
+
+        uint256 supplyBefore = usd8.totalSupply();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Treasury.InsufficientLiquidity.selector, 50e6, 0));
+        treasury.redeemUSD8(50e18, 0);
+        assertEq(usd8.totalSupply(), supplyBefore, "burn rolled back");
     }
 
     function test_SystemPauseBlocksGatedAdminFunctions() public {
@@ -1078,7 +1139,7 @@ contract TreasuryTest is Test {
     }
 }
 
-/// @dev Strategy whose `underlying()` returns a non-USDC address, used to
+/// @dev Strategy whose underlying() returns a non-USDC address, used to
 ///      exercise StrategyAssetMismatch in Treasury.
 contract WrongUsdcStrategy is IStrategy {
     function underlying() external pure override returns (address) {
