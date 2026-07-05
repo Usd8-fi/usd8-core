@@ -11,9 +11,12 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {USD8} from "../src/USD8.sol";
+import {Registry} from "../src/Registry.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// @dev Minimal v2 implementation used to exercise the upgrade path.
 contract USD8V2 is USD8 {
@@ -23,6 +26,7 @@ contract USD8V2 is USD8 {
 }
 
 contract USD8Test is Test {
+    Registry authority;
     USD8 impl;
     USD8 usd8; // proxy, accessed as USD8
 
@@ -35,23 +39,24 @@ contract USD8Test is Test {
     event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
     event TreasuryChanged(address indexed oldTreasury, address indexed newTreasury);
 
-    function _deployProxy(address _admin, address _treasury) internal returns (USD8) {
-        bytes memory init = abi.encodeCall(USD8.initialize, (_admin, _treasury));
+    function _deployProxy(address _treasury) internal returns (USD8) {
+        bytes memory init = abi.encodeCall(USD8.initialize, (authority, _treasury));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         return USD8(address(proxy));
     }
 
-    function _unauthorizedAdmin(address account) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(USD8.UnauthorizedTimelock.selector, account);
+    function _unauthorizedTimelock(address account) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(Registry.UnauthorizedTimelock.selector, account);
     }
 
     function setUp() public {
+        authority = new Registry(timelock, timelock); // USD8 uses only the timelock role
         impl = new USD8();
-        usd8 = _deployProxy(timelock, treasury);
+        usd8 = _deployProxy(treasury);
     }
 
     function test_AuthorityWiring() public view {
-        assertEq(usd8.timelock(), timelock);
+        assertEq(authority.timelock(), timelock);
         assertEq(usd8.treasury(), treasury);
     }
 
@@ -79,25 +84,20 @@ contract USD8Test is Test {
         usd8.burn(alice, 1e18);
     }
 
-    function test_InitializeRejectsZeroAdmin() public {
-        vm.expectRevert(USD8.ZeroAddress.selector);
-        _deployProxy(address(0), treasury);
-    }
-
     function test_InitializeRejectsZeroTreasury() public {
-        vm.expectRevert(USD8.ZeroAddress.selector);
-        _deployProxy(timelock, address(0));
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        _deployProxy(address(0));
     }
 
     function test_InitializeOnlyOnce() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        usd8.initialize(timelock, treasury);
+        usd8.initialize(authority, treasury);
     }
 
     function test_ImplementationDisabled() public {
         // Direct calls to the implementation must not be initializable.
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(timelock, treasury);
+        impl.initialize(authority, treasury);
     }
 
     function test_MintToZeroReverts() public {
@@ -134,26 +134,27 @@ contract USD8Test is Test {
     }
 
     function test_SetTreasuryRejectsZero() public {
-        vm.expectRevert(USD8.ZeroAddress.selector);
+        vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
         usd8.setTreasury(address(0));
     }
 
     function test_NonAdminCannotSetTreasury() public {
-        vm.expectRevert(_unauthorizedAdmin(treasury));
+        vm.expectRevert(_unauthorizedTimelock(treasury));
         vm.prank(treasury);
         usd8.setTreasury(newTreasury);
     }
 
-    function test_AdminCanBeTransferred() public {
+    function test_TimelockCanBeTransferred() public {
         vm.prank(timelock);
-        vm.expectEmit(true, true, false, true, address(usd8));
+        vm.expectEmit(true, true, false, true, address(authority));
         emit TimelockChanged(timelock, newTimelock);
-        usd8.setTimelock(newTimelock);
+        authority.setTimelock(newTimelock);
 
-        assertEq(usd8.timelock(), newTimelock);
+        assertEq(authority.timelock(), newTimelock);
 
-        vm.expectRevert(_unauthorizedAdmin(timelock));
+        // Old timelock can no longer act (setTreasury is onlyTimelock).
+        vm.expectRevert(_unauthorizedTimelock(timelock));
         vm.prank(timelock);
         usd8.setTreasury(newTreasury);
 
@@ -162,16 +163,25 @@ contract USD8Test is Test {
         assertEq(usd8.treasury(), newTreasury);
     }
 
-    function test_SetAdminRejectsZero() public {
-        vm.expectRevert(USD8.ZeroAddress.selector);
+    function test_SetTimelockRejectsZero() public {
+        vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        usd8.setTimelock(address(0));
+        authority.setTimelock(address(0));
     }
 
-    function test_NonAdminCannotSetAdmin() public {
-        vm.expectRevert(_unauthorizedAdmin(treasury));
+    function test_NonTimelockCannotSetTimelock() public {
+        vm.expectRevert(_unauthorizedTimelock(treasury));
         vm.prank(treasury);
-        usd8.setTimelock(newTimelock);
+        authority.setTimelock(newTimelock);
+    }
+
+    function test_SweepStrayToken() public {
+        MockERC20 stray = new MockERC20("Stray", "STR", 18);
+        stray.mint(address(usd8), 5e18); // foreign token mis-sent to the USD8 contract
+        vm.prank(timelock);
+        usd8.sweepToken(IERC20(address(stray)), alice);
+        assertEq(stray.balanceOf(alice), 5e18);
+        assertEq(stray.balanceOf(address(usd8)), 0);
     }
 
     // ─────────────────── UUPS upgrade path ───────────────────
@@ -199,7 +209,7 @@ contract USD8Test is Test {
 
     function test_NonAdminCannotUpgrade() public {
         USD8V2 v2 = new USD8V2();
-        vm.expectRevert(_unauthorizedAdmin(treasury));
+        vm.expectRevert(_unauthorizedTimelock(treasury));
         vm.prank(treasury);
         usd8.upgradeToAndCall(address(v2), "");
     }

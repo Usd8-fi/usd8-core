@@ -7,6 +7,7 @@ import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
 const h = vi.hoisted(() => ({
   integrals: new Map<string, bigint>(),
   minBalances: new Map<string, bigint>(),
+  boosterBalances: new Map<string, bigint>(),
 }));
 
 vi.mock("../src/chain.js", async (importOriginal) => {
@@ -16,12 +17,13 @@ vi.mock("../src/chain.js", async (importOriginal) => {
     ratioAt: vi.fn(async () => actual.WAD), // token→underlying ratio = 1.0
     priceUsd1e18: vi.fn(async () => actual.WAD), // underlying = $1
     minBalanceOver: vi.fn(async (_c: any, _t: any, who: string) => h.minBalances.get(who.toLowerCase()) ?? 10_000n * actual.WAD),
+    minErc1155BalanceOver: vi.fn(async (_c: any, _col: any, who: string) => h.boosterBalances.get(who.toLowerCase()) ?? 0n),
     tokenBlockIntegral: vi.fn(async (_c: any, _t: any, who: string) => h.integrals.get(who.toLowerCase()) ?? 0n),
   };
 });
 
 import * as chain from "../src/chain.js";
-import { settle, earnedScoreOf, computeInputHash, settlementTree, LEAF_ENCODING } from "../src/compute.js";
+import { settle, earnedScoreOf, settlementTree, LEAF_ENCODING } from "../src/compute.js";
 import type { IncidentConfig, InputEvent } from "../src/chain.js";
 
 beforeEach(() => vi.clearAllMocks());
@@ -33,12 +35,14 @@ const INS = "0x0000000000000000000000000000000000001115" as const;
 const ASSET = "0x0000000000000000000000000000000000000a55" as const;
 const SCORED = "0x0000000000000000000000000000000000005c04" as const;
 const ORACLE = "0x000000000000000000000000000000000000044c" as const;
+const BOOSTER = "0x00000000000000000000000000000000b0057e40" as const;
 const ZERO = "0x0000000000000000000000000000000000000000" as const;
 
 const cfg: IncidentConfig = {
   coverageBps: 8000n, // κ = 80%
   underlyingPriceOracle: ORACLE,
-  adapter: ZERO,
+  underlyingConversionAddress: ZERO,
+  underlyingConversionCallData: "0x",
   params: { twapLookbackBlocks: 10n, holdingMarginBlocks: 5n, sampleStepBlocks: 5n },
   scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n }], // 1e18 = 1.0/token/block
 };
@@ -54,10 +58,12 @@ function baseOpts(assetBalance: bigint) {
     insuredDecimals: 18,
     referenceBlock: 100n,
     windowEndBlock: 110n,
-    assetOrder: [ASSET] as `0x${string}`[],
-    assetBalances: [assetBalance],
-    assetUsd1e18: [WAD], // $1 per asset token
-    assetDecimals: [18],
+    poolOrder: [ASSET] as `0x${string}`[],
+    poolBalances: [assetBalance],
+    poolAssetUsd1e18: [WAD], // $1 per asset token
+    poolAssetDecimals: [18],
+    boosterCollection: BOOSTER,
+    boosterId: 1n,
     spentOf: (_u: `0x${string}`) => 0n,
   };
 }
@@ -158,32 +164,64 @@ describe("earnedScoreOf — booster multiplier", () => {
   });
 });
 
-describe("computeInputHash", () => {
-  const a = reg(1n, BOB, 100n * WAD, 60n);
-  const b = reg(2n, CAROL, 50n * WAD, 40n);
+describe("settle — booster cap", () => {
+  // A committed boost is capped at the claimant's MIN booster balance over
+  // [joinBlock, windowEnd] (boosters aren't escrowed, so continuous holding is
+  // required). bob commits 2 units; his effective boost is min(2, held).
+  function boostReg(user: `0x${string}`, boosterAmount: bigint): InputEvent {
+    return { kind: "register", claimId: 1n, user, amount: 100n * WAD, scoreToSpend: 1_000_000n, boosterAmount, blockNumber: 105n, logIndex: 0 };
+  }
 
-  it("is deterministic", () => {
-    expect(computeInputHash([a, b])).toEqual(computeInputHash([a, b]));
+  it("held boosters ≥ committed → full boost applied", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.boosterBalances.clear();
+    h.integrals.set(BOB.toLowerCase(), 100n);
+    h.boosterBalances.set(BOB.toLowerCase(), 2n); // holds ≥ the 2 committed
+    const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], baseOpts(10_000n * WAD));
+    // 100 × 10200/10000 = 102
+    expect(s.rows[0].earnedScore).toEqual(102n);
   });
-  it("is order-sensitive", () => {
-    expect(computeInputHash([a, b])).not.toEqual(computeInputHash([b, a]));
+
+  it("boost capped at min held; sold-down boosters don't count", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.boosterBalances.clear();
+    h.integrals.set(BOB.toLowerCase(), 100n);
+    h.boosterBalances.set(BOB.toLowerCase(), 0n); // committed 2 but held 0 over the window
+    const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], baseOpts(10_000n * WAD));
+    expect(s.rows[0].earnedScore).toEqual(100n); // no boost
+    expect((chain.minErc1155BalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls.length).toBe(1);
   });
-  it("a cancel changes the hash", () => {
-    const cancel: InputEvent = { kind: "cancel", claimId: 1n, user: BOB, amount: 0n, scoreToSpend: 0n, boosterAmount: 0n, blockNumber: 3n, logIndex: 0 };
-    expect(computeInputHash([a])).not.toEqual(computeInputHash([a, cancel]));
+
+  it("no committed boosters → no ERC1155 read", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.boosterBalances.clear();
+    h.integrals.set(BOB.toLowerCase(), 100n);
+    await settle({} as any, 1n, cfg, [boostReg(BOB, 0n)], baseOpts(10_000n * WAD));
+    expect((chain.minErc1155BalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls.length).toBe(0);
   });
 });
 
 describe("settlementTree / proofs", () => {
+  const rows = [
+    { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n },
+    { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n },
+  ];
+
   it("proofs verify against the root with the canonical leaf encoding", () => {
-    const rows = [
-      { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n },
-      { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n },
-    ];
     const tree = settlementTree(1n, rows);
     for (const [i, v] of tree.entries()) {
       const proof = tree.getProof(i);
       expect(StandardMerkleTree.verify(tree.root, LEAF_ENCODING as unknown as string[], v, proof)).toBe(true);
     }
+  });
+
+  it("root is deterministic and changes with amounts or scoreSpent", () => {
+    const base = settlementTree(1n, rows).root;
+    expect(settlementTree(1n, rows).root).toEqual(base);
+    expect(settlementTree(1n, [{ ...rows[0], amounts: [61n * WAD] }, rows[1]]).root).not.toEqual(base);
+    expect(settlementTree(1n, [{ ...rows[0], scoreSpent: 59n }, rows[1]]).root).not.toEqual(base);
   });
 });

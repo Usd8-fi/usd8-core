@@ -4,28 +4,50 @@ import { createPublicClient, http, parseAbi, parseAbiItem, type PublicClient } f
 import { CONFIG } from "./config.js";
 
 export const WAD = 10n ** 18n;
+export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 
-// Contract surface this tool reads. Settlement config comes from the
-// per-incident snapshot (DefiInsurance.getIncidentConfig); per-stake-asset
-// price feeds from coverPoolAssets(...).usdPriceFeed; spent score from the
-// CoverPool ledger.
-export const COVER_POOL_ABI = parseAbi([
-  "function incidents(uint256) view returns (address insuredToken, uint64 windowEndTime, bytes32 root, bytes32 inputHash, uint256 claimCount, uint256 resolvedCount, uint64 rootSubmittedAt, uint64 referenceBlock)",
-  "function claims(uint256) view returns (address user, uint256 incidentId, uint128 insuredTokenAmount, bool finalized, bool closed)",
-  "function getIncidentConfig(uint256) view returns ((uint256 coverageBps, address underlyingPriceOracle, address adapter, (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks) params, (address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[] scoredTokens))",
-  "function getClaimBoosters(uint256) view returns (uint256[])",
-  "function coverPoolAssetListLength() view returns (uint256)",
-  "function coverPoolAssetList(uint256) view returns (address)",
-  "function totalAssets(address) view returns (uint256)",
-  "function coverPoolAssets(address) view returns (uint256 totalShares, uint256 totalAssets, uint256 unstakingShares, uint128 rewardRate, uint64 periodFinish, uint64 lastUpdateTime, address usdPriceFeed, uint256 rewardPerShareStored)",
+// DefiInsurance surface: incidents, per-token config, global settlement params.
+// The per-incident config is NOT snapshot on-chain — it is reconstructed by
+// reading these at the incident's openBlock (see {incidentConfigOf}).
+export const DEFI_ABI = parseAbi([
+  "function incidents(uint256) view returns (address insuredToken, uint64 claimWindowEndTime, bytes32 root, uint256 unresolved, uint64 rootSubmittedAt, uint64 referenceBlock, uint64 openBlock, bool closed)",
+  "function getInsuredToken(address) view returns ((uint256 maxCoverageBps, address underlyingPriceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData))",
+  "function settlementParams() view returns (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks)",
+]);
+
+// Registry surface: topology (pool set), scored tokens, booster collection.
+export const REGISTRY_ABI = parseAbi([
+  "function pools() view returns (address[] assets, address[] poolAddrs)",
+  "function poolsLength() view returns (uint256)",
+  "function getScoredTokens() view returns ((address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[])",
+  "function boosterNFT() view returns (address)",
+]);
+
+// SingleAssetCoverPool surface: per-pool asset + valuation.
+export const POOL_ABI = parseAbi([
+  "function asset() view returns (address)",
+  "function totalAssets() view returns (uint256)",
 ]);
 
 export const CLAIM_REGISTERED = parseAbiItem(
   "event ClaimRegistered(uint256 indexed claimId, uint256 indexed incidentId, address indexed user, uint128 insuredTokenAmount, uint256 scoreToSpend, uint256 boosterAmount)"
 );
 export const CLAIM_CANCELLED = parseAbiItem("event ClaimCancelled(uint256 indexed claimId, address indexed user)");
-export const ERC20_TRANSFER = parseAbiItem(
-  "event Transfer(address indexed from, address indexed to, uint256 value)"
+// The spent-score ledger is this event, summed per user (no on-chain state).
+export const SCORE_SPENT = parseAbiItem(
+  "event ScoreSpent(address indexed user, uint256 amount, uint256 indexed incidentId)"
+);
+// Payout-module history: enumerates every module ever registered so ScoreSpent
+// logs can be summed across all of them.
+export const PAYOUT_MODULE_SET = parseAbiItem(
+  "event PayoutModuleSet(address indexed oldModule, address indexed newModule)"
+);
+export const ERC20_TRANSFER = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
+export const ERC1155_TRANSFER_SINGLE = parseAbiItem(
+  "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+);
+export const ERC1155_TRANSFER_BATCH = parseAbiItem(
+  "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
 );
 
 const FEED_ABI = parseAbi([
@@ -36,9 +58,9 @@ const ERC20_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function decimals() view returns (uint8)",
 ]);
-const LEDGER_ABI = parseAbi(["function insuranceScoreSpent(address) view returns (uint256)"]);
+const ERC1155_ABI = parseAbi(["function balanceOf(address, uint256) view returns (uint256)"]);
 
-// Mirror of the on-chain config structs (see CoverPool).
+// Mirror of the on-chain config, reconstructed off-chain at the incident's openBlock.
 export interface SettlementParams {
   twapLookbackBlocks: bigint;
   holdingMarginBlocks: bigint;
@@ -50,9 +72,10 @@ export interface ScoredToken {
   startBlock: bigint;
 }
 export interface IncidentConfig {
-  coverageBps: bigint;
+  coverageBps: bigint; // insured token's maxCoverageBps (κ) at openBlock
   underlyingPriceOracle: `0x${string}`;
-  adapter: `0x${string}`;
+  underlyingConversionAddress: `0x${string}`;
+  underlyingConversionCallData: `0x${string}`;
   params: SettlementParams;
   scoredTokens: ScoredToken[];
 }
@@ -61,9 +84,7 @@ export function makeClient(rpcUrl: string): PublicClient {
   return createPublicClient({ transport: http(rpcUrl, { retryCount: 5 }) });
 }
 
-/** One register-or-cancel event, in true chain order. The contract chains
- *  `inputHash` in exactly this order, so the commitment must be replayed over
- *  this stream — NOT register-order with cancels folded in. */
+/** One register-or-cancel event, in true chain order. */
 export interface InputEvent {
   kind: "register" | "cancel";
   claimId: bigint;
@@ -81,9 +102,8 @@ function orderLogs<T extends { blockNumber: bigint; logIndex: number }>(a: T, b:
 
 /**
  * The incident's register/cancel events in chronological (block, logIndex)
- * order — the exact order the contract chained {Incident.inputHash}. Note
- * ClaimCancelled is not indexed by incidentId, so cancels are matched to this
- * incident by claimId membership.
+ * order. Note ClaimCancelled is not indexed by incidentId, so cancels are
+ * matched to this incident by claimId membership.
  */
 export async function readInputEvents(
   client: PublicClient,
@@ -133,38 +153,123 @@ export async function readInputEvents(
   return events.sort(orderLogs);
 }
 
-/** Read the per-incident config snapshot frozen at open. */
-export async function incidentConfigOf(client: PublicClient, incidentId: bigint): Promise<IncidentConfig> {
-  return (await client.readContract({
+/**
+ * Reconstruct the per-incident settlement config from contract state as of the
+ * incident's openBlock (nothing is snapshot on-chain). History is immutable, so
+ * a later governance retune can never alter an in-flight or settled incident.
+ */
+export async function incidentConfigOf(
+  client: PublicClient,
+  insuredToken: `0x${string}`,
+  openBlock: bigint
+): Promise<IncidentConfig> {
+  const it = (await client.readContract({
     address: CONFIG.defiInsurance,
-    abi: COVER_POOL_ABI,
-    functionName: "getIncidentConfig",
-    args: [incidentId],
-  })) as IncidentConfig;
+    abi: DEFI_ABI,
+    functionName: "getInsuredToken",
+    args: [insuredToken],
+    blockNumber: openBlock,
+  })) as { maxCoverageBps: bigint; underlyingPriceOracle: `0x${string}`; underlyingConversionAddress: `0x${string}`; underlyingConversionCallData: `0x${string}` };
+
+  const [twapLookbackBlocks, holdingMarginBlocks, sampleStepBlocks] = (await client.readContract({
+    address: CONFIG.defiInsurance,
+    abi: DEFI_ABI,
+    functionName: "settlementParams",
+    blockNumber: openBlock,
+  })) as readonly [bigint, bigint, bigint];
+
+  const scoredTokens = (await client.readContract({
+    address: CONFIG.registry,
+    abi: REGISTRY_ABI,
+    functionName: "getScoredTokens",
+    blockNumber: openBlock,
+  })) as ScoredToken[];
+
+  return {
+    coverageBps: it.maxCoverageBps,
+    underlyingPriceOracle: it.underlyingPriceOracle,
+    underlyingConversionAddress: it.underlyingConversionAddress,
+    underlyingConversionCallData: it.underlyingConversionCallData,
+    params: { twapLookbackBlocks, holdingMarginBlocks, sampleStepBlocks },
+    scoredTokens,
+  };
 }
 
-/** First block at which `incidentId` saw a claim — deterministic lower bound. */
-export async function firstClaimBlockOf(
+/** The registered (assets, pools) topology as of `blockNumber`. Payout rows
+ *  align to this list; it is frozen while the incident is active. */
+export async function poolsAt(
   client: PublicClient,
-  incidentId: bigint,
-  fromBlock: bigint,
-  toBlock: bigint
-): Promise<bigint> {
-  const regs = await client.getLogs({
-    address: CONFIG.defiInsurance,
-    event: CLAIM_REGISTERED,
-    args: { incidentId },
-    fromBlock,
-    toBlock,
-  });
-  if (regs.length === 0) throw new Error(`no claims for incident ${incidentId}`);
-  return regs.reduce((m, r) => (r.blockNumber! < m ? r.blockNumber! : m), regs[0].blockNumber!);
+  blockNumber: bigint
+): Promise<{ assets: `0x${string}`[]; poolAddrs: `0x${string}`[] }> {
+  const [assets, poolAddrs] = (await client.readContract({
+    address: CONFIG.registry,
+    abi: REGISTRY_ABI,
+    functionName: "pools",
+    blockNumber,
+  })) as readonly [`0x${string}`[], `0x${string}`[]];
+  return { assets: [...assets], poolAddrs: [...poolAddrs] };
+}
+
+/** A pool's staked-asset balance (totalAssets) at `blockNumber`. */
+export async function poolTotalAssetsAt(client: PublicClient, pool: `0x${string}`, blockNumber: bigint): Promise<bigint> {
+  return (await client.readContract({
+    address: pool,
+    abi: POOL_ABI,
+    functionName: "totalAssets",
+    blockNumber,
+  })) as bigint;
+}
+
+/** The canonical booster ERC-1155 collection as of `blockNumber` (0 if unset). */
+export async function boosterNftAt(client: PublicClient, blockNumber: bigint): Promise<`0x${string}`> {
+  return (await client.readContract({
+    address: CONFIG.registry,
+    abi: REGISTRY_ABI,
+    functionName: "boosterNFT",
+    blockNumber,
+  })) as `0x${string}`;
 }
 
 /**
- * First block whose timestamp is ≥ `ts` (binary search). All settlement
- * reads anchor on the incident's window-end block found this way, making the
- * whole computation reproducible by anyone at any later time.
+ * Insurance score already spent per user, from the ScoreSpent event ledger.
+ * Sums ScoreSpent logs across EVERY payout module ever registered (enumerated
+ * from the Registry's PayoutModuleSet events), pinned to blocks strictly before
+ * `openBlock`.
+ *
+ * INTENTIONAL asymmetry with earnedScoreOf, which anchors at the earlier
+ * `referenceBlock` (do not "align" them): earned is capped pre-incident so score
+ * can't be farmed during the claim window, but spent must subtract EVERY prior
+ * commitment up to the open. Anchoring spent at referenceBlock instead would miss
+ * score a user burned in (referenceBlock, openBlock] — e.g. on a prior incident
+ * that finalized in that gap — and let them re-claim it (double-spend). All prior
+ * incidents resolve before openBlock (one-at-a-time), so openBlock−1 captures them.
+ */
+export async function spentScoreByUser(client: PublicClient, openBlock: bigint): Promise<Map<string, bigint>> {
+  const spent = new Map<string, bigint>();
+  if (openBlock === 0n) return spent;
+  const toBlock = openBlock - 1n;
+
+  const sets = await client.getLogs({ address: CONFIG.registry, event: PAYOUT_MODULE_SET, fromBlock: 0n, toBlock });
+  const modules = new Map<string, `0x${string}`>();
+  for (const s of sets) {
+    const m = s.args.newModule as `0x${string}`;
+    if (m && m !== ZERO_ADDRESS) modules.set(m.toLowerCase(), m);
+  }
+
+  for (const mod of modules.values()) {
+    const logs = await client.getLogs({ address: mod, event: SCORE_SPENT, fromBlock: 0n, toBlock });
+    for (const l of logs) {
+      const u = (l.args.user as string).toLowerCase();
+      spent.set(u, (spent.get(u) ?? 0n) + (l.args.amount as bigint));
+    }
+  }
+  return spent;
+}
+
+/**
+ * First block whose timestamp is ≥ `ts` (binary search). All settlement reads
+ * anchor on deterministic blocks (openBlock, window-end) so the computation is
+ * reproducible by anyone at any later time.
  */
 export async function blockAtTimestamp(client: PublicClient, ts: bigint): Promise<bigint> {
   let lo = 1n;
@@ -182,31 +287,27 @@ export async function blockAtTimestamp(client: PublicClient, ts: bigint): Promis
 }
 
 /**
- * Insured-token → underlying ratio at `blockNumber`: the token's
- * IInsuredTokenAdapter.valuationRate() (WAD-normalized underlying per 1e18
- * token). `address(0)` ⇒ identity (the token IS the underlying), ratio = 1e18.
+ * Insured-token → underlying ratio at `blockNumber`, via the per-token recipe:
+ * staticcall(conversionAddress, conversionCallData) → WAD-normalized underlying
+ * per 1e18 token. `address(0)` ⇒ identity (the token IS the underlying), 1e18.
  */
-export async function ratioAt(client: PublicClient, adapter: `0x${string}`, blockNumber: bigint): Promise<bigint> {
-  if (adapter === "0x0000000000000000000000000000000000000000") return WAD;
-  return (await client.readContract({
-    address: adapter,
-    abi: parseAbi(["function valuationRate() view returns (uint256)"]),
-    functionName: "valuationRate",
-    blockNumber,
-  })) as bigint;
+export async function ratioAt(
+  client: PublicClient,
+  conversionAddress: `0x${string}`,
+  conversionCallData: `0x${string}`,
+  blockNumber: bigint
+): Promise<bigint> {
+  if (conversionAddress === ZERO_ADDRESS) return WAD;
+  const res = await client.call({ to: conversionAddress, data: conversionCallData, blockNumber });
+  return BigInt(res.data ?? "0x0");
 }
 
 /**
  * USD price from a Chainlink-style oracle at `blockNumber`, normalized to 1e18.
  * Reads the oracle's own `decimals()` and pins the block so the value is
- * reproducible. For non-USD/comparative/LP underlyings this points at one of
- * our adapters conforming to the same interface.
+ * reproducible.
  */
-export async function priceUsd1e18(
-  client: PublicClient,
-  oracle: `0x${string}`,
-  blockNumber: bigint
-): Promise<bigint> {
+export async function priceUsd1e18(client: PublicClient, oracle: `0x${string}`, blockNumber: bigint): Promise<bigint> {
   const [, answer] = (await client.readContract({
     address: oracle,
     abi: FEED_ABI,
@@ -225,28 +326,6 @@ export async function priceUsd1e18(
 
 export async function decimalsOf(client: PublicClient, token: `0x${string}`): Promise<number> {
   return (await client.readContract({ address: token, abi: ERC20_ABI, functionName: "decimals" })) as number;
-}
-
-/** The insurance-score spend ledger — the CoverPool itself holds it. */
-export async function insuranceScoreLedgerOf(_client: PublicClient): Promise<`0x${string}`> {
-  return CONFIG.coverPool;
-}
-
-/** How much insurance score `user` has already spent, pinned at `blockNumber`. */
-export async function insuranceScoreSpentOf(
-  client: PublicClient,
-  ledger: `0x${string}`,
-  user: `0x${string}`,
-  blockNumber: bigint
-): Promise<bigint> {
-  if (ledger === "0x0000000000000000000000000000000000000000") return 0n;
-  return (await client.readContract({
-    address: ledger,
-    abi: LEDGER_ABI,
-    functionName: "insuranceScoreSpent",
-    args: [user],
-    blockNumber,
-  })) as bigint;
 }
 
 export async function balanceOfAt(
@@ -274,11 +353,9 @@ function sortedTransfers(outs: any[], ins: any[]) {
 
 /**
  * Minimum balance of `who` in `token` over [fromBlock, toBlock], computed
- * exactly: start from balanceOf(fromBlock) and replay Transfer events. The
- * min over the window is what the holder provably kept the whole time — this
- * is also what makes cross-claimant dedupe automatic: tokens moved
- * wallet-to-wallet mid-window depress the sender's min after the transfer and
- * the receiver's min before it, so the same units can never count twice.
+ * exactly: start from balanceOf(fromBlock) and replay Transfer events. The min
+ * over the window is what the holder provably kept the whole time, which also
+ * makes cross-claimant dedupe automatic.
  */
 export async function minBalanceOver(
   client: PublicClient,
@@ -299,11 +376,64 @@ export async function minBalanceOver(
 }
 
 /**
+ * Minimum ERC-1155 balance of `who` for `id` over [fromBlock, toBlock], by
+ * replaying TransferSingle/TransferBatch — the same continuous-holding rule the
+ * insured-token eligibility uses, applied to the booster. This is the cap on the
+ * boost a claim can apply: the claimant must have held the committed boosters
+ * continuously from filing through window-end (they are burned at finalize).
+ */
+export async function minErc1155BalanceOver(
+  client: PublicClient,
+  collection: `0x${string}`,
+  who: `0x${string}`,
+  id: bigint,
+  fromBlock: bigint,
+  toBlock: bigint
+): Promise<bigint> {
+  let bal = (await client.readContract({
+    address: collection,
+    abi: ERC1155_ABI,
+    functionName: "balanceOf",
+    args: [who, id],
+    blockNumber: fromBlock,
+  })) as bigint;
+  let min = bal;
+  if (toBlock <= fromBlock) return min;
+
+  const events: { blockNumber: bigint; logIndex: number; delta: bigint }[] = [];
+  const from = fromBlock + 1n;
+
+  const push = (l: any, delta: bigint) => events.push({ blockNumber: l.blockNumber!, logIndex: l.logIndex!, delta });
+
+  const outSingle = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_SINGLE, args: { from: who }, fromBlock: from, toBlock });
+  const inSingle = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_SINGLE, args: { to: who }, fromBlock: from, toBlock });
+  for (const l of outSingle) if ((l.args.id as bigint) === id) push(l, -(l.args.value as bigint));
+  for (const l of inSingle) if ((l.args.id as bigint) === id) push(l, l.args.value as bigint);
+
+  const outBatch = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_BATCH, args: { from: who }, fromBlock: from, toBlock });
+  const inBatch = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_BATCH, args: { to: who }, fromBlock: from, toBlock });
+  const batchDelta = (l: any): bigint => {
+    const ids = l.args.ids as bigint[];
+    const vals = l.args.values as bigint[];
+    let v = 0n;
+    for (let j = 0; j < ids.length; j++) if (ids[j] === id) v += vals[j];
+    return v;
+  };
+  for (const l of outBatch) push(l, -batchDelta(l));
+  for (const l of inBatch) push(l, batchDelta(l));
+
+  events.sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : Number(a.blockNumber - b.blockNumber)));
+  for (const e of events) {
+    bal += e.delta;
+    if (bal < min) min = bal;
+  }
+  return min;
+}
+
+/**
  * Cumulative token·block integral of `who`'s `token` balance over [fromBlock,
- * toBlock] — `Σ balance × blockDuration`. This is the USD8 insurance-score
- * primitive: a NON-expiring accumulator (not a time-weighted average), so
- * holding longer always grows the score. Event-replayed; weighted by block
- * distance; result is in token-base-units × blocks.
+ * toBlock] — `Σ balance × blockDuration`. The USD8 insurance-score primitive: a
+ * NON-expiring accumulator (not a time-weighted average), event-replayed.
  */
 export async function tokenBlockIntegral(
   client: PublicClient,

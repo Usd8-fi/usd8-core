@@ -14,6 +14,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {USD8} from "./USD8.sol";
+import {Registry} from "./Registry.sol";
+import {Managed} from "./Managed.sol";
 import {IProfitDistributionReceiver} from "./interfaces/IProfitDistributionReceiver.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 
@@ -23,7 +25,7 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///           R  = reserve: all USDC the Treasury controls, incl. accrued yield ({getReserveBalance}).
 ///           eff = effective collateral = min(R·1e12, USD8Supply).
 ///           S  = surplus = R·1e12 − USD8Supply (signed): S > 0 is reserve above backing
-///                (routed to yield via {harvestRevenue}/{distributeRevenue}); S < 0 is distress.
+///                (routed to yield via {harvestAndDistribute}/{distributeRevenue}); S < 0 is distress.
 ///         The reserve asset is USDC and cannot be changed.
 ///
 ///         Mint is always 1:1. Redeem pays redeemedUSDC = givenUSD8 · eff / (USD8Supply · 1e12),
@@ -37,22 +39,8 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///         idle; admin moves it via {depositToStrategy}/{withdrawFromStrategy}. Redeem spends idle
 ///         first, then walks the list in order — the array is the withdrawal-priority queue.
 /// @custom:security-contact rick@usd8.fi
-contract Treasury is ReentrancyGuardTransient {
+contract Treasury is ReentrancyGuardTransient, Managed {
     using SafeERC20 for IERC20;
-
-    // ─────────────────────────── Types ───────────────────────────
-
-    /// @notice Pause-state values. Mutually exclusive.
-    ///         - None         : both mint and redeem allowed.
-    ///         - SystemPaused : neither mint nor redeem allowed.
-    ///         - MintPaused   : mint blocked, redeem allowed.
-    ///         - RedeemPaused : redeem blocked, mint allowed.
-    enum PauseState {
-        None,
-        SystemPaused,
-        MintPaused,
-        RedeemPaused
-    }
 
     /// @notice How harvested USD8 revenue is routed to a recipient.
     ///         - DirectTransfer: raw USD8 transfer; use only when
@@ -74,7 +62,7 @@ contract Treasury is ReentrancyGuardTransient {
     /// @notice Decimal-scale factor between USDC (6) and USD8 (18): 1e12.
     uint256 public constant USDC_TO_USD8_SCALE = 1e12;
 
-    /// @notice Overcollateralization buffer retained by {harvestRevenue},
+    /// @notice Overcollateralization buffer retained by {harvestAndDistribute},
     ///         expressed as a divisor of supply: buffer = supply / 1000,
     ///         i.e. 10 bps. After every harvest the reserve sits at
     ///         supply + buffer rather than exactly at supply, keeping the
@@ -85,19 +73,6 @@ contract Treasury is ReentrancyGuardTransient {
 
     /// @notice The USD8 token this Treasury mints and burns. Immutable.
     USD8 public immutable usd8;
-
-    /// @notice Slow governance role. Holds user-impacting powers: strategy
-    ///         approval, role assignment, rescues. Expected to be a
-    ///         TimelockController in production.
-    address public timelock;
-
-    /// @notice Fast operational role. Runs pause, strategy fund moves,
-    ///         force-removal, and revenue harvest/distribution.
-    address public admin;
-
-    /// @notice Current pause state. Defaults to None on deployment.
-    ///         Settable by admin or timelock via {setPauseState}.
-    PauseState public pauseState;
 
     /// @notice Approved strategies, in timelock-determined order. Membership
     ///         in this array IS the approval — there is no separate
@@ -111,6 +86,25 @@ contract Treasury is ReentrancyGuardTransient {
     ///         per mint/redeem) and the redeem fallback walk. Membership
     ///         checks are O(n) array scans, also cheap at small N.
     IStrategy[] public strategies;
+
+    /// @notice A registered profit receiver and its distribution config.
+    /// @param receiver  Address paid a weighted share by {harvestAndDistribute}.
+    /// @param weight    Relative share of each weighted distribution (0 = registered
+    ///                  but currently earns nothing).
+    /// @param mode      How USD8 is delivered: raw transfer, or the vesting-aware
+    ///                  {IProfitDistributionReceiver-receiveProfitDistribution}.
+    struct ProfitReceiver {
+        address receiver;
+        uint256 weight;
+        RevenueDistributionMode mode;
+    }
+
+    /// @notice Registered profit receivers — the weighted-split targets of
+    ///         {harvestAndDistribute}. Admin curates via
+    ///         {setProfitReceiver}/{removeProfitReceiver}. Keep the count small:
+    ///         each distribution is a linear scan plus one external call per
+    ///         positive-weight receiver.
+    ProfitReceiver[] public profitReceivers;
 
     // ─────────────────────────── Errors ──────────────────────────
 
@@ -136,20 +130,6 @@ contract Treasury is ReentrancyGuardTransient {
     ///         every strategy is illiquid or reverting).
     error InsufficientLiquidity(uint256 needed, uint256 available);
 
-    /// @notice Thrown when the operation is blocked by the current pause
-    ///         state.
-    /// @param  state The active {pauseState} value.
-    error Paused(PauseState state);
-
-    /// @notice Thrown when a zero address is passed where one is not allowed.
-    error ZeroAddress();
-
-    /// @notice Thrown when a non-timelock account calls an timelock function.
-    error UnauthorizedTimelock(address caller);
-
-    /// @notice Thrown when a caller is neither admin nor timelock.
-    error UnauthorizedAdmin(address caller);
-
     /// @notice Thrown when an timelock operation targets a strategy that has
     ///         not been approved via {addStrategy}.
     error StrategyNotApproved(IStrategy strategy);
@@ -162,13 +142,12 @@ contract Treasury is ReentrancyGuardTransient {
     ///         strategy into Treasury by mistake.
     error StrategyAssetMismatch(IStrategy strategy, address expected, address actual);
 
-    /// @notice Thrown by {rescueToken} when the token is the reserve asset
-    ///         or the USD8 revenue token.
-    error RescueProtected(address token);
+    /// @notice Thrown by {removeProfitReceiver} when the address isn't registered.
+    error ProfitReceiverNotFound(address receiver);
 
-    /// @notice Thrown by {rescueETH} when the low-level call to the
-    ///         recipient fails.
-    error EthTransferFailed();
+    /// @notice Thrown by {harvestAndDistribute} when there is revenue to
+    ///         distribute but no registered receiver has a positive weight.
+    error NoEligibleProfitReceivers();
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -177,15 +156,6 @@ contract Treasury is ReentrancyGuardTransient {
 
     /// @notice Emitted when user redeems USD8 and receives USDC.
     event Redeemed(address indexed user, uint256 usd8Amount, uint256 usdcAmount);
-
-    /// @notice Emitted when timelock updates the pause state.
-    event PauseStateChanged(PauseState oldState, PauseState newState);
-
-    /// @notice Emitted when timelock is transferred.
-    event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
-
-    /// @notice Emitted when timelock updates the fast operational admin.
-    event AdminChanged(address indexed oldAdmin, address indexed newAdmin);
 
     /// @notice Emitted when timelock approves a new strategy.
     event StrategyAdded(IStrategy indexed strategy);
@@ -203,74 +173,33 @@ contract Treasury is ReentrancyGuardTransient {
     ///         balance, not the requested amount.
     event WithdrawnFromStrategy(IStrategy indexed strategy, uint256 amount);
 
-    /// @notice Emitted when timelock rescues a stray ERC20 token.
-    event TokenRescued(address indexed token, address indexed to, uint256 amount);
-
-    /// @notice Emitted when timelock rescues stuck native ETH.
-    event ETHRescued(address indexed to, uint256 amount);
-
     /// @notice Emitted when timelock forwards USD8 from the harvested-revenue
     ///         balance to a recipient.
     event RevenueDistributed(address indexed recipient, uint256 amount);
 
-    /// @notice Emitted when {harvestRevenue} mints surplus into this Treasury.
+    /// @notice Emitted when a profit receiver is registered or its weight/mode
+    ///         updated via {setProfitReceiver}.
+    event ProfitReceiverSet(address indexed receiver, uint256 weight, RevenueDistributionMode mode);
+
+    /// @notice Emitted when a profit receiver is deregistered via {removeProfitReceiver}.
+    event ProfitReceiverRemoved(address indexed receiver);
+
+    /// @notice Emitted when {harvestAndDistribute} mints surplus into this Treasury.
     ///         amount is in USD8 base units (18 decimals).
     event RevenueHarvested(uint256 amount);
 
     // ─────────────────────────── Constructor ─────────────────────
 
-    /// @param _usd8            The USD8 token. This Treasury must be set as
-    ///                         USD8's treasury address for mint/redeem.
-    /// @param _timelock        Slow governance role, expected to be a TimelockController.
-    /// @param _admin           Fast operational role for pause and strategy flows
-    ///                         and move funds to/from them.
-    constructor(USD8 _usd8, address _timelock, address _admin) {
-        if (address(_usd8) == address(0) || _timelock == address(0) || _admin == address(0)) {
-            revert ZeroAddress();
-        }
+    /// @param _usd8       The USD8 token. This Treasury must be set as
+    ///                    USD8's treasury address for mint/redeem.
+    /// @param _authority  Shared access + pause registry (holds timelock/admin).
+    constructor(USD8 _usd8, Registry _authority) {
+        if (address(_usd8) == address(0)) revert ZeroAddress();
+        _setAuthority(_authority);
         usd8 = _usd8;
-        timelock = _timelock;
-        admin = _admin;
     }
 
     // ─────────────────────────── Modifiers ───────────────────────
-
-    /// @dev Reverts {Paused} if pauseState is SystemPaused or MintPaused.
-    modifier whenMintNotPaused() {
-        PauseState s = pauseState;
-        if (s == PauseState.SystemPaused || s == PauseState.MintPaused) revert Paused(s);
-        _;
-    }
-
-    /// @dev Reverts {Paused} if pauseState is SystemPaused or RedeemPaused.
-    modifier whenRedeemNotPaused() {
-        PauseState s = pauseState;
-        if (s == PauseState.SystemPaused || s == PauseState.RedeemPaused) revert Paused(s);
-        _;
-    }
-
-    /// @dev Reverts {Paused} if pauseState is SystemPaused. Applied to
-    ///      timelock/strategy-gated operations that move funds or alter revenue routing.
-    ///      setPauseState is intentionally NOT gated (otherwise timelock
-    ///      couldn't unpause). Strategy curation is also not gated — strategy
-    ///      managers can still curate the strategy set during a freeze.
-    modifier whenSystemNotPaused() {
-        if (pauseState == PauseState.SystemPaused) revert Paused(PauseState.SystemPaused);
-        _;
-    }
-
-    modifier onlyTimelock() {
-        if (msg.sender != timelock) revert UnauthorizedTimelock(msg.sender);
-        _;
-    }
-
-    /// @dev Admin runs fast operational flows, while timelock retains the
-    ///      same authority for governance/timelock execution.
-    modifier onlyAdminOrTimelock() {
-        address sender = msg.sender;
-        if (sender != timelock && sender != admin) revert UnauthorizedAdmin(sender);
-        _;
-    }
 
     /// @dev Validates mint/redeem using only pre-state and post-state. If the
     ///      system starts healthy or in surplus, surplus must not decrease; if it
@@ -278,13 +207,15 @@ contract Treasury is ReentrancyGuardTransient {
     ///
     ///      Each check allows a small tolerance for the sub-USDC accounting dust
     ///      a strategy withdrawal can shave off getReserveBalance: an ERC-4626
-    ///      strategy that burns ceil shares while reporting floor assets (e.g.
-    ///      Morpho) drops its totalAssets by up to ~1 USDC unit MORE than the
-    ///      USDC it delivers, so a redeem that pulls from it lowers the reserve a
-    ///      hair beyond the payout. Without slack that artifact would false-revert
-    ///      an otherwise peg-preserving redeem. The tolerance is bounded by one
-    ///      USDC unit per approved strategy (a redeem walks at most all of them) —
-    ///      economically negligible and far too small to mask a real haircut.
+    ///      strategy burns CEIL shares while reporting FLOOR assets, so a redeem
+    ///      that pulls from it lowers the reserve a hair beyond the payout —
+    ///      up to the value of ONE SHARE BASE UNIT per strategy. For 18-dec-share
+    ///      vaults (MetaMorpho) that is ~1e-12 USDC; for offset-0 wrappers whose
+    ///      rate grows above 1 (Aave stataUSDC) it is ~the share rate in USDC
+    ///      units. The allowance is 5 USDC base units per approved strategy —
+    ///      covers share rates to ~5 (decades of drift) and is NOT an extraction
+    ///      budget: tol only decides revert-vs-pass; the redeemer's payout is
+    ///      fixed by the formula either way, so slack cannot be farmed.
     modifier reserveSupplyStatusCheck() {
         uint256 reserveBefore = getReserveBalance();
         uint256 supplyBefore = usd8.totalSupply();
@@ -294,7 +225,7 @@ contract Treasury is ReentrancyGuardTransient {
         uint256 supplyAfter = usd8.totalSupply();
         uint256 reserveBeforeInUsd8 = reserveBefore * USDC_TO_USD8_SCALE;
         uint256 reserveAfterInUsd8 = reserveAfter * USDC_TO_USD8_SCALE;
-        uint256 tol = strategies.length * USDC_TO_USD8_SCALE;
+        uint256 tol = strategies.length * 5 * USDC_TO_USD8_SCALE;
 
         if (reserveBeforeInUsd8 >= supplyBefore) {
             // surplusAfter >= surplusBefore - tol, rearranged to avoid underflow
@@ -318,7 +249,7 @@ contract Treasury is ReentrancyGuardTransient {
     /// @notice Deposit USDC and mint USD8 at a 1:1 dollar peg. The caller
     ///         must have approved usdcAmount USDC to this contract.
     /// @param  usdcAmount Amount of USDC (6 decimals) to deposit.
-    function mintUSD8(uint256 usdcAmount) external nonReentrant whenMintNotPaused reserveSupplyStatusCheck {
+    function mintUSD8(uint256 usdcAmount) external nonReentrant whenNotPaused reserveSupplyStatusCheck {
         if (usdcAmount == 0) revert ZeroAmount();
 
         USDC.safeTransferFrom(msg.sender, address(this), usdcAmount);
@@ -344,7 +275,7 @@ contract Treasury is ReentrancyGuardTransient {
     function redeemUSD8(uint256 usd8Amount, uint256 minUsdcOut)
         external
         nonReentrant
-        whenRedeemNotPaused
+        whenNotPaused
         reserveSupplyStatusCheck
     {
         if (usd8Amount == 0) revert ZeroAmount();
@@ -421,16 +352,11 @@ contract Treasury is ReentrancyGuardTransient {
         emit StrategyRemoved(s);
     }
 
-    /// @notice Push amount idle USDC to an approved strategy. Admin or timelock. Blocked when pauseState is
-    ///         SystemPaused.
+    /// @notice Push amount idle USDC to an approved strategy. Admin or timelock.
+    ///         Blocked while paused.
     /// @dev    Push pattern: USDC is safeTransfer'd to the strategy first,
     ///         then strategy.deploy(amount) is called as a notification.
-    function depositToStrategy(IStrategy s, uint256 amount)
-        external
-        nonReentrant
-        onlyAdminOrTimelock
-        whenSystemNotPaused
-    {
+    function depositToStrategy(IStrategy s, uint256 amount) external nonReentrant onlyAdminOrTimelock whenNotPaused {
         if (amount == 0) revert ZeroAmount();
         _findApprovedStrategy(s);
         USDC.safeTransfer(address(s), amount); // push USDC to strategies to avoid granting approvals.
@@ -439,19 +365,13 @@ contract Treasury is ReentrancyGuardTransient {
     }
 
     /// @notice Pull amount USDC from an approved strategy back to idle.
-    ///         Admin or timelock. Blocked when pauseState
-    ///         is SystemPaused.
+    ///         Admin or timelock. Blocked while paused.
     /// @dev    The emitted WithdrawnFromStrategy amount reflects the
     ///         actual delta observed in this contract's USDC balance,
     ///         which equals amount for any strategy that honors its
     ///         IStrategy contract (exact transfer or revert), and may
     ///         be less for a misbehaving strategy.
-    function withdrawFromStrategy(IStrategy s, uint256 amount)
-        external
-        nonReentrant
-        onlyAdminOrTimelock
-        whenSystemNotPaused
-    {
+    function withdrawFromStrategy(IStrategy s, uint256 amount) external nonReentrant onlyAdminOrTimelock whenNotPaused {
         _findApprovedStrategy(s);
         if (amount == 0) revert ZeroAmount();
         uint256 balanceBefore = USDC.balanceOf(address(this));
@@ -462,128 +382,167 @@ contract Treasury is ReentrancyGuardTransient {
 
     // ═══════════════════════════ Revenue harvesting & routing ═══════════════════════════
 
-    /// @notice Mint USD8 representing the protocol's surplus (reserve in
-    ///         USD8 units minus supply) into this Treasury, ready to be
-    ///         forwarded via {distributeRevenue}. Admin or timelock — restricting
-    ///         the trigger lets the protocol time harvests around any per-strategy
-    ///         totalAssets() volatility (LP positions, oracle-priced
-    ///         collateral, etc.) so a transient spike cannot be permanently
-    ///         coined into supply. No-ops silently when there's no surplus.
-    /// @dev    Revenue is reserve·1e12 − supply − buffer in USD8 base units,
-    ///         where buffer = supply · harvestBufferBps / 1e4. The USDC
-    ///         stays in this Treasury as backing for the freshly-minted USD8;
-    ///         after the mint the reserve sits at supply + buffer, i.e. the
-    ///         peg holds strictly above 1:1 by the retained buffer. The buffer
-    ///         is shock absorption: a strategy loss must first eat through it
-    ///         before redemptions go distressed, so block-to-block strategy
-    ///         drift doesn't oscillate the system across the boundary. No USDC
-    ///         moves out — strategies and idle USDC are untouched. The revenue
-    ///         is denominated in USD8 from the moment of harvest, which is the
-    ///         currency every downstream vault expects.
-    /// @return revenueUsd8 The USD8 amount minted (0 if surplus is at or below
-    ///         the retained buffer).
-    function harvestRevenue() external onlyAdminOrTimelock whenSystemNotPaused returns (uint256 revenueUsd8) {
+    /// @notice Harvest the protocol's surplus and split the entire resulting
+    ///         revenue pool across the registered profit receivers by weight —
+    ///         the whole recurring revenue flow in one call. Admin or timelock;
+    ///         blocked while paused.
+    ///
+    ///         Harvest: mints reserve·1e12 − supply − buffer as USD8 into this
+    ///         Treasury, where buffer = supply / {HARVEST_BUFFER_DIVISOR}. The USDC
+    ///         stays as backing, so after the mint the reserve sits at supply +
+    ///         buffer — the peg holds strictly above 1:1 by the retained buffer,
+    ///         a shock absorber a strategy loss must eat through before redemptions
+    ///         go distressed. No USDC moves; harvest no-ops when at/below buffer.
+    ///         Restricting the trigger lets the protocol time harvests around
+    ///         per-strategy totalAssets() volatility so a transient spike isn't
+    ///         permanently coined into supply.
+    ///
+    ///         Distribute: the full USD8 balance (this harvest plus any residual)
+    ///         is streamed to receivers pro-rata to {ProfitReceiver-weight}, each
+    ///         via its configured mode. Zero-weight receivers are skipped; the last
+    ///         positive-weight one absorbs integer-division dust so nothing strands.
+    ///         Atomic: if there is revenue to distribute but no weighted receiver
+    ///         (or a receiver rejects), the whole call — including the harvest
+    ///         mint — reverts. No-ops cleanly when there is no revenue.
+    /// @dev    INVARIANT: the Treasury's USD8 balance is exclusively the
+    ///         harvested-revenue pool. No other path parks USD8 here — mintUSD8
+    ///         sends to the caller, redeemUSD8 burns from the caller, and
+    ///         {getReserveBalance} is USDC-denominated and ignores Treasury-held
+    ///         USD8. So distributing the full balance is correct: it is all revenue.
+    /// @return harvested   USD8 minted from surplus this call (0 if at/below buffer).
+    /// @return distributed USD8 pushed to receivers (0 if the pool was empty).
+    function harvestAndDistribute()
+        external
+        nonReentrant
+        onlyAdminOrTimelock
+        whenNotPaused
+        returns (uint256 harvested, uint256 distributed)
+    {
+        // ── Harvest: mint surplus above the retained buffer. ──
         uint256 supply = usd8.totalSupply();
         uint256 reserveInUsd8 = getReserveBalance() * USDC_TO_USD8_SCALE;
-
-        // Retain a permanent overcollateralization buffer above supply.
         uint256 retain = supply + supply / HARVEST_BUFFER_DIVISOR;
-        if (reserveInUsd8 <= retain) return 0;
+        if (reserveInUsd8 > retain) {
+            harvested = reserveInUsd8 - retain;
+            usd8.mint(address(this), harvested); // no JIT concerns
+            emit RevenueHarvested(harvested);
+        }
 
-        revenueUsd8 = reserveInUsd8 - retain;
+        // ── Distribute the full revenue pool across receivers by weight. ──
+        distributed = usd8.balanceOf(address(this));
+        if (distributed == 0) return (harvested, distributed);
 
-        usd8.mint(address(this), revenueUsd8); // no JIT concerns
+        // Pass 1: total the weights and find the last positive-weight receiver.
+        uint256 n = profitReceivers.length;
+        uint256 totalWeight;
+        uint256 lastEligible = type(uint256).max;
+        for (uint256 i = 0; i < n; i++) {
+            if (profitReceivers[i].weight != 0) {
+                totalWeight += profitReceivers[i].weight;
+                lastEligible = i;
+            }
+        }
+        if (totalWeight == 0) revert NoEligibleProfitReceivers();
 
-        emit RevenueHarvested(revenueUsd8);
+        // Pass 2: pay each its pro-rata share. The last positive-weight receiver
+        // takes the remainder (its share plus truncation dust) so nothing strands.
+        uint256 paid;
+        for (uint256 i = 0; i < n; i++) {
+            ProfitReceiver memory p = profitReceivers[i];
+            if (p.weight == 0) continue;
+            uint256 share = i == lastEligible ? distributed - paid : (distributed * p.weight) / totalWeight;
+            paid += share;
+            if (share != 0) _deliverRevenue(p.receiver, share, p.mode);
+        }
     }
 
-    /// @notice Forward amount of the Treasury's USD8 balance to
-    ///         recipient. only by Admin or timelock. Blocked when pauseState is
-    ///         SystemPaused. mode controls whether USD8 is sent directly
-    ///         or delivered through
+    /// @notice Forward amount of the Treasury's USD8 balance to a single
+    ///         recipient — an ad-hoc escape hatch alongside the weighted
+    ///         {harvestAndDistribute}. Admin or timelock; blocked while paused.
+    ///         mode controls whether USD8 is sent directly or delivered through
     ///         {IProfitDistributionReceiver-receiveProfitDistribution} —
-    ///         vesting-aware consumers such as {SavingsUSD8} MUST be paid
-    ///         via ReceiveProfitDistribution; a direct transfer can be used for
-    ///         non-vesting-aware recipients.
-    /// @dev    INVARIANT: the Treasury's USD8 balance is reserved
-    ///         exclusively as the harvested-revenue pool. No other code
-    ///         path parks USD8 at address(this) — mintUSD8 sends to
-    ///         the caller, redeemUSD8 burns from the caller, and
-    ///         {getReserveBalance} is denominated in USDC and does not
-    ///         count Treasury-held USD8. External transfers of USD8 in
-    ///         are treated as additional revenue.
+    ///         vesting-aware consumers such as {SavingsUSD8} MUST be paid via
+    ///         ReceiveProfitDistribution.
     function distributeRevenue(address recipient, uint256 amount, RevenueDistributionMode mode)
         external
         nonReentrant
         onlyAdminOrTimelock
-        whenSystemNotPaused
+        whenNotPaused
     {
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
+        _deliverRevenue(recipient, amount, mode);
+    }
 
+    /// @dev Deliver amount USD8 to recipient via mode. DirectTransfer sends the
+    ///      token raw; ReceiveProfitDistribution approves and calls the vesting-
+    ///      aware {IProfitDistributionReceiver-receiveProfitDistribution}, then
+    ///      clears any residual allowance (the recipient may pull less).
+    function _deliverRevenue(address recipient, uint256 amount, RevenueDistributionMode mode) internal {
         if (mode == RevenueDistributionMode.DirectTransfer) {
             // no need for SafeTransfer here, usd8 is our own token.
             usd8.transfer(recipient, amount);
         } else {
             usd8.approve(recipient, amount);
             IProfitDistributionReceiver(recipient).receiveProfitDistribution(amount);
-            // Reset any residual allowance — recipient may pull less than
-            // amount, and we don't want stale approval to persist.
             usd8.approve(recipient, 0);
         }
 
         emit RevenueDistributed(recipient, amount);
     }
 
+    /// @notice Register a profit receiver or update its weight/mode. Admin or
+    ///         timelock. Upsert: re-registering an existing receiver overwrites
+    ///         its weight and mode. A zero weight keeps it registered but paid
+    ///         nothing until re-weighted.
+    /// @param receiver  Recipient of weighted distributions (non-zero).
+    /// @param weight    Relative distribution share.
+    /// @param mode      Delivery mode (see {RevenueDistributionMode}). Vesting
+    ///                  vaults such as {SavingsUSD8} MUST use ReceiveProfitDistribution.
+    function setProfitReceiver(address receiver, uint256 weight, RevenueDistributionMode mode)
+        external
+        onlyAdminOrTimelock
+    {
+        if (receiver == address(0)) revert ZeroAddress();
+        uint256 n = profitReceivers.length;
+        for (uint256 i = 0; i < n; i++) {
+            if (profitReceivers[i].receiver == receiver) {
+                profitReceivers[i].weight = weight;
+                profitReceivers[i].mode = mode;
+                emit ProfitReceiverSet(receiver, weight, mode);
+                return;
+            }
+        }
+        profitReceivers.push(ProfitReceiver({receiver: receiver, weight: weight, mode: mode}));
+        emit ProfitReceiverSet(receiver, weight, mode);
+    }
+
+    /// @notice Deregister a profit receiver. Admin or timelock. Order among the
+    ///         remaining receivers is not preserved (weighted split is order-
+    ///         independent). Reverts if the receiver isn't registered.
+    /// @param receiver  Registered receiver to remove.
+    function removeProfitReceiver(address receiver) external onlyAdminOrTimelock {
+        uint256 n = profitReceivers.length;
+        for (uint256 i = 0; i < n; i++) {
+            if (profitReceivers[i].receiver == receiver) {
+                profitReceivers[i] = profitReceivers[n - 1];
+                profitReceivers.pop();
+                emit ProfitReceiverRemoved(receiver);
+                return;
+            }
+        }
+        revert ProfitReceiverNotFound(receiver);
+    }
+
     // ═══════════════════════════ Admin control ═══════════════════════════
 
-    /// @notice Transfer timelock authority. Current timelock only.
-    function setTimelock(address newTimelock) external onlyTimelock {
-        if (newTimelock == address(0)) revert ZeroAddress();
-        emit TimelockChanged(timelock, newTimelock);
-        timelock = newTimelock;
-    }
-
-    /// @notice Set the fast operational admin. Timelock only.
-    function setAdmin(address newAdmin) external onlyTimelock {
-        if (newAdmin == address(0)) revert ZeroAddress();
-        emit AdminChanged(admin, newAdmin);
-        admin = newAdmin;
-    }
-
-    /// @notice Set the pause state. Admin or timelock. Out-of-range values are
-    ///         rejected automatically by Solidity's enum bounds check
-    ///         (Panic(0x21)).
-    function setPauseState(PauseState newState) external onlyAdminOrTimelock {
-        emit PauseStateChanged(pauseState, newState);
-        pauseState = newState;
-    }
-
-    /// @notice Rescue stray ERC20 tokens accidentally sent to this contract.
-    ///         Timelock only due to non urgency. The reserve asset ({USDC}) and the harvested-
-    ///         revenue token ({usd8}) are not rescuable; admin must use
-    ///         {distributeRevenue} for USD8 and the protocol's normal
-    ///         redeem/strategy flows for USDC.
-    /// @dev    Not gated by pause: rescue is an emergency function.
-    function rescueToken(IERC20 token, address to, uint256 amount) external nonReentrant onlyTimelock {
-        if (to == address(0)) revert ZeroAddress();
-        if (address(token) == address(USDC) || address(token) == address(usd8)) {
-            revert RescueProtected(address(token));
-        }
-        token.safeTransfer(to, amount);
-        emit TokenRescued(address(token), to, amount);
-    }
-
-    /// @notice Rescue native ETH stuck in this contract (e.g., from a
-    ///         selfdestruct or coinbase). Timelock only due to non urgency. The contract does
-    ///         not implement receive/fallback, so this only handles
-    ///         out-of-band ETH arrivals like selfdestruct and prefunding with CREATE2.
-    /// @dev    Not gated by pause: rescue is an emergency function.
-    function rescueETH(address payable to, uint256 amount) external nonReentrant onlyTimelock {
-        if (to == address(0)) revert ZeroAddress();
-        (bool ok,) = to.call{value: amount}("");
-        if (!ok) revert EthTransferFailed();
-        emit ETHRescued(to, amount);
+    /// @dev Rescuable via {Managed-rescueToken}: any stray token EXCEPT the
+    ///      reserve asset ({USDC}) and the harvested-revenue token ({usd8}),
+    ///      which are protected (cap 0). Their normal exits are redeem/strategy
+    ///      flows (USDC) and {distributeRevenue} (USD8).
+    function _sweepable(address token) internal view override returns (uint256) {
+        if (token == address(USDC) || token == address(usd8)) return 0;
+        return IERC20(token).balanceOf(address(this));
     }
 
     // ═══════════════════════════ Views ═══════════════════════════
@@ -607,6 +566,12 @@ contract Treasury is ReentrancyGuardTransient {
     ///         can also index into strategies(uint256) directly.
     function strategiesLength() external view returns (uint256) {
         return strategies.length;
+    }
+
+    /// @notice Number of registered profit receivers. Convenience getter;
+    ///         callers can also index into profitReceivers(uint256) directly.
+    function profitReceiversLength() external view returns (uint256) {
+        return profitReceivers.length;
     }
 
     // ═══════════════════════════ Internal helpers ═══════════════════════════

@@ -7,25 +7,30 @@
 //                          on-chain — prints MATCH / MISMATCH (exit 1 on mismatch)
 //
 // Everything is read from chain state — there are no trusted inputs. The
-// per-incident config snapshot, the claimant-table commitment
-// (Incident.inputHash), and the pool balances/prices all come from the
-// contracts, so the result is reproducible by anyone. Point RPC_URL at any
-// archive node for the relevant chain; see config.ts for the addresses.
+// per-incident config is reconstructed from contract state at the incident's
+// openBlock; pool balances/prices at the window-end block; the spent-score
+// ledger from ScoreSpent logs. Point RPC_URL at any archive node for the
+// relevant chain; see config.ts for the addresses and per-asset USD feeds.
 
 import {
   makeClient,
-  COVER_POOL_ABI,
+  DEFI_ABI,
   readInputEvents,
-  firstClaimBlockOf,
   blockAtTimestamp,
   incidentConfigOf,
+  poolsAt,
+  poolTotalAssetsAt,
+  boosterNftAt,
+  spentScoreByUser,
   priceUsd1e18,
   decimalsOf,
-  insuranceScoreLedgerOf,
-  insuranceScoreSpentOf,
 } from "./chain.js";
-import { CONFIG, CONFIG_VERSION, CHAIN_ID } from "./config.js";
-import { settle, computeInputHash, proofFor, type Settlement } from "./compute.js";
+import { CONFIG, CONFIG_VERSION, CHAIN_ID, assetUsdFeedOf } from "./config.js";
+import { settle, proofFor, type Settlement } from "./compute.js";
+
+// The only booster token id in use (USD8Booster tier: id 1 = the 1% booster);
+// mirrors DefiInsurance.BOOSTER_ID.
+const BOOSTER_ID = 1n;
 
 function rpc(): string {
   const u = process.env.RPC_URL;
@@ -39,8 +44,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   const client = makeClient(rpc());
 
   // Guard against pointing the tool at the wrong RPC: addresses can collide on a
-  // fork/testnet and silently produce a misleading root. Refuse unless the RPC's
-  // chain id matches the one CONFIG was pinned to.
+  // fork/testnet and silently produce a misleading root.
   const actualChainId = await client.getChainId();
   if (actualChainId !== CHAIN_ID) {
     throw new Error(`wrong chain: RPC reports ${actualChainId}, expected ${CHAIN_ID} (mainnet)`);
@@ -48,98 +52,66 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
 
   const inc = (await client.readContract({
     address: CONFIG.defiInsurance,
-    abi: COVER_POOL_ABI,
+    abi: DEFI_ABI,
     functionName: "incidents",
     args: [incidentId],
-  })) as readonly [`0x${string}`, bigint, `0x${string}`, `0x${string}`, bigint, bigint, bigint, bigint];
+  })) as readonly [`0x${string}`, bigint, `0x${string}`, bigint, bigint, bigint, bigint, boolean];
 
   const insuredToken = inc[0];
   const windowEnd = inc[1];
   const onchainRoot = inc[2];
-  const onchainInputHash = inc[3];
-  const referenceBlock = inc[7]; // pre-incident block (HWM block or admin-pinned)
+  const referenceBlock = inc[5]; // pre-incident block (HWM block or admin-pinned)
+  const openBlock = inc[6]; // block the incident opened at — config/topology anchor
 
-  // Deterministic block anchors: the window-end block (found from its
-  // timestamp) and the incident's first-claim block. Every read below pins one
-  // of these, so the settlement is identical no matter when it is (re)computed.
+  // Deterministic block anchors: openBlock (config + topology + spent-score
+  // cutoff), referenceBlock (earned score — the pre-incident point), and the
+  // window-end block (found from its timestamp; pool balances + prices + booster
+  // holdings). Every read pins one of these, so the settlement is identical no
+  // matter when it is (re)computed.
   const windowEndBlock = await blockAtTimestamp(client, windowEnd);
-  const firstClaimBlock = await firstClaimBlockOf(client, incidentId, 1n, windowEndBlock);
 
-  // Register/cancel event stream in true chain order → claimant-table commitment.
-  const events = await readInputEvents(client, incidentId, firstClaimBlock, windowEndBlock);
+  // Register/cancel event stream in true chain order → the live claimant table.
+  const events = await readInputEvents(client, incidentId, openBlock, windowEndBlock);
 
-  // Self-check: the reconstructed stream MUST hash to the contract's stored
-  // value, or the table is wrong (reordered/partial) — refuse to proceed.
-  const localHash = computeInputHash(events);
-  if (localHash.toLowerCase() !== onchainInputHash.toLowerCase()) {
-    throw new Error(`inputHash mismatch: local ${localHash} vs on-chain ${onchainInputHash} — table reconstruction is wrong`);
-  }
-
-  // Per-incident settlement config, frozen on-chain when the incident opened.
-  const cfg = await incidentConfigOf(client, incidentId);
+  // Per-incident settlement config, reconstructed from contract state at openBlock.
+  const cfg = await incidentConfigOf(client, insuredToken, openBlock);
   const insuredDecimals = await decimalsOf(client, insuredToken);
 
-  // Stake-asset list + balances + USD prices, in CoverPool order, pinned to the
-  // window-end block. Price feeds come from coverPoolAssets(...).usdPriceFeed.
-  const nAssets = (await client.readContract({
-    address: CONFIG.coverPool,
-    abi: COVER_POOL_ABI,
-    functionName: "coverPoolAssetListLength",
-    blockNumber: windowEndBlock,
-  })) as bigint;
-  const assetOrder: `0x${string}`[] = [];
-  const assetBalances: bigint[] = [];
-  const assetUsd1e18: bigint[] = [];
-  const assetDecimals: number[] = [];
-  for (let i = 0n; i < nAssets; i++) {
-    const a = (await client.readContract({
-      address: CONFIG.coverPool,
-      abi: COVER_POOL_ABI,
-      functionName: "coverPoolAssetList",
-      args: [i],
-      blockNumber: windowEndBlock,
-    })) as `0x${string}`;
-    const bal = (await client.readContract({
-      address: CONFIG.coverPool,
-      abi: COVER_POOL_ABI,
-      functionName: "totalAssets",
-      args: [a],
-      blockNumber: windowEndBlock,
-    })) as bigint;
-    const assetState = (await client.readContract({
-      address: CONFIG.coverPool,
-      abi: COVER_POOL_ABI,
-      functionName: "coverPoolAssets",
-      args: [a],
-      blockNumber: windowEndBlock,
-    })) as readonly [bigint, bigint, bigint, bigint, bigint, bigint, `0x${string}`, bigint];
-    assetOrder.push(a);
-    assetBalances.push(bal);
-    assetUsd1e18.push(await priceUsd1e18(client, assetState[6], windowEndBlock));
-    assetDecimals.push(await decimalsOf(client, a));
+  // Registered pool set at openBlock (frozen for the incident's life, so it
+  // equals the live list) → per-pool balances + prices at window-end. Payout
+  // rows align to this pool order.
+  const { assets, poolAddrs } = await poolsAt(client, openBlock);
+  const poolBalances: bigint[] = [];
+  const poolAssetUsd1e18: bigint[] = [];
+  const poolAssetDecimals: number[] = [];
+  for (let i = 0; i < poolAddrs.length; i++) {
+    poolBalances.push(await poolTotalAssetsAt(client, poolAddrs[i], windowEndBlock));
+    poolAssetUsd1e18.push(await priceUsd1e18(client, assetUsdFeedOf(assets[i]), windowEndBlock));
+    poolAssetDecimals.push(await decimalsOf(client, assets[i]));
   }
 
-  // Insurance score already spent per user (CoverPool ledger), pinned at the
-  // pre-incident referenceBlock to match earnedScoreOf — available = earned −
-  // spent, both as of referenceBlock. Cached per user.
-  const ledger = await insuranceScoreLedgerOf(client);
-  const spentCache = new Map<string, bigint>();
-  const spentOf = (user: `0x${string}`) => spentCache.get(user.toLowerCase()) ?? 0n;
-  for (const e of events) {
-    const key = e.user.toLowerCase();
-    if (spentCache.has(key)) continue;
-    spentCache.set(key, await insuranceScoreSpentOf(client, ledger, e.user, referenceBlock));
-  }
+  const boosterCollection = await boosterNftAt(client, openBlock);
+
+  // Insurance score already spent per user, summed from ScoreSpent logs across
+  // every payout module ever registered, pinned to blocks before openBlock.
+  // Intentionally a LATER cutoff than earned (referenceBlock): earned is capped
+  // pre-incident to stop farming; spent must catch every prior commitment, else a
+  // score burned between referenceBlock and open could be re-claimed. See
+  // spentScoreByUser.
+  const spentMap = await spentScoreByUser(client, openBlock);
+  const spentOf = (user: `0x${string}`) => spentMap.get(user.toLowerCase()) ?? 0n;
 
   const s = await settle(client, incidentId, cfg, events, {
     insuredToken,
     insuredDecimals,
     referenceBlock,
     windowEndBlock,
-    assetOrder,
-    assetBalances,
-    assetUsd1e18,
-    assetDecimals,
+    poolOrder: assets,
+    poolBalances,
+    poolAssetUsd1e18,
+    poolAssetDecimals,
+    boosterCollection,
+    boosterId: BOOSTER_ID,
     spentOf,
   });
   return { s, onchainRoot };
@@ -149,14 +121,13 @@ function printSettlement(s: Settlement, withProofs: boolean) {
   const out = {
     configVersion: CONFIG_VERSION,
     chainId: CHAIN_ID,
-    coverPool: CONFIG.coverPool,
+    registry: CONFIG.registry,
     defiInsurance: CONFIG.defiInsurance,
     incidentId: s.incidentId.toString(),
     referenceBlock: s.referenceBlock.toString(),
     twapRatio: s.twapRatio.toString(),
-    inputHash: s.inputHash,
     root: s.root,
-    assetOrder: s.assetOrder,
+    poolOrder: s.poolOrder,
     rows: s.rows.map((r) => ({
       claimId: r.claimId.toString(),
       user: r.user,

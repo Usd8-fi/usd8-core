@@ -10,14 +10,14 @@
 pragma solidity 0.8.28;
 
 import {Script, console2} from "forge-std/Script.sol";
+import {Registry} from "../src/Registry.sol";
 import {USD8} from "../src/USD8.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-/// @notice Deploys the USD8 implementation and an ERC-1967 proxy that
-///         delegates to it, initializing with the configured admin
-///         and treasury.
+/// @notice Deploys an {Registry}, the USD8 implementation, and an ERC-1967
+///         proxy delegating to it, initialized with the configured treasury.
 /// @dev    Requires env vars:
-///           USD8_DEFAULT_ADMIN — initial admin / upgrade authority.
+///           USD8_DEFAULT_ADMIN — timelock/admin on the Registry (upgrade authority).
 ///           USD8_TREASURY — initial treasury allowed to mint/burn.
 contract USD8Script is Script {
     function run() external {
@@ -25,11 +25,13 @@ contract USD8Script is Script {
         address admin = vm.envAddress("USD8_DEFAULT_ADMIN");
 
         vm.startBroadcast();
+        Registry authority = new Registry(admin, admin);
         USD8 impl = new USD8();
-        bytes memory init = abi.encodeCall(USD8.initialize, (admin, treasury));
+        bytes memory init = abi.encodeCall(USD8.initialize, (authority, treasury));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         vm.stopBroadcast();
 
+        console2.log("Registry:", address(authority));
         console2.log("USD8 implementation:", address(impl));
         console2.log("USD8 proxy:", address(proxy));
     }

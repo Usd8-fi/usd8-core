@@ -1,14 +1,24 @@
 // FFI bridge for the Foundry cross-language integration test
 // (test/SettlementIntegration.t.sol). It runs the REAL settlement encoding —
-// computeInputHash and settlementTree from compute.ts — so the test proves the
-// off-chain root/proofs/inputHash match what the contracts produce/expect.
+// settlementTree from compute.ts — so the test proves the off-chain
+// root/proofs match what the contracts produce/expect.
 //
-// Invoked as `node dist/ffi.js <cmd> <abiHexPayload> [arg]`. Input and output
-// are ABI-encoded hex so Foundry can build/decode them with abi.encode/decode.
+// Invoked as `node dist/ffi.js <cmd> <abiHexPayload> [arg]`. Both commands take
+// the SAME payload, abi.encode'd by Foundry:
+//
+//   (uint256 incidentId, uint256[] claimIds, address[] users,
+//    uint256[][] amounts, uint256[] scoreSpents)
+//
+// where amounts[i] aligns to the registered pool list. Output is abi-encoded
+// hex so Foundry can decode it with abi.decode. Commands:
+//
+//   root              → prints abi.encode(bytes32) of the merkle root
+//                       (Foundry: abi.decode(out, (bytes32))).
+//   proof <claimId>   → prints abi.encode(bytes32[]) of that claim's merkle
+//                       proof (Foundry: abi.decode(out, (bytes32[]))).
 
 import { decodeAbiParameters, encodeAbiParameters } from "viem";
-import { computeInputHash, settlementTree } from "./compute.js";
-import type { InputEvent } from "./chain.js";
+import { settlementTree } from "./compute.js";
 
 const [cmd, payload, arg] = process.argv.slice(2);
 const hex = payload as `0x${string}`;
@@ -17,26 +27,7 @@ function emit(type: string, value: unknown): void {
   process.stdout.write(encodeAbiParameters([{ type }], [value]));
 }
 
-if (cmd === "inputhash") {
-  // (uint256[] claimIds, address[] users, uint256[] escrows, uint256[] scoreToSpends,
-  //  uint256[] boosterAmounts) — registers in chain order.
-  const [ids, users, escrows, spends, bAmts] = decodeAbiParameters(
-    [{ type: "uint256[]" }, { type: "address[]" }, { type: "uint256[]" }, { type: "uint256[]" }, { type: "uint256[]" }],
-    hex
-  ) as [bigint[], `0x${string}`[], bigint[], bigint[], bigint[]];
-  const events: InputEvent[] = ids.map((id, i) => ({
-    kind: "register",
-    claimId: id,
-    user: users[i],
-    amount: escrows[i],
-    scoreToSpend: spends[i],
-    boosterAmount: bAmts[i],
-    blockNumber: 0n,
-    logIndex: 0,
-  }));
-  emit("bytes32", computeInputHash(events));
-} else if (cmd === "root" || cmd === "proof") {
-  // (uint256 incidentId, uint256[] claimIds, address[] users, uint256[][] amounts, uint256[] scoreSpents)
+if (cmd === "root" || cmd === "proof") {
   const [incidentId, ids, users, amounts, spents] = decodeAbiParameters(
     [{ type: "uint256" }, { type: "uint256[]" }, { type: "address[]" }, { type: "uint256[][]" }, { type: "uint256[]" }],
     hex

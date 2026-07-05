@@ -11,83 +11,26 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {USD8} from "../../src/USD8.sol";
 import {SavingsUSD8} from "../../src/SavingsUSD8.sol";
-import {IStrategy} from "../../src/interfaces/IStrategy.sol";
+import {Registry} from "../../src/Registry.sol";
+import {Managed} from "../../src/Managed.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
 
-/// @dev Minimal USD8-denominated mock strategy mirroring test/mocks/MockStrategy.sol
-///      but for the USD8 token instead of USDC.
-contract MockUSD8Strategy is IStrategy {
-    USD8 public immutable usd8;
-    uint256 public deployedAmount;
-    uint256 public deployCallCount;
-    uint256 public withdrawCallCount;
-
-    constructor(USD8 _usd8) {
-        usd8 = _usd8;
-    }
-
-    function deploy(uint256 amount) external override {
-        deployedAmount += amount;
-        deployCallCount += 1;
-    }
-
-    function withdraw(uint256 amount) external override {
-        withdrawCallCount += 1;
-        usd8.transfer(msg.sender, amount);
-    }
-
-    function totalAssets() external view override returns (uint256) {
-        return usd8.balanceOf(address(this));
-    }
-
-    function underlying() external view override returns (address) {
-        return address(usd8);
-    }
-}
-
-contract LossyUSD8Strategy is IStrategy {
-    USD8 public immutable usd8;
-    uint256 public deployCallCount;
-    uint256 public withdrawCallCount;
-    uint256 public lossOnNextWithdraw;
-
-    constructor(USD8 _usd8) {
-        usd8 = _usd8;
-    }
-
-    function setLossOnNextWithdraw(uint256 amount) external {
-        lossOnNextWithdraw = amount;
-    }
-
-    function deploy(uint256) external override {
-        deployCallCount += 1;
-    }
-
-    function withdraw(uint256 amount) external override {
-        withdrawCallCount += 1;
-
-        uint256 loss = lossOnNextWithdraw;
-        if (loss != 0) {
-            lossOnNextWithdraw = 0;
-            usd8.transfer(address(0xD15CADED), loss);
-        }
-
-        usd8.transfer(msg.sender, amount);
-    }
-
-    function totalAssets() external view override returns (uint256) {
-        return usd8.balanceOf(address(this));
-    }
-
-    function underlying() external view override returns (address) {
-        return address(usd8);
+/// @dev Minimal v2 implementation used to exercise the UUPS upgrade path.
+contract SavingsUSD8V2 is SavingsUSD8 {
+    function version() external pure returns (uint256) {
+        return 2;
     }
 }
 
 contract SavingsUSD8Test is Test {
+    Registry authority;
     USD8 usd8;
-    SavingsUSD8 vault;
+    SavingsUSD8 impl;
+    SavingsUSD8 vault; // proxy
 
     address timelock = address(0xA11CE);
     address admin = address(0x57A7);
@@ -98,18 +41,22 @@ contract SavingsUSD8Test is Test {
     uint64 constant UNLOCK = 7 days;
 
     function _unauthorizedTimelock(address account) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(SavingsUSD8.UnauthorizedTimelock.selector, account);
+        return abi.encodeWithSelector(Registry.UnauthorizedTimelock.selector, account);
     }
 
     function _unauthorizedAdmin(address account) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(SavingsUSD8.UnauthorizedAdmin.selector, account);
+        return abi.encodeWithSelector(Registry.UnauthorizedAdmin.selector, account);
     }
 
     function setUp() public {
+        authority = new Registry(timelock, admin);
         USD8 implUSD8 = new USD8();
-        bytes memory init = abi.encodeCall(USD8.initialize, (address(this), usd8Treasury));
-        usd8 = USD8(address(new ERC1967Proxy(address(implUSD8), init)));
-        vault = new SavingsUSD8(usd8, timelock, admin);
+        bytes memory usd8Init = abi.encodeCall(USD8.initialize, (authority, usd8Treasury));
+        usd8 = USD8(address(new ERC1967Proxy(address(implUSD8), usd8Init)));
+
+        impl = new SavingsUSD8();
+        bytes memory init = abi.encodeCall(SavingsUSD8.initialize, (authority, usd8));
+        vault = SavingsUSD8(address(new ERC1967Proxy(address(impl), init)));
     }
 
     function _mintUSD8To(address to, uint256 amount) internal {
@@ -117,16 +64,39 @@ contract SavingsUSD8Test is Test {
         usd8.mint(to, amount);
     }
 
+    function _depositForAlice(uint256 amount) internal {
+        _mintUSD8To(alice, amount);
+        vm.startPrank(alice);
+        usd8.approve(address(vault), amount);
+        vault.deposit(amount, alice);
+        vm.stopPrank();
+    }
+
     // -- Basics ------------------------------------------------------------
 
-    function test_ConstructorWiring() public view {
+    function test_InitializeWiring() public view {
         assertEq(address(vault.asset()), address(usd8));
-        assertEq(vault.timelock(), timelock);
-        assertEq(vault.admin(), admin);
+        assertEq(authority.timelock(), timelock);
+        assertTrue(authority.isAdmin(admin));
         assertEq(vault.profitMaxUnlockTime(), UNLOCK);
         assertEq(vault.name(), "Savings USD8");
         assertEq(vault.symbol(), "sUSD8");
-        assertEq(vault.strategiesLength(), 0);
+    }
+
+    function test_InitializeRejectsZeroAsset() public {
+        bytes memory init = abi.encodeCall(SavingsUSD8.initialize, (authority, USD8(address(0))));
+        vm.expectRevert(Managed.ZeroAddress.selector);
+        new ERC1967Proxy(address(impl), init);
+    }
+
+    function test_InitializeOnlyOnce() public {
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        vault.initialize(authority, usd8);
+    }
+
+    function test_ImplementationDisabled() public {
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        impl.initialize(authority, usd8);
     }
 
     function test_SetProfitMaxUnlockTime() public {
@@ -187,11 +157,7 @@ contract SavingsUSD8Test is Test {
     // -- Profit vesting ----------------------------------------------------
 
     function test_ProfitVestsLinearly() public {
-        _mintUSD8To(alice, 100e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 100e18);
-        vault.deposit(100e18, alice);
-        vm.stopPrank();
+        _depositForAlice(100e18);
 
         _mintUSD8To(reporter, 50e18);
         vm.startPrank(reporter);
@@ -211,222 +177,10 @@ contract SavingsUSD8Test is Test {
         assertEq(vault.totalAssets(), 150e18);
     }
 
-    // -- Strategy management -----------------------------------------------
-
-    function _approve(MockUSD8Strategy s) internal {
-        vm.prank(timelock);
-        vault.addStrategy(s, type(uint256).max);
-    }
-
-    function test_AddStrategy() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-        assertEq(address(vault.strategies(0)), address(s));
-        assertEq(vault.strategiesLength(), 1);
-    }
-
-    function test_AddStrategyZeroAddressReverts() public {
-        vm.prank(timelock);
-        vm.expectRevert(SavingsUSD8.ZeroAddress.selector);
-        vault.addStrategy(IStrategy(address(0)), type(uint256).max);
-    }
-
-    function test_AddStrategyDuplicateReverts() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-        vm.prank(timelock);
-        vm.expectRevert(abi.encodeWithSelector(SavingsUSD8.StrategyAlreadyApproved.selector, s));
-        vault.addStrategy(s, type(uint256).max);
-    }
-
-    function test_NonAdminCannotAddStrategy() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        vm.expectRevert(_unauthorizedTimelock(alice));
-        vm.prank(alice);
-        vault.addStrategy(s, type(uint256).max);
-    }
-
-    function test_AdminCanMoveFundsButNotCurateStrategies() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-
-        _mintUSD8To(alice, 25e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 25e18);
-        vault.deposit(25e18, alice);
-        vm.stopPrank();
-
-        // Fast ops: fund moves are admin-allowed.
-        vm.startPrank(admin);
-        vault.depositToStrategy(s, 25e18);
-        vault.withdrawFromStrategy(s, 25e18);
-        vm.stopPrank();
-
-        // Curation is timelock-only: admin can neither add nor remove a strategy
-        // (removal can orphan funded assets -> unbacked shares, so it's gated).
-        vm.expectRevert(_unauthorizedTimelock(admin));
-        vm.prank(admin);
-        vault.removeStrategy(s);
-
-        MockUSD8Strategy s2 = new MockUSD8Strategy(usd8);
-        vm.expectRevert(_unauthorizedTimelock(admin));
-        vm.prank(admin);
-        vault.addStrategy(s2, type(uint256).max);
-
-        // Timelock can remove.
-        vm.prank(timelock);
-        vault.removeStrategy(s);
-        assertEq(vault.strategiesLength(), 0);
-    }
-
-    function test_DepositToStrategyAndIncludeInRawAssets() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-
-        _mintUSD8To(alice, 100e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 100e18);
-        vault.deposit(100e18, alice);
-        vm.stopPrank();
-
-        // Admin pushes 60 USD8 into strategy.
-        vm.prank(timelock);
-        vault.depositToStrategy(s, 60e18);
-
-        assertEq(usd8.balanceOf(address(vault)), 40e18, "idle");
-        assertEq(usd8.balanceOf(address(s)), 60e18, "strategy");
-        // totalAssets counts both (no profit vesting yet).
-        assertEq(vault.totalAssets(), 100e18);
-    }
-
-    function test_WithdrawPullsFromStrategyWhenIdleInsufficient() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-
-        _mintUSD8To(alice, 100e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 100e18);
-        uint256 shares = vault.deposit(100e18, alice);
-        vm.stopPrank();
-
-        vm.prank(timelock);
-        vault.depositToStrategy(s, 100e18);
-        assertEq(usd8.balanceOf(address(vault)), 0);
-
-        // Alice fully withdraws; the vault must pull from strategy.
-        vm.prank(alice);
-        vault.redeem(shares, alice, alice);
-
-        assertEq(usd8.balanceOf(alice), 100e18);
-        assertEq(s.withdrawCallCount(), 1);
-        assertEq(usd8.balanceOf(address(s)), 0);
-    }
-
-    function test_WithdrawRevertsIfSharePriceWouldDecrease() public {
-        LossyUSD8Strategy s = new LossyUSD8Strategy(usd8);
-        vm.prank(timelock);
-        vault.addStrategy(s, type(uint256).max);
-
-        _mintUSD8To(alice, 100e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 100e18);
-        vault.deposit(100e18, alice);
-        vm.stopPrank();
-
-        vm.prank(timelock);
-        vault.depositToStrategy(s, 100e18);
-
-        s.setLossOnNextWithdraw(10e18);
-
-        vm.prank(alice);
-        vm.expectPartialRevert(SavingsUSD8.SharePriceDecreased.selector);
-        vault.withdraw(20e18, alice, alice);
-
-        assertEq(vault.totalAssets(), 100e18);
-        assertEq(vault.balanceOf(alice), 100e18);
-        assertEq(usd8.balanceOf(address(s)), 100e18);
-    }
-
-    function test_RemoveStrategyForcesRemovalIgnoringFunds() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-
-        _mintUSD8To(alice, 50e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 50e18);
-        vault.deposit(50e18, alice);
-        vm.stopPrank();
-        vm.prank(timelock);
-        vault.depositToStrategy(s, 50e18);
-
-        vm.prank(timelock);
-        vault.removeStrategy(s);
-        assertEq(vault.strategiesLength(), 0);
-        assertEq(usd8.balanceOf(address(s)), 50e18, "funds orphaned in strategy");
-    }
-
-    function test_AddStrategyAtIndexAndReorder() public {
-        MockUSD8Strategy a = new MockUSD8Strategy(usd8);
-        MockUSD8Strategy b = new MockUSD8Strategy(usd8);
-        MockUSD8Strategy c = new MockUSD8Strategy(usd8);
-        vm.startPrank(timelock);
-        vault.addStrategy(a, type(uint256).max); // [a]
-        vault.addStrategy(b, 0); // [b, a] — insert at front
-        vault.addStrategy(c, 1); // [b, c, a] — insert mid
-
-        // Reposition existing: remove + re-add at the target index.
-        // Mid-queue removal must not disturb the order of the others.
-        vault.removeStrategy(c); // [b, a]
-        vault.addStrategy(c, 2); // [b, a, c]
-        vault.removeStrategy(b); // [a, c]
-        vault.addStrategy(b, 1); // [a, b, c]
-        vm.stopPrank();
-
-        assertEq(address(vault.strategies(0)), address(a));
-        assertEq(address(vault.strategies(1)), address(b));
-        assertEq(address(vault.strategies(2)), address(c));
-    }
-
-    function test_ProfitVestingWithStrategyDeployed() public {
-        // End-to-end: user deposits, timelock moves to strategy, profit reported.
-        // Vesting still works correctly.
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-
-        _mintUSD8To(alice, 100e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 100e18);
-        vault.deposit(100e18, alice);
-        vm.stopPrank();
-        vm.prank(timelock);
-        vault.depositToStrategy(s, 100e18);
-
-        // Reporter brings 20 USD8 of profit (e.g., harvested from strategy).
-        _mintUSD8To(reporter, 20e18);
-        vm.startPrank(reporter);
-        usd8.approve(address(vault), 20e18);
-        vault.receiveProfitDistribution(20e18);
-        vm.stopPrank();
-
-        // No instant jump: idle (20) + strategy (100) − unvested (20) = 100.
-        assertEq(vault.totalAssets(), 100e18);
-
-        vm.warp(block.timestamp + UNLOCK);
-        assertEq(vault.totalAssets(), 120e18);
-    }
-
-    function test_WithdrawKeepsUnvestedProfitIdleAfterStrategyLoss() public {
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-
-        _mintUSD8To(alice, 100e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 100e18);
-        vault.deposit(100e18, alice);
-        vm.stopPrank();
-
-        vm.prank(timelock);
-        vault.depositToStrategy(s, 100e18);
+    /// @dev Unvested profit is excluded from totalAssets, so a redeem can never
+    ///      spend below it — the buffer stays idle without any strategy claw-back.
+    function test_WithdrawKeepsUnvestedProfitIdle() public {
+        _depositForAlice(100e18);
 
         _mintUSD8To(reporter, 20e18);
         vm.startPrank(reporter);
@@ -434,183 +188,143 @@ contract SavingsUSD8Test is Test {
         vault.receiveProfitDistribution(20e18);
         vm.stopPrank();
 
+        // Immediately redeem half the shares. totalAssets == 100 (profit unvested),
+        // so alice's 100 shares are worth 100 USD8; 50 shares → 50 USD8.
         vm.prank(alice);
         vault.redeem(50e18, alice, alice);
 
-        assertEq(usd8.balanceOf(address(vault)), vault.unvestedProfit(), "unvested buffer remains idle");
-
-        uint256 strategyBalance = usd8.balanceOf(address(s));
-        vm.prank(address(s));
-        usd8.transfer(address(0xD), strategyBalance);
-
-        assertEq(vault.totalAssets(), 0, "strategy loss cannot underflow totalAssets");
+        assertEq(usd8.balanceOf(alice), 50e18);
+        assertEq(usd8.balanceOf(address(vault)), vault.unvestedProfit() + 50e18, "unvested buffer remains idle");
     }
 
     // -- Pause -------------------------------------------------------------
 
-    function _depositForAlice(uint256 amount) internal {
-        _mintUSD8To(alice, amount);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), amount);
-        vault.deposit(amount, alice);
-        vm.stopPrank();
-    }
-
-    function test_DepositPausedBlocksDepositAllowsRedeem() public {
+    function test_PausedBlocksAllUserActions() public {
         _depositForAlice(100e18);
         vm.prank(timelock);
-        vault.setPauseState(SavingsUSD8.PauseState.DepositPaused);
+        authority.setPaused(address(vault), true);
 
-        assertEq(vault.maxDeposit(alice), 0);
-        assertEq(vault.maxMint(alice), 0);
-        assertEq(vault.maxWithdraw(alice), 100e18);
-        assertEq(vault.maxRedeem(alice), 100e18);
-
-        _mintUSD8To(alice, 50e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 50e18);
-        vm.expectRevert(abi.encodeWithSelector(SavingsUSD8.Paused.selector, SavingsUSD8.PauseState.DepositPaused));
-        vault.deposit(50e18, alice);
-
-        // Redeem still works.
-        vault.redeem(100e18, alice, alice);
-        vm.stopPrank();
-        assertEq(usd8.balanceOf(alice), 150e18);
-    }
-
-    function test_WithdrawPausedBlocksRedeemAllowsDeposit() public {
-        _depositForAlice(100e18);
-        vm.prank(timelock);
-        vault.setPauseState(SavingsUSD8.PauseState.WithdrawPaused);
-
-        assertEq(vault.maxDeposit(alice), type(uint256).max);
-        assertEq(vault.maxMint(alice), type(uint256).max);
-        assertEq(vault.maxWithdraw(alice), 0);
-        assertEq(vault.maxRedeem(alice), 0);
-
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(SavingsUSD8.Paused.selector, SavingsUSD8.PauseState.WithdrawPaused));
-        vault.redeem(100e18, alice, alice);
-
-        // Deposit still works.
-        _mintUSD8To(alice, 50e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 50e18);
-        vault.deposit(50e18, alice);
-        vm.stopPrank();
-        assertEq(vault.balanceOf(alice), 150e18);
-    }
-
-    function test_SystemPausedBlocksAllUserActions() public {
-        _depositForAlice(100e18);
-        vm.prank(timelock);
-        vault.setPauseState(SavingsUSD8.PauseState.SystemPaused);
-
+        // All four max* views report 0 while paused.
         assertEq(vault.maxDeposit(alice), 0);
         assertEq(vault.maxMint(alice), 0);
         assertEq(vault.maxWithdraw(alice), 0);
         assertEq(vault.maxRedeem(alice), 0);
 
-        bytes memory err = abi.encodeWithSelector(SavingsUSD8.Paused.selector, SavingsUSD8.PauseState.SystemPaused);
-
         _mintUSD8To(alice, 50e18);
         vm.startPrank(alice);
         usd8.approve(address(vault), 50e18);
-        vm.expectRevert(err);
+        vm.expectRevert(Registry.Paused.selector);
         vault.deposit(50e18, alice);
-        vm.expectRevert(err);
+        vm.expectRevert(Registry.Paused.selector);
         vault.redeem(100e18, alice, alice);
         vm.stopPrank();
 
-        // receiveProfitDistribution blocked.
+        // receiveProfitDistribution blocked too.
         _mintUSD8To(reporter, 10e18);
         vm.startPrank(reporter);
         usd8.approve(address(vault), 10e18);
-        vm.expectRevert(err);
+        vm.expectRevert(Registry.Paused.selector);
         vault.receiveProfitDistribution(10e18);
         vm.stopPrank();
+
+        // Unpause restores deposit/redeem.
+        vm.prank(timelock);
+        authority.setPaused(address(vault), false);
+        vm.prank(alice);
+        vault.redeem(100e18, alice, alice);
+        assertEq(usd8.balanceOf(alice), 150e18);
     }
 
-    function test_SetPauseStateOnlyRoles() public {
+    function test_SetPausedOnlyRoles() public {
         vm.expectRevert(_unauthorizedAdmin(alice));
         vm.prank(alice);
-        vault.setPauseState(SavingsUSD8.PauseState.SystemPaused);
+        authority.setPaused(address(vault), true);
     }
 
     function test_TimelockCanTransferTimelock() public {
         address newTimelock = address(0xC0FFEE);
 
         vm.prank(timelock);
-        vault.setTimelock(newTimelock);
+        authority.setTimelock(newTimelock);
 
-        assertEq(vault.timelock(), newTimelock);
+        assertEq(authority.timelock(), newTimelock);
 
         // Old timelock loses role-gated access (it is not admin either).
         vm.expectRevert(_unauthorizedAdmin(timelock));
         vm.prank(timelock);
-        vault.setPauseState(SavingsUSD8.PauseState.SystemPaused);
+        authority.setPaused(address(vault), true);
 
         vm.prank(newTimelock);
-        vault.setPauseState(SavingsUSD8.PauseState.SystemPaused);
-        assertEq(uint256(vault.pauseState()), uint256(SavingsUSD8.PauseState.SystemPaused));
+        authority.setPaused(address(vault), true);
+        assertTrue(authority.paused(address(vault)));
     }
 
     function test_NonTimelockCannotTransferTimelock() public {
         vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
-        vault.setTimelock(alice);
+        authority.setTimelock(alice);
     }
 
     function test_SetTimelockRejectsZero() public {
-        vm.expectRevert(SavingsUSD8.ZeroAddress.selector);
+        vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        vault.setTimelock(address(0));
+        authority.setTimelock(address(0));
     }
 
     function test_TimelockCanSetAdmin() public {
         address newAdmin = address(0xC0FFEE);
-        MockUSD8Strategy s = new MockUSD8Strategy(usd8);
-        _approve(s);
-
-        _mintUSD8To(alice, 10e18);
-        vm.startPrank(alice);
-        usd8.approve(address(vault), 10e18);
-        vault.deposit(10e18, alice);
-        vm.stopPrank();
 
         vm.prank(timelock);
-        vault.setAdmin(newAdmin);
+        authority.setAdmin(newAdmin, true);
+        assertTrue(authority.isAdmin(newAdmin));
 
-        assertEq(vault.admin(), newAdmin);
-
-        // New admin holds the fast role; the old admin no longer does.
+        // New admin holds the fast role (setPaused is admin-or-timelock).
         vm.prank(newAdmin);
-        vault.depositToStrategy(s, 10e18);
+        authority.setPaused(address(vault), true);
 
+        // Timelock can remove an admin; the removed one loses access.
+        vm.prank(timelock);
+        authority.setAdmin(admin, false);
         vm.expectRevert(_unauthorizedAdmin(admin));
         vm.prank(admin);
-        vault.withdrawFromStrategy(s, 10e18);
+        authority.setPaused(address(vault), false);
     }
 
     function test_NonTimelockCannotSetAdmin() public {
         vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
-        vault.setAdmin(alice);
+        authority.setAdmin(alice, true);
     }
 
     function test_SetAdminRejectsZero() public {
-        vm.expectRevert(SavingsUSD8.ZeroAddress.selector);
+        vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        vault.setAdmin(address(0));
+        authority.setAdmin(address(0), true);
     }
 
     function test_PauseCanBeCleared() public {
         vm.startPrank(timelock);
-        vault.setPauseState(SavingsUSD8.PauseState.SystemPaused);
-        // The unpause path must always be reachable, even during SystemPaused.
-        vault.setPauseState(SavingsUSD8.PauseState.None);
+        authority.setPaused(address(vault), true);
+        // The unpause path must always be reachable, even while paused.
+        authority.setPaused(address(vault), false);
         vm.stopPrank();
-        assertEq(uint256(vault.pauseState()), uint256(SavingsUSD8.PauseState.None));
+        assertFalse(authority.paused(address(vault)));
+    }
+
+    // -- Sweep -------------------------------------------------------------
+
+    function test_SweepStrayTokenButNotAsset() public {
+        MockERC20 stray = new MockERC20("Stray", "STR", 18);
+        stray.mint(address(vault), 5e18);
+        vm.prank(admin);
+        vault.sweepToken(IERC20(address(stray)), alice);
+        assertEq(stray.balanceOf(alice), 5e18);
+
+        // The underlying asset is protected (cap 0).
+        _depositForAlice(100e18);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Managed.NothingToSweep.selector, address(usd8)));
+        vault.sweepToken(IERC20(address(usd8)), alice);
     }
 
     // -- NoDepositors guard ------------------------------------------------
@@ -634,38 +348,25 @@ contract SavingsUSD8Test is Test {
         assertEq(uint256(vault.pendingProfit()), 10e18);
     }
 
-    // -- Strategy asset mismatch -------------------------------------------
+    // -- UUPS upgrade path -------------------------------------------------
 
-    function test_AddStrategyRejectsWrongUnderlying() public {
-        // MockUSD8Strategy reports USD8 as underlying; vault expects USD8 — should work.
-        MockUSD8Strategy good = new MockUSD8Strategy(usd8);
+    function test_TimelockCanUpgrade() public {
+        _depositForAlice(100e18);
+
+        SavingsUSD8V2 v2 = new SavingsUSD8V2();
         vm.prank(timelock);
-        vault.addStrategy(good, type(uint256).max);
-        assertEq(vault.strategiesLength(), 1);
+        vault.upgradeToAndCall(address(v2), "");
 
-        // Wrong-underlying strategy (returns address(0xDEAD)).
-        WrongUnderlyingStrategy bad = new WrongUnderlyingStrategy();
-        vm.prank(timelock);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                SavingsUSD8.StrategyAssetMismatch.selector, IStrategy(address(bad)), address(usd8), address(0xDEAD)
-            )
-        );
-        vault.addStrategy(IStrategy(address(bad)), type(uint256).max);
-    }
-}
-
-/// @dev Strategy whose underlying() returns a non-USD8 / non-USDC address,
-///      used to exercise StrategyAssetMismatch in both vaults.
-contract WrongUnderlyingStrategy is IStrategy {
-    function underlying() external pure override returns (address) {
-        return address(0xDEAD);
+        assertEq(SavingsUSD8V2(address(vault)).version(), 2);
+        // State survives.
+        assertEq(vault.balanceOf(alice), 100e18);
+        assertEq(address(vault.asset()), address(usd8));
     }
 
-    function deploy(uint256) external override {}
-    function withdraw(uint256) external override {}
-
-    function totalAssets() external pure override returns (uint256) {
-        return 0;
+    function test_NonTimelockCannotUpgrade() public {
+        SavingsUSD8V2 v2 = new SavingsUSD8V2();
+        vm.expectRevert(_unauthorizedTimelock(admin));
+        vm.prank(admin);
+        vault.upgradeToAndCall(address(v2), "");
     }
 }

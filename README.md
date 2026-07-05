@@ -8,13 +8,13 @@ Please note this repo is under development, codebase is expected to change often
 
 Ships the core stablecoin stack:
 
+- [`Registry`](src/Registry.sol) — non-upgradeable access + pause + topology hub. Holds the timelock/admin roles, per-contract pause flags, the pool set, the single payout module, the incident-freeze flag, the insurance-score token set, and the booster collection. Every core contract inherits [`Managed`](src/Managed.sol) and defers to it.
 - [`USD8`](src/USD8.sol) — UUPS-upgradeable ERC20 stablecoin. Mint/burn restricted to a configured Treasury.
-- [`Treasury`](src/Treasury.sol) — Wraps mainnet USDC into USD8 at a fixed 1:1 peg. Holds the reserve, manages approved yield strategies, and routes harvested protocol revenue.
-- [`SavingsUSD8`](src/SavingsUSD8.sol) — ERC4626 savings vault for USD8 with linear profit vesting (JIT-resistant) and strategy-based yield deployment.
-- [`CoverPool`](src/CoverPool.sol) — multi-asset, high-yield pool whose deposits may be drawn upon to cover losses from covered DeFi protocols. Depositors earn premium yield in exchange for accepting loss-coverage risk.
-- Strategies in [`src/strategies/`](src/strategies/):
-  - [`AaveV3UsdcStrategy`](src/strategies/AaveV3UsdcStrategy.sol) — primary USDC strategy targeting Aave v3.
-  - [`MorphoVaultStrategy`](src/strategies/MorphoVaultStrategy.sol) — generic ERC4626 adapter for MetaMorpho/Morpho Blue vaults; deploy one instance per vault.
+- [`Treasury`](src/Treasury.sol) — Wraps mainnet USDC into USD8 at a fixed 1:1 peg. Holds the reserve, manages approved yield strategies, and (via `harvestAndDistribute`) harvests surplus and routes it to weighted profit receivers.
+- [`SavingsUSD8`](src/SavingsUSD8.sol) — UUPS-upgradeable ERC4626 savings vault for USD8. Pure linear profit vesting (JIT-resistant); it holds deposits idle and receives yield from Treasury distributions (no strategy stack).
+- [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) — single-asset staking pool (one per stake asset, behind a shared beacon) whose deposits may be drawn upon to cover losses from covered DeFi protocols. Stakers earn USD8 yield in exchange for loss-coverage risk. Multi-asset coverage is replication: deploy another pool per asset.
+- [`DefiInsurance`](src/DefiInsurance.sol) — the single payout module: insured-token registry, incident lifecycle, claimant escrow, and TEE-signed settlement; pays claims out of the registered pools.
+- [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) — `IStrategy` adapter that deploys Treasury USDC into any ERC-4626 USDC vault (Aave v3 static aUSDC, MetaMorpho, …); one instance per vault.
 
 ## Architecture overview
 
@@ -36,37 +36,38 @@ Ships the core stablecoin stack:
         ▼                          ▼                     ▼
 ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
 │                     │   │                     │   │                     │
-│ External strategies │   │     Savings USD8    │   │      CoverPool      │
-│                     │   │                     │   │                     │
+│ External strategies │   │     Savings USD8    │   │ SingleAssetCoverPool│
+│  (ERC4626Strategy)  │   │                     │   │      (per asset)    │
 └─────────────────────┘   └─────────────────────┘   └─────────────────────┘
 ```
 
-Profit distribution is admin-routed to an allowlist of approved recipients via [`Treasury.distributeRevenue`](src/Treasury.sol); SavingsUSD8 and CoverPool are the approved recipients. Treasury and SavingsUSD8 share an `IStrategy` interface but maintain independent strategy queues. Strategy at `strategies[0]` is the first source consulted on redeems.
+Profit distribution is weight-routed to registered receivers via [`Treasury.harvestAndDistribute`](src/Treasury.sol) (or the ad-hoc `distributeRevenue`); SavingsUSD8 and each cover pool are receivers. Only the Treasury has a strategy queue now (SavingsUSD8 holds deposits idle); the strategy at `strategies[0]` is the first source consulted on redeems.
 
-## CoverPool flows
+## Cover pool flows
 
-Stakers deposit any approved asset and earn USD8 yield in exchange for accepting loss-coverage risk. Claimants escrow a covered protocol's token; after a TEE-signed settlement they redeem a payout drawn pro-rata from the pool. One incident is processed at a time; the TEE gates incident opening and signs the settlement root, and payouts are bounded on-chain by the live pool balance.
+Stakers deposit the pool's asset and earn USD8 yield in exchange for accepting loss-coverage risk. Claimants escrow a covered protocol's token; after a TEE-signed settlement each redeems a payout via a per-claim TEE ticket, drawn from the registered pools. One incident is processed at a time; the TEE gates incident opening and signs the settlement root (the dispute anchor), and payouts are bounded on-chain by each pool's live balance.
 
 ### Staking
 
 ```
-        stake(asset)   — reverts while an incident is active
+        stake(amount)  — reverts while an incident is active
                    │
                    ▼
         ┌─────────────────────┐
-        │        STAKED       │──▶ withdrawYield(asset) ──▶ USD8
+        │        STAKED       │──▶ withdrawYield() ──▶ USD8
         │     earning USD8    │
         └─────────────────────┘
                    │
-                   │  requestUnstake: start 7d cooldown, shares stop earning
-                   │  (cancelUnstakeRequest reverses it, resumes earning)
+                   │  requestUnstake: start 7d cooldown (shares keep earning)
+                   │  (cancelUnstakeRequest just clears the request)
                    ▼
         ┌─────────────────────┐
-        │       COOLING       │  shares still absorb claim payouts
-        │     not earning     │
+        │       COOLING       │  shares still earn AND still absorb payouts
+        │    still earning    │
         └─────────────────────┘
                    │
-                   │  completeUnstake: after 7d AND no active incident
+                   │  completeUnstake: within [7d, 7d+2d] AND no active incident
+                   │  (miss the 2d window → request expires, re-request)
                    ▼
         assets out (live price/share) + auto-yield
 ```
@@ -74,22 +75,22 @@ Stakers deposit any approved asset and earn USD8 yield in exchange for accepting
 ### Claiming (incident lifecycle, days from open)
 
 ```
-  openIncident(token, amt, TEE-sig) at t=0 — escrow first claim, freeze pool, then:
+  openIncidentSigned(token, refBlock, TEE-sig) at t=0 — freeze system (no claim yet), then:
 
   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-  │ CLAIM WINDOW │──▶│    SETTLE    │──▶│   DISPUTE    │──▶│   FINALIZE   │
-  │     0-5d     │   │     5-7d     │   │     5-8d     │   │    8-13d     │
-  │ registerClaim│   │ settle root  │   │ voidSettle   │   │ finalizeClaim│
-  │   joins      │   │  (TEE sig)   │   │  (admin)     │   │ payout ≤pool │
+  │ CLAIM WINDOW │──▶│    SUBMIT    │──▶│   DISPUTE    │──▶│   FINALIZE   │
+  │     0-4d     │   │    4d-≤7d    │   │  from root+4d│   │  next 4d     │
+  │ joinClaim /  │   │ settleIncident│  │ closeIncident│   │ finalizeClaim│
+  │ cancelClaim  │   │ root (TEE sig)│  │  veto (admin)│   │ (TEE ticket) │
   └──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
 ```
 
 Exits:
-- `cancelRegisteredClaim()` during the claim window → escrow refunded.
-- No root by 7d, or `voidSettlement` by 8d → incident **VOID** (no payout).
-- VOID, or finalize window missed → `withdrawNonFinalizedClaim()` recovers escrow, anytime.
+- `cancelClaim()` during the claim window → escrow refunded.
+- No root by claim-window-end + `SUBMIT_DEADLINE` → incident **VOID** (no payout).
+- VOID, admin `closeIncident`, or finalize window missed → `withdrawNonFinalizedClaim()` recovers escrow, anytime after.
 
-Timing constants: `CLAIM_WINDOW 5d`, then settle `(5d, 7d]` (`ROOT_SUBMIT_CUTOFF 2d`), `voidSettlement` until `8d` (`DISPUTE_PERIOD 3d`), finalize `(8d, 13d]` (`FINALIZE_WINDOW 5d`).
+Timing constants: `CLAIM_WINDOW 4d`, then `settleIncident` within `SUBMIT_DEADLINE 3d` of window-end (root overwritable in that window), `DISPUTE_PERIOD 4d` from root submission (`closeIncident` veto), then `FINALIZE_WINDOW 4d`. Per-claim payout is authorized by a TEE-signed ticket bound to the root; the pool unlocks the instant the last claim finalizes.
 
 ## Getting started
 
