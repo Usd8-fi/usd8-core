@@ -322,7 +322,7 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         emit StrategyAdded(s);
     }
 
-    /// @notice Remove a previously approved strategy. Admin or timelock.
+    /// @notice Remove a previously approved strategy. Timelock only.
     ///         **Force removal**: no zero-assets precondition is
     ///         enforced — timelock can drop a strategy that's reverting on
     ///         totalAssets() or otherwise stuck, recovering the rest of
@@ -450,7 +450,7 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         for (uint256 i = 0; i < n; i++) {
             ProfitReceiver memory p = profitReceivers[i];
             if (p.weight == 0) continue;
-            uint256 share = i == lastEligible ? distributed - paid : (distributed * p.weight) / totalWeight;
+            uint256 share = i == lastEligible ? distributed - paid : Math.mulDiv(distributed, p.weight, totalWeight);
             paid += share;
             if (share != 0) _deliverRevenue(p.receiver, share, p.mode);
         }
@@ -557,7 +557,13 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         uint256 total = USDC.balanceOf(address(this));
         uint256 n = strategies.length;
         for (uint256 i = 0; i < n; i++) {
-            total += strategies[i].totalAssets(); // strategy should not revert even if totalAsset is underwater.
+            // INTENTIONAL: no try/catch. If a strategy can't report totalAssets the
+            // reserve can't be fully valued, so mint/redeem (which wrap this in
+            // reserveSupplyStatusCheck) revert rather than transact at a wrong price
+            // — a fail-safe halt, not a bug. Swallowing the revert as 0 would
+            // undercount the reserve and force an unfair haircut on redeemers.
+            // Recover by force-removing the strategy via {removeStrategy} (timelock).
+            total += strategies[i].totalAssets();
         }
         return total;
     }

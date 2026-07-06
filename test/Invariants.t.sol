@@ -116,7 +116,7 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
     Registry authority;
 
     function setUp() public {
-        authority = new Registry(admin, admin);
+        authority = new Registry(admin, admin, 8000);
         usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (authority, admin)))));
         asset = new MockERC20("AST", "AST", 18);
 
@@ -127,12 +127,12 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
                 new BeaconProxy(
                     address(beacon),
                     abi.encodeCall(
-                        SingleAssetCoverPool.initialize, (authority, IERC20(address(asset)), IERC20(address(usd8)), 0)
+                        SingleAssetCoverPool.initialize, (authority, IERC20(address(asset)), IERC20(address(usd8)))
                     )
                 )
             )
         );
-        pool.seed(0); // minResidual 0: open the {seeded} gate before the handler stakes
+        pool.seed(0); // zero-seed: open the {seeded} gate before the handler stakes
         vm.startPrank(admin);
         authority.addPool(IERC20(address(asset)), address(pool));
         vm.stopPrank();
@@ -180,7 +180,7 @@ contract StatelessFuzzTest is Test {
 
     // ── property 4: SavingsUSD8 totalAssets never reverts; no JIT free yield ──
     function _deploySavings() internal returns (USD8 usd8, SavingsUSD8 vault) {
-        Registry authority = new Registry(admin, admin);
+        Registry authority = new Registry(admin, admin, 8000);
         usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (authority, admin)))));
         vault = SavingsUSD8(
             address(
@@ -269,7 +269,7 @@ contract StatelessFuzzTest is Test {
 
         // address(this) is the timelock (so it can setTreasury here); admin is
         // added to the admin set for the fuzz's admin-gated harvest path.
-        Registry authority = new Registry(address(this), admin);
+        Registry authority = new Registry(address(this), admin, 8000);
         usd8 = USD8(
             address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (authority, address(this)))))
         );

@@ -44,7 +44,7 @@ const cfg: IncidentConfig = {
   underlyingConversionAddress: ZERO,
   underlyingConversionCallData: "0x",
   params: { twapLookbackBlocks: 10n, holdingMarginBlocks: 5n, sampleStepBlocks: 5n },
-  scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n }], // 1e18 = 1.0/token/block
+  scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n, decimals: 18 }], // 1e18 = 1.0/token/block
 };
 
 function reg(claimId: bigint, user: `0x${string}`, amount: bigint, scoreToSpend: bigint): InputEvent {
@@ -65,6 +65,7 @@ function baseOpts(assetBalance: bigint) {
     boosterCollection: BOOSTER,
     boosterId: 1n,
     spentOf: (_u: `0x${string}`) => 0n,
+    maxPayoutBps: 10_000n, // no per-incident cap by default; a dedicated test exercises it
   };
 }
 
@@ -92,6 +93,17 @@ describe("settle — payout math", () => {
     expect(s.rows.map((r) => r.amounts)).toEqual([[60n * WAD], [40n * WAD]]);
     // whole pool distributed
     expect(s.rows.reduce((a, r) => a + r.amounts[0], 0n)).toEqual(100n * WAD);
+    expect(s.poolPayouts).toEqual([100n * WAD]);
+  });
+
+  it("per-incident cap haircuts payouts and sets poolPayouts within the cap", async () => {
+    setEarned();
+    // Scarce pool ($100) would pay $60/$40 = the whole pool, but a 80% cap limits
+    // the incident to $80 total; both claims are haircut pro-rata (×80/100).
+    const s = await settle({} as any, 1n, cfg, events, { ...baseOpts(100n * WAD), maxPayoutBps: 8000n });
+    expect(s.rows.map((r) => r.payoutUsd)).toEqual([48n * WAD, 32n * WAD]);
+    expect(s.rows.map((r) => r.amounts)).toEqual([[48n * WAD], [32n * WAD]]);
+    expect(s.poolPayouts).toEqual([80n * WAD]); // = balance × 80%, the on-chain cap
   });
 
   it("abundant pool → payouts bound by κ·loss cap", async () => {
@@ -223,5 +235,19 @@ describe("settlementTree / proofs", () => {
     expect(settlementTree(1n, rows).root).toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], amounts: [61n * WAD] }, rows[1]]).root).not.toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], scoreSpent: 59n }, rows[1]]).root).not.toEqual(base);
+  });
+});
+
+describe("earnedScoreOf — decimal normalization (F6)", () => {
+  it("normalizes each scored token's integral to an 18-dec basis before summing", async () => {
+    h.integrals.clear();
+    h.integrals.set(BOB.toLowerCase(), 1_000_000n); // same RAW balance·block integral
+
+    const at = (dec: number) =>
+      earnedScoreOf({} as any, { ...cfg, scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n, decimals: dec }] }, BOB, 0n, 100n);
+
+    // A 6-dec token's raw integral must scale up by 1e12 vs an 18-dec token's, so
+    // the same *whole-token* holding scores the same regardless of token decimals.
+    expect(await at(6)).toBe((await at(18)) * 10n ** 12n);
   });
 });

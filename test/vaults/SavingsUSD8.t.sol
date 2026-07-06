@@ -49,7 +49,7 @@ contract SavingsUSD8Test is Test {
     }
 
     function setUp() public {
-        authority = new Registry(timelock, admin);
+        authority = new Registry(timelock, admin, 8000);
         USD8 implUSD8 = new USD8();
         bytes memory usd8Init = abi.encodeCall(USD8.initialize, (authority, usd8Treasury));
         usd8 = USD8(address(new ERC1967Proxy(address(implUSD8), usd8Init)));

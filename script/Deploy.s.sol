@@ -114,14 +114,18 @@ contract DeployScript is Script {
     ///         wstETH to underwrite coverage; rewarded in USD8.
     address constant WSTETH = 0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0;
 
-    /// @notice Permanent seed for the wstETH cover pool, doubling as its
-    ///         {SingleAssetCoverPool.minResidual}: payouts may never drain the pool
-    ///         below this, and the matching seed shares are burned to an
-    ///         uncontrollable sink so totalShares stays > 0 for good. Keeps the pool
-    ///         non-brickable (empty-pool recap branch unreachable) and profit
-    ///         distribution from ever hitting NoEligibleStakers. Deployer must hold
-    ///         at least this much wstETH at run time (~0.01 wstETH).
+    /// @notice Permanent seed for the wstETH cover pool: the matching shares are
+    ///         burned to an uncontrollable sink so totalShares stays > 0 for good
+    ///         (profit distribution never hits NoEligibleStakers). Deployer must
+    ///         hold at least this much wstETH at run time (~0.01 wstETH).
     uint256 constant WSTETH_SEED = 0.01e18;
+
+    /// @notice Universal per-incident payout cap (bps): a single incident can pay at
+    ///         most this share of a cover pool's balance, so LPs never lose it all at
+    ///         once (and the pool can't be drained to zero). Admin-updatable via
+    ///         {Registry.setMaxPayoutBps} between incidents — CONFIRM before mainnet.
+    ///         5000 = 50%.
+    uint256 constant MAX_PAYOUT_BPS = 5000;
 
     /// @notice ERC-4626 USDC vaults for the two launch Treasury strategies (Aave +
     ///         Morpho). Each reports asset() == USDC (checked on mainnet), which the
@@ -164,7 +168,7 @@ contract DeployScript is Script {
         // Central access + pause registry. Deployer is timelock AND initial admin
         // for setup; roles are handed to governance on the Registry in
         // _handOffRoles. Every contract below takes this as an immutable.
-        d.authority = new Registry(deployer, deployer);
+        d.authority = new Registry(deployer, deployer, MAX_PAYOUT_BPS);
 
         // USD8 impl + ERC-1967 proxy. Deployer is placeholder treasury so we can
         // wire the real Treasury below.
@@ -180,25 +184,16 @@ contract DeployScript is Script {
         // through the normal USDC-backed mint path (no unbacked supply).
         d.usd8.setTreasury(address(d.treasury));
 
-        // SavingsUSD8 impl + ERC-1967 proxy (UUPS).
+        // SavingsUSD8 impl (UUPS). The proxy is created AND seeded atomically by
+        // SavingsSeeder (below), in one tx, so the first-depositor seed can't be
+        // front-run: mint USD8 1:1 from real USDC (fully backed, peg unaffected),
+        // deposit it, and burn the shares to SEED_SINK so the vault's supply can
+        // never be drained back toward zero. Fund the seeder, then run it.
         SavingsUSD8 savingsImpl = new SavingsUSD8();
         d.savingsImpl = address(savingsImpl);
-        d.savings = SavingsUSD8(
-            address(
-                new ERC1967Proxy(address(savingsImpl), abi.encodeCall(SavingsUSD8.initialize, (d.authority, d.usd8)))
-            )
-        );
-
-        // Seed SavingsUSD8 against the first-depositor inflation attack.
-        // Mint USD8 1:1 from real USDC (so the seed is fully backed and the
-        // peg is unaffected), deposit it, and burn the shares to SEED_SINK so
-        // the vault's supply can never be drained back toward zero.
-        IERC20 usdc = d.treasury.USDC();
-        usdc.approve(address(d.treasury), SEED_USDC);
-        d.treasury.mintUSD8(SEED_USDC);
-        uint256 seedUsd8 = SEED_USDC * d.treasury.USDC_TO_USD8_SCALE();
-        d.usd8.approve(address(d.savings), seedUsd8);
-        d.savings.deposit(seedUsd8, SEED_SINK);
+        SavingsSeeder savingsSeeder = new SavingsSeeder();
+        d.treasury.USDC().transfer(address(savingsSeeder), SEED_USDC);
+        d.savings = savingsSeeder.run(address(savingsImpl), d.authority, d.usd8, d.treasury, SEED_USDC, SEED_SINK);
 
         // SingleAssetCoverPool implementation behind a shared UpgradeableBeacon (owner
         // = deployer, handed to the timelock in _handOffRoles). One beacon upgrade
@@ -208,25 +203,16 @@ contract DeployScript is Script {
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(poolImpl), deployer);
         d.poolBeacon = address(beacon);
         IERC20 wsteth = IERC20(WSTETH);
-        d.wstethPool = SingleAssetCoverPool(
-            address(
-                new BeaconProxy(
-                    address(beacon),
-                    abi.encodeCall(
-                        SingleAssetCoverPool.initialize, (d.authority, wsteth, IERC20(address(d.usd8)), WSTETH_SEED)
-                    )
-                )
-            )
-        );
 
-        // Permanent seed — MUST run here, immediately after the pool is created and
-        // before it is exposed (registered, given a profit route, or opened to
-        // stakers, all below). stake() reverts NotSeeded until this executes, so the
-        // pool is inert until seeded; seeding now locks WSTETH_SEED of wstETH in
-        // (shares burned to an uncontrollable sink) so the pool can never be fully
-        // drained or emptied of stakers. Deployer must hold the wstETH; see {WSTETH_SEED}.
-        wsteth.approve(address(d.wstethPool), WSTETH_SEED);
-        d.wstethPool.seed(WSTETH_SEED);
+        // Deploy AND seed the pool atomically (CoverPoolSeeder, one tx) so the
+        // permissionless one-time seed() can't be front-run between proxy creation
+        // and seeding. Until seeded the pool is inert (stake reverts NotSeeded); the
+        // seed locks WSTETH_SEED of wstETH (shares to an uncontrollable sink) so the
+        // pool always has stakers. Fund the seeder, then run it. Deployer must hold
+        // the wstETH; see {WSTETH_SEED}. Register only after it's seeded.
+        CoverPoolSeeder poolSeeder = new CoverPoolSeeder();
+        wsteth.transfer(address(poolSeeder), WSTETH_SEED);
+        d.wstethPool = poolSeeder.run(address(beacon), d.authority, wsteth, IERC20(address(d.usd8)), WSTETH_SEED);
 
         d.authority.addPool(wsteth, address(d.wstethPool));
 
@@ -269,9 +255,11 @@ contract DeployScript is Script {
 
         // All access roles live on the single Registry. Hand off there once: grant
         // the governance admin, drop the deployer's bootstrap admin, then transfer
-        // the timelock LAST (after which the deployer can no longer touch it).
+        // the timelock LAST (after which the deployer can no longer touch it). Skip
+        // the drop when deployer == admin (the documented single-EOA config) — else
+        // the two calls cancel out and the system launches with an EMPTY admin set.
         d.authority.setAdmin(admin, true);
-        d.authority.setAdmin(deployer, false);
+        if (deployer != admin) d.authority.setAdmin(deployer, false);
         d.authority.setTimelock(admin);
     }
 
@@ -304,5 +292,61 @@ contract DeployScript is Script {
         console2.log("");
         console2.log("=== Admin (all roles) ===");
         console2.log("Address:           ", admin);
+    }
+}
+
+/// @notice One-shot deployer that creates a cover-pool beacon proxy AND supplies
+///         its permanent seed in a SINGLE transaction, so the permissionless
+///         {SingleAssetCoverPool.seed} can't be front-run in the gap between proxy
+///         creation and seeding (the pool does not exist until {run}). Fund this
+///         with the seed asset first; {run} is owner-only so the funds can't be
+///         hijacked, and it seeds in-place before returning the pool.
+contract CoverPoolSeeder {
+    address private immutable owner;
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    function run(address beacon, Registry authority, IERC20 asset, IERC20 reward, uint256 seedAmount)
+        external
+        returns (SingleAssetCoverPool pool)
+    {
+        require(msg.sender == owner, "CoverPoolSeeder: not owner");
+        pool = SingleAssetCoverPool(
+            address(
+                new BeaconProxy(beacon, abi.encodeCall(SingleAssetCoverPool.initialize, (authority, asset, reward)))
+            )
+        );
+        asset.approve(address(pool), seedAmount);
+        pool.seed(seedAmount);
+    }
+}
+
+/// @notice One-shot deployer that creates the SavingsUSD8 UUPS proxy AND makes the
+///         seed deposit (dead shares to `sink`) in a SINGLE transaction, so the
+///         first-depositor seed can't be front-run (the vault does not exist until
+///         {run}). Fund this with `seedUsdc` USDC first; it mints fully-backed USD8
+///         via the Treasury and deposits it. {run} is owner-only.
+contract SavingsSeeder {
+    address private immutable owner;
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    function run(address savingsImpl, Registry authority, USD8 usd8, Treasury treasury, uint256 seedUsdc, address sink)
+        external
+        returns (SavingsUSD8 savings)
+    {
+        require(msg.sender == owner, "SavingsSeeder: not owner");
+        savings = SavingsUSD8(
+            address(new ERC1967Proxy(savingsImpl, abi.encodeCall(SavingsUSD8.initialize, (authority, usd8))))
+        );
+        treasury.USDC().approve(address(treasury), seedUsdc);
+        treasury.mintUSD8(seedUsdc); // mints fully-backed USD8 to this contract
+        uint256 seedUsd8 = seedUsdc * treasury.USDC_TO_USD8_SCALE();
+        usd8.approve(address(savings), seedUsd8);
+        savings.deposit(seedUsd8, sink);
     }
 }

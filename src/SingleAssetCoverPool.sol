@@ -56,6 +56,9 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
     ///         those shares can never unstake — totalShares stays > 0 for good.
     address internal constant BURN = 0x000000000000000000000000000000000000dEaD;
 
+    /// @notice Basis-point denominator for {maxPayoutPerIncident} (matches {Registry}).
+    uint256 internal constant BPS_DENOMINATOR = 10_000;
+
     // ─────────────────────────── State ───────────────────────────
 
     /// @notice The staked asset (backs shares). Set once at init.
@@ -63,15 +66,6 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
 
     /// @notice The reward token paid to stakers (USD8). Set once at init.
     IERC20 public rewardToken;
-
-    /// @notice Minimum asset balance {payClaim} must leave in the pool — payouts
-    ///         can never drain {totalAssets} below this. Set once at init. Keeps
-    ///         totalAssets > 0 whenever shares exist, so the drained-pool
-    ///         recapitalization branch in {stake} (and its multiplicative share
-    ///         inflation) is structurally unreachable. Stakers can still withdraw
-    ///         the residual via {completeUnstake} (which zeroes shares and assets
-    ///         together — the safe path); only claim payouts are floored.
-    uint256 public minResidual;
 
     /// @notice Whether the one-time permanent seed has been supplied. See {seed}.
     bool public seeded;
@@ -139,8 +133,8 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
     error PoolFrozen();
     error NotPayoutModule(address caller);
     error PayoutExceedsPoolAssets(uint256 requested, uint256 available);
+    error InvalidRecipient();
     error AlreadySeeded();
-    error SeedTooSmall(uint256 received, uint256 minResidual);
     error NotSeeded();
 
     // ─────────────────────────── Events ──────────────────────────
@@ -164,44 +158,34 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
     /// @param _authority    Shared access + pause + freeze registry.
     /// @param _asset        The staked asset (non-zero).
     /// @param _rewardToken  The reward token paid to stakers, i.e. USD8 (non-zero).
-    /// @param _minResidual  Asset balance {payClaim} may never drain below — pick a
-    ///                      meaningful (non-dust) amount in the asset's units so the
-    ///                      pool can never be fully drained by payouts. See {minResidual}.
-    function initialize(Registry _authority, IERC20 _asset, IERC20 _rewardToken, uint256 _minResidual)
-        external
-        initializer
-    {
+    function initialize(Registry _authority, IERC20 _asset, IERC20 _rewardToken) external initializer {
         if (address(_asset) == address(0) || address(_rewardToken) == address(0)) revert ZeroAddress();
         _setAuthority(_authority);
         asset = _asset;
         rewardToken = _rewardToken;
-        minResidual = _minResidual;
         rewardsDuration = 7 days;
     }
 
-    /// @notice Supply the one-time permanent seed. Pulls at least {minResidual} of
-    ///         {asset} from the caller and mints matching shares to an
-    ///         uncontrollable burn sink (never withdrawable). This guarantees
-    ///         totalShares > 0 for the pool's lifetime, so a profit distribution
-    ///         never reverts {NoEligibleStakers} (and the empty-pool recap branch
-    ///         in {stake} stays out of reach). Permissionless and idempotent-once;
-    ///         mirrors {stake}'s price-per-share so it is safe to call even if a
-    ///         stake already landed. The seed shares accrue yield that is likewise
-    ///         locked.
+    /// @notice Supply the one-time permanent seed. Pulls `amount` of {asset} from the
+    ///         caller and mints matching shares to an uncontrollable burn sink (never
+    ///         withdrawable). A real (non-zero) seed guarantees totalShares > 0 for
+    ///         the pool's lifetime, so a profit distribution never reverts
+    ///         {NoEligibleStakers} — production pools MUST seed a meaningful amount.
+    ///         Permissionless and idempotent-once; mirrors {stake}'s price-per-share
+    ///         so it is safe to call even if a stake already landed. The seed shares
+    ///         accrue yield that is likewise locked. (amount == 0 merely opens the
+    ///         {seeded} gate with no locked capital — a degenerate case, not for prod.)
     ///
     ///         ⚠️ MUST be called immediately after deployment, as the very next step
     ///         in the same deploy sequence that creates the pool and BEFORE the pool
     ///         is exposed to anyone. {stake} reverts {NotSeeded} until this runs, so
     ///         an unseeded pool is inert — but do not register it, route Treasury
-    ///         profit to it, or advertise it before seeding. A production pool
-    ///         ({minResidual} > 0) requires a real seed of ≥ {minResidual}; only a
-    ///         {minResidual} == 0 pool (never deployed in production) may seed with 0.
+    ///         profit to it, or advertise it before seeding.
     function seed(uint256 amount) external nonReentrant {
         if (seeded) revert AlreadySeeded();
         _checkpointReward();
 
         uint256 received = _pullToken(asset, msg.sender, amount);
-        if (received < minResidual) revert SeedTooSmall(received, minResidual);
 
         uint256 sharesMinted = totalShares == 0
             ? received
@@ -234,13 +218,13 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
         uint256 received = _pullToken(asset, msg.sender, amount);
         if (received == 0) revert ZeroAmount();
 
-        // Price-per-share = totalAssets / totalShares. A seeded pool ({minResidual}
-        // > 0, set at deploy) can never reach totalAssets == 0 — payClaim floors it
-        // and the seed shares are permanent — so the middle branch is a safety net,
-        // live only for an unseeded (minResidual == 0) pool. There, a payout draining
-        // to totalAssets == 0 with shares outstanding would div-by-zero the normal
-        // branch; mint received * totalShares instead so fresh capital recapitalizes
-        // and the dead shares collectively reclaim < 1 base unit.
+        // Price-per-share = totalAssets / totalShares. The per-incident payout cap
+        // (Registry.maxPayoutBps < 100%, enforced at settle) keeps an honest
+        // settlement from ever draining totalAssets to 0, so the middle branch is a
+        // safety net. Should it ever be reached — totalAssets == 0 with shares
+        // outstanding — the normal branch would div-by-zero and brick the pool; mint
+        // received * totalShares instead so fresh capital recapitalizes and the dead
+        // shares collectively reclaim < 1 base unit.
         sharesMinted = totalShares == 0
             ? received
             : totalAssets == 0 ? received * totalShares : (received * totalShares) / totalAssets;
@@ -371,12 +355,21 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
 
     // ═══════════════════════════ Payout hook ═══════════════════════════
 
+    /// @notice The most this pool may pay out for one incident: {totalAssets} ×
+    ///         {Registry.maxPayoutBps} / 10_000. At settle the payout module checks
+    ///         the TEE-committed per-pool total against this (the pool is frozen, so
+    ///         it equals the balance the incident opened on) AND records it as the
+    ///         pool's per-incident budget, which finalize draws down — so the actual
+    ///         summed payout is hard-capped here, bounding LP loss per incident.
+    function maxPayoutPerIncident() external view returns (uint256) {
+        return totalAssets * authority.maxPayoutBps() / BPS_DENOMINATOR;
+    }
+
     /// @notice Pay a settlement amount out of pooled capital. The single registered
-    ///         payout module only ({Registry.payoutModule}). Payouts may not drain
-    ///         {totalAssets} below {minResidual}; an amount exceeding the live
-    ///         payable balance reverts (an honest root never over-allocates; the
-    ///         frozen pool only shrinks via payClaim). Reduces {totalAssets},
-    ///         socializing the loss across stakers.
+    ///         payout module only ({Registry.payoutModule}). An amount exceeding the
+    ///         live {totalAssets} reverts; the per-incident cap ({maxPayoutPerIncident})
+    ///         is enforced up front at settle, not here, so this stays a simple
+    ///         balance check. Reduces {totalAssets}, socializing the loss across stakers.
     /// @dev    whenNotPaused: pausing this pool mid-incident blocks every
     ///         finalization whose payout routes through it (finalizeClaim reverts
     ///         on the payClaim call). Accepted — pause is a trusted-admin emergency
@@ -387,9 +380,11 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
     /// @param amount  Asset amount to pay (0 = no-op for this pool's row).
     function payClaim(address to, uint256 amount) external nonReentrant whenNotPaused {
         if (msg.sender != authority.payoutModule()) revert NotPayoutModule(msg.sender);
+        // Paying the pool itself would drop totalAssets while the tokens stay put,
+        // silently reclassifying staker principal as sweepable surplus.
+        if (to == address(this)) revert InvalidRecipient();
         if (amount == 0) return;
-        uint256 payable_ = totalAssets > minResidual ? totalAssets - minResidual : 0;
-        if (amount > payable_) revert PayoutExceedsPoolAssets(amount, payable_);
+        if (amount > totalAssets) revert PayoutExceedsPoolAssets(amount, totalAssets);
         totalAssets -= amount;
         asset.safeTransfer(to, amount);
         emit ClaimPaid(to, amount);

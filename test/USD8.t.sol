@@ -50,7 +50,7 @@ contract USD8Test is Test {
     }
 
     function setUp() public {
-        authority = new Registry(timelock, timelock); // USD8 uses only the timelock role
+        authority = new Registry(timelock, timelock, 8000); // USD8 uses only the timelock role
         impl = new USD8();
         usd8 = _deployProxy(treasury);
     }

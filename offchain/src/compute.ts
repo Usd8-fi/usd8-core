@@ -21,9 +21,9 @@ const BPS = 10_000n;
 // committed booster unit adds +1% to the insurance-score multiplier.
 const BOOSTER_BOOST_BPS = 100n;
 // scorePerTokenPerBlock is stored 1e18-scaled: 1e18 ⇒ 1.0 score/token/block.
-// Because the rate multiplies a raw (1e18-decimal) balance, this /SCORE_SCALE
-// cancels the token's 1e18 and yields score in WAD (1e18 = 1.0), applied once
-// at the end of the sum.
+// Because the rate multiplies a balance normalized to an 18-decimal basis (see
+// earnedScoreOf), this /SCORE_SCALE cancels that shared 1e18 and yields score in
+// WAD (1e18 = 1.0), applied once at the end of the sum.
 const SCORE_SCALE = WAD;
 
 export interface SettledRow {
@@ -44,6 +44,7 @@ export interface Settlement {
   twapRatio: bigint;
   root: `0x${string}`; // merkle root over the payout-table leaves (see settlementTree)
   poolOrder: `0x${string}`[]; // pool asset addresses, aligned to `amounts`
+  poolPayouts: bigint[]; // total payout committed per pool (Σ amounts[i]); signed + checked ≤ cap at settle
   rows: SettledRow[];
 }
 
@@ -89,7 +90,13 @@ export async function earnedScoreOf(
   for (const st of cfg.scoredTokens) {
     if (st.startBlock >= asOfBlock) continue;
     const integral = await tokenBlockIntegral(client, st.token, user, st.startBlock, asOfBlock);
-    score += integral * st.scorePerTokenPerBlock;
+    // Normalize each token's raw balance·block integral to an 18-decimal basis
+    // before summing across tokens, so a non-18-dec scored token isn't mis-scaled
+    // relative to the others (F6). The final /SCORE_SCALE (=1e18) then cancels the
+    // shared 18-dec basis exactly. (Scored-token decimals are expected ≤ 18.)
+    const norm18 =
+      st.decimals <= 18 ? integral * 10n ** BigInt(18 - st.decimals) : integral / 10n ** BigInt(st.decimals - 18);
+    score += norm18 * st.scorePerTokenPerBlock;
   }
   // Booster multiplier: each committed unit adds BOOSTER_BOOST_BPS.
   // multiplier = (BPS + amount × bps) / BPS. Divide by SCORE_SCALE here so the
@@ -118,6 +125,7 @@ export async function settle(
     boosterCollection: `0x${string}`; // Registry.boosterNFT() at openBlock (0 = none)
     boosterId: bigint;
     spentOf: (user: `0x${string}`) => bigint; // insurance score already spent (ScoreSpent ledger)
+    maxPayoutBps: bigint; // Registry.maxPayoutBps: per-incident cap, as a share of each pool's balance
   }
 ): Promise<Settlement> {
   // Pre-incident value, anchored at Incident.referenceBlock.
@@ -189,17 +197,33 @@ export async function settle(
   // they choose to spend this incident.
   const totalSpent = rows.reduce((a, r) => a + (r.lossUsd > 0n ? r.scoreSpent : 0n), 0n);
 
-  // payoutUsd = min(spent-share × poolUsd, κ × lossUsd); split per pool
-  // pro-rata to the pool mix.
+  // payoutUsd = min(spent-share × poolUsd, κ × lossUsd).
   for (const r of rows) {
     if (r.lossUsd === 0n || totalSpent === 0n) {
-      r.amounts = opts.poolOrder.map(() => 0n);
+      r.payoutUsd = 0n;
       continue;
     }
     const share = (r.scoreSpent * poolUsd) / totalSpent;
     const cap = (r.lossUsd * cfg.coverageBps) / BPS;
     r.payoutUsd = share < cap ? share : cap;
+  }
+
+  // Per-incident LP-loss cap (Registry.maxPayoutBps). Payouts are apportioned
+  // pro-rata to each pool's balance, so capping the aggregate USD payout at
+  // poolUsd × bps caps every pool at balance × bps — matching each pool's on-chain
+  // maxPayoutPerIncident, which settleIncident checks poolPayouts against. Haircut
+  // all claims uniformly if the raw total would exceed it.
+  const maxTotalUsd = (poolUsd * opts.maxPayoutBps) / BPS;
+  const rawTotalUsd = rows.reduce((a, r) => a + r.payoutUsd, 0n);
+  if (rawTotalUsd > maxTotalUsd && rawTotalUsd > 0n) {
+    for (const r of rows) r.payoutUsd = (r.payoutUsd * maxTotalUsd) / rawTotalUsd;
+  }
+
+  // Split each claim's payout per pool, pro-rata to the pool mix; sum per pool.
+  const poolPayouts = opts.poolOrder.map(() => 0n);
+  for (const r of rows) {
     r.amounts = opts.poolOrder.map((_, i) => (poolUsd === 0n ? 0n : (r.payoutUsd * opts.poolBalances[i]) / poolUsd));
+    for (let i = 0; i < poolPayouts.length; i++) poolPayouts[i] += r.amounts[i];
   }
 
   const tree = settlementTree(incidentId, rows);
@@ -210,6 +234,7 @@ export async function settle(
     twapRatio: twap,
     root: tree.root as `0x${string}`,
     poolOrder: opts.poolOrder,
+    poolPayouts,
     rows,
   };
 }
@@ -249,7 +274,7 @@ export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
 export function settlementTypedData(
   chainId: number,
   defiInsurance: `0x${string}`,
-  s: Pick<Settlement, "incidentId" | "root">,
+  s: Pick<Settlement, "incidentId" | "root" | "poolPayouts">,
   unresolved: bigint
 ) {
   return {
@@ -259,9 +284,10 @@ export function settlementTypedData(
         { name: "incidentId", type: "uint256" },
         { name: "root", type: "bytes32" },
         { name: "unresolved", type: "uint256" },
+        { name: "poolPayouts", type: "uint256[]" },
       ],
     },
     primaryType: "Settlement",
-    message: { incidentId: s.incidentId, root: s.root, unresolved },
+    message: { incidentId: s.incidentId, root: s.root, unresolved, poolPayouts: s.poolPayouts },
   } as const;
 }

@@ -69,6 +69,17 @@ contract Registry {
     ///         claims. Set by the timelock; never swapped mid-incident.
     address public payoutModule;
 
+    /// @notice Universal cap, in basis points, on how much of a cover pool's balance
+    ///         a single incident may pay out — so LPs never lose everything at once.
+    ///         Each pool exposes {SingleAssetCoverPool.maxPayoutPerIncident} =
+    ///         balance × this / 10_000; the settlement's per-pool totals are checked
+    ///         against it at settle time. Strictly between 0 and 10_000 (a payout of
+    ///         100% would let a pool drain fully; 0 would block all payouts).
+    uint256 public maxPayoutBps;
+
+    /// @notice Basis-point denominator for {maxPayoutBps}.
+    uint256 public constant BPS_DENOMINATOR = 10_000;
+
     // ─────────────────────────── Insurance-score topology ───────────────────────────
 
     /// @notice A token whose holding accrues a non-expiring USD8 insurance score.
@@ -101,8 +112,10 @@ contract Registry {
     error PoolExists(IERC20 asset);
     error PoolNotFound(IERC20 asset);
     error ScoredTokenNotFound(IERC20 token);
+    error InvalidMaxPayoutBps(uint256 bps);
 
     event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
+    event MaxPayoutBpsSet(uint256 oldBps, uint256 newBps);
     event AdminSet(address indexed account, bool allowed);
     event PausedSet(address indexed target, bool paused);
     event PoolAdded(IERC20 indexed asset, address indexed pool);
@@ -124,15 +137,19 @@ contract Registry {
         _;
     }
 
-    /// @param _timelock  Root governance address (non-zero).
-    /// @param _admin     Initial admin (non-zero — the system must launch with an
-    ///                   admin so the fast pause path is usable from day one).
-    constructor(address _timelock, address _admin) {
+    /// @param _timelock      Root governance address (non-zero).
+    /// @param _admin         Initial admin (non-zero — the system must launch with an
+    ///                       admin so the fast pause path is usable from day one).
+    /// @param _maxPayoutBps  Per-incident payout cap in bps (0 < bps < 10_000).
+    constructor(address _timelock, address _admin, uint256 _maxPayoutBps) {
         if (_timelock == address(0) || _admin == address(0)) revert ZeroAddress();
+        if (_maxPayoutBps == 0 || _maxPayoutBps >= BPS_DENOMINATOR) revert InvalidMaxPayoutBps(_maxPayoutBps);
         timelock = _timelock;
         emit TimelockChanged(address(0), _timelock);
         isAdmin[_admin] = true;
         emit AdminSet(_admin, true);
+        maxPayoutBps = _maxPayoutBps;
+        emit MaxPayoutBpsSet(0, _maxPayoutBps);
     }
 
     // ─────────────────────────── Governance (timelock) ───────────────────────────
@@ -243,6 +260,20 @@ contract Registry {
     function setBoosterNFT(address newBooster) external onlyTimelock notFrozen {
         emit BoosterNFTSet(boosterNFT, newBooster);
         boosterNFT = newBooster;
+    }
+
+    /// @notice Update the per-incident payout cap. Timelock only — it governs how
+    ///         much of a pool a single incident may drain, a risk parameter rather
+    ///         than a fast operational lever (and unlike pause it has no deny-only
+    ///         safe direction: lowering suppresses legitimate payouts, raising
+    ///         weakens LP protection), so it is timelock-gated like every other
+    ///         economic setter. Blocked while an incident is active so the cap a
+    ///         settlement is checked against can't shift mid-flight. Strictly
+    ///         between 0 and {BPS_DENOMINATOR}.
+    function setMaxPayoutBps(uint256 newBps) external onlyTimelock notFrozen {
+        if (newBps == 0 || newBps >= BPS_DENOMINATOR) revert InvalidMaxPayoutBps(newBps);
+        emit MaxPayoutBpsSet(maxPayoutBps, newBps);
+        maxPayoutBps = newBps;
     }
 
     // ─────────────────────────── Pause (admin or timelock) ───────────────────────────

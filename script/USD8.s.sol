@@ -25,7 +25,7 @@ contract USD8Script is Script {
         address admin = vm.envAddress("USD8_DEFAULT_ADMIN");
 
         vm.startBroadcast();
-        Registry authority = new Registry(admin, admin);
+        Registry authority = new Registry(admin, admin, 8000);
         USD8 impl = new USD8();
         bytes memory init = abi.encodeCall(USD8.initialize, (authority, treasury));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);

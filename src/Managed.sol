@@ -36,6 +36,12 @@ abstract contract Managed {
     /// @notice The system's access + pause registry. Timelock-settable.
     Registry public authority;
 
+    /// @dev Storage gap. Managed is a base of UUPS (USD8, SavingsUSD8) and beacon
+    ///      (SingleAssetCoverPool) upgradeable contracts; reserving slots here lets
+    ///      a future version add state to Managed without shifting any child's
+    ///      layout. Reduce this array by the number of slots any new var consumes.
+    uint256[50] private __gap;
+
     error ZeroAddress();
     error EthTransferFailed();
     /// @notice Nothing sweepable for this token (address(0) = ETH).

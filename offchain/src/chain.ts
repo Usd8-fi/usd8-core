@@ -21,6 +21,7 @@ export const REGISTRY_ABI = parseAbi([
   "function poolsLength() view returns (uint256)",
   "function getScoredTokens() view returns ((address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[])",
   "function boosterNFT() view returns (address)",
+  "function maxPayoutBps() view returns (uint256)",
 ]);
 
 // SingleAssetCoverPool surface: per-pool asset + valuation.
@@ -70,6 +71,7 @@ export interface ScoredToken {
   token: `0x${string}`;
   scorePerTokenPerBlock: bigint;
   startBlock: bigint;
+  decimals: number; // token decimals; scores are normalized to an 18-dec basis before summing (F6)
 }
 export interface IncidentConfig {
   coverageBps: bigint; // insured token's maxCoverageBps (κ) at openBlock
@@ -178,12 +180,20 @@ export async function incidentConfigOf(
     blockNumber: openBlock,
   })) as readonly [bigint, bigint, bigint];
 
-  const scoredTokens = (await client.readContract({
+  const rawScored = (await client.readContract({
     address: CONFIG.registry,
     abi: REGISTRY_ABI,
     functionName: "getScoredTokens",
     blockNumber: openBlock,
-  })) as ScoredToken[];
+  })) as { token: `0x${string}`; scorePerTokenPerBlock: bigint; startBlock: bigint }[];
+  // Enrich each scored token with its decimals so earnedScoreOf can normalize
+  // every token's balance integral to a common 18-dec basis before summing (F6):
+  // otherwise a non-18-dec scored token's score would be mis-scaled relative to
+  // the others when they're added together.
+  const scoredTokens: ScoredToken[] = [];
+  for (const st of rawScored) {
+    scoredTokens.push({ ...st, decimals: await decimalsOf(client, st.token) });
+  }
 
   return {
     coverageBps: it.maxCoverageBps,
@@ -228,6 +238,16 @@ export async function boosterNftAt(client: PublicClient, blockNumber: bigint): P
     functionName: "boosterNFT",
     blockNumber,
   })) as `0x${string}`;
+}
+
+/** The universal per-incident payout cap (bps) as of `blockNumber`. */
+export async function maxPayoutBpsAt(client: PublicClient, blockNumber: bigint): Promise<bigint> {
+  return (await client.readContract({
+    address: CONFIG.registry,
+    abi: REGISTRY_ABI,
+    functionName: "maxPayoutBps",
+    blockNumber,
+  })) as bigint;
 }
 
 /**
@@ -343,11 +363,28 @@ export async function balanceOfAt(
   })) as bigint;
 }
 
-function sortedTransfers(outs: any[], ins: any[]) {
-  return [...outs.map((l) => ({ l, sign: -1n })), ...ins.map((l) => ({ l, sign: 1n }))].sort((a, b) =>
-    a.l.blockNumber === b.l.blockNumber
-      ? Number(a.l.logIndex! - b.l.logIndex!)
-      : Number(a.l.blockNumber! - b.l.blockNumber!)
+/**
+ * Merge outflow (from == who) and inflow (to == who) Transfer logs into net
+ * balance deltas, summed per unique (blockNumber, logIndex), then sorted. Netting
+ * by log id is what makes SELF-transfers correct: a `Transfer(who, who, V)` log is
+ * returned by BOTH the `from` and `to` queries (same block+logIndex), so its −V
+ * and +V land on the same key and cancel to zero — a self-transfer never changed
+ * the balance. Without this the −V leg would be applied first and dip the running
+ * min spuriously (F5). Normal transfers appear in only one query, so they pass
+ * through as a single signed delta.
+ */
+function netByLog(outs: any[], ins: any[]): { blockNumber: bigint; logIndex: number; delta: bigint }[] {
+  const byKey = new Map<string, { blockNumber: bigint; logIndex: number; delta: bigint }>();
+  const add = (l: any, delta: bigint) => {
+    const key = `${l.blockNumber}:${l.logIndex}`;
+    const cur = byKey.get(key);
+    if (cur) cur.delta += delta;
+    else byKey.set(key, { blockNumber: l.blockNumber as bigint, logIndex: l.logIndex as number, delta });
+  };
+  for (const l of outs) add(l, -(l.args.value as bigint));
+  for (const l of ins) add(l, l.args.value as bigint);
+  return [...byKey.values()].sort((a, b) =>
+    a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : Number(a.blockNumber - b.blockNumber)
   );
 }
 
@@ -368,8 +405,8 @@ export async function minBalanceOver(
   let min = bal;
   const outs = await client.getLogs({ address: token, event: ERC20_TRANSFER, args: { from: who }, fromBlock: fromBlock + 1n, toBlock });
   const ins = await client.getLogs({ address: token, event: ERC20_TRANSFER, args: { to: who }, fromBlock: fromBlock + 1n, toBlock });
-  for (const { l, sign } of sortedTransfers(outs, ins)) {
-    bal += sign * (l.args.value as bigint);
+  for (const e of netByLog(outs, ins)) {
+    bal += e.delta;
     if (bal < min) min = bal;
   }
   return min;
@@ -400,10 +437,17 @@ export async function minErc1155BalanceOver(
   let min = bal;
   if (toBlock <= fromBlock) return min;
 
-  const events: { blockNumber: bigint; logIndex: number; delta: bigint }[] = [];
+  // Net by (blockNumber, logIndex) so a self-transfer (from == to == who), which
+  // the from- and to-queries both return as the same log, cancels to zero (F5).
+  const byKey = new Map<string, { blockNumber: bigint; logIndex: number; delta: bigint }>();
   const from = fromBlock + 1n;
 
-  const push = (l: any, delta: bigint) => events.push({ blockNumber: l.blockNumber!, logIndex: l.logIndex!, delta });
+  const push = (l: any, delta: bigint) => {
+    const key = `${l.blockNumber}:${l.logIndex}`;
+    const cur = byKey.get(key);
+    if (cur) cur.delta += delta;
+    else byKey.set(key, { blockNumber: l.blockNumber as bigint, logIndex: l.logIndex as number, delta });
+  };
 
   const outSingle = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_SINGLE, args: { from: who }, fromBlock: from, toBlock });
   const inSingle = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_SINGLE, args: { to: who }, fromBlock: from, toBlock });
@@ -422,7 +466,9 @@ export async function minErc1155BalanceOver(
   for (const l of outBatch) push(l, -batchDelta(l));
   for (const l of inBatch) push(l, batchDelta(l));
 
-  events.sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : Number(a.blockNumber - b.blockNumber)));
+  const events = [...byKey.values()].sort((a, b) =>
+    a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : Number(a.blockNumber - b.blockNumber)
+  );
   for (const e of events) {
     bal += e.delta;
     if (bal < min) min = bal;
@@ -448,10 +494,10 @@ export async function tokenBlockIntegral(
   const ins = await client.getLogs({ address: token, event: ERC20_TRANSFER, args: { to: who }, fromBlock: fromBlock + 1n, toBlock });
   let acc = 0n;
   let cursor = fromBlock;
-  for (const { l, sign } of sortedTransfers(outs, ins)) {
-    acc += bal * (l.blockNumber! - cursor);
-    cursor = l.blockNumber!;
-    bal += sign * (l.args.value as bigint);
+  for (const e of netByLog(outs, ins)) {
+    acc += bal * (e.blockNumber - cursor);
+    cursor = e.blockNumber;
+    bal += e.delta;
   }
   acc += bal * (toBlock - cursor);
   return acc;

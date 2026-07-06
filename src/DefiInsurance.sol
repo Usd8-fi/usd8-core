@@ -35,6 +35,7 @@ interface IERC1155Burnable is IERC1155 {
 interface ISingleAssetCoverPool {
     function payClaim(address to, uint256 amount) external;
     function totalAssets() external view returns (uint256);
+    function maxPayoutPerIncident() external view returns (uint256);
 }
 
 /// @title  DefiInsurance v1
@@ -243,6 +244,16 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         later {Registry} topology change.
     mapping(uint256 incidentId => address[]) internal incidentPools;
 
+    /// @notice Remaining payable budget per pool for each incident, aligned to
+    ///         {incidentPools}. Set at {settleIncident} to the TEE-committed
+    ///         `poolPayouts` (each already checked ≤ that pool's
+    ///         {SingleAssetCoverPool.maxPayoutPerIncident}); {finalizeClaim}
+    ///         decrements it and reverts once a pool's cumulative payout would
+    ///         exceed it. This makes the per-incident LP-loss cap a HARD on-chain
+    ///         bound on the actual sum of finalized payouts — not merely a check
+    ///         against the signer's self-declared total. See {finalizeClaim}.
+    mapping(uint256 incidentId => uint256[]) internal incidentPoolBudget;
+
     /// @notice Next incident id to assign. Starts at 1.
     uint256 public nextIncidentId;
 
@@ -342,8 +353,14 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         join/cancel after window-close, no finalize until the dispute period
     ///         passes), every claim is on-chain, and a root signed for a different
     ///         count can never be submitted here (the digest wouldn't recover teeSigner).
+    ///         {poolPayouts} is the enclave-committed total payout per pool (aligned
+    ///         to {incidentPools}); settleIncident checks each against the pool's
+    ///         {SingleAssetCoverPool.maxPayoutPerIncident} and records it as the
+    ///         pool's per-incident budget that {finalizeClaim} draws down — so LP
+    ///         loss per pool is hard-capped at the committed total (see
+    ///         {incidentPoolBudget}).
     bytes32 internal constant SETTLEMENT_TYPEHASH =
-        keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved)");
+        keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts)");
 
     /// @notice EIP-712 struct the TEE signs to open an incident. The enclave —
     ///         running the published depeg-detection code — attests that
@@ -381,6 +398,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     error UnauthorizedOpenSigner(address recovered);
     error UnauthorizedSettlementSigner(address recovered);
     error BoosterAmountTooLarge(uint256 boosterAmount);
+    error SettlementPoolMismatch(uint256 given, uint256 expected);
+    error PayoutCapExceeded(uint256 poolIndex, uint256 requested, uint256 cap);
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -581,7 +600,11 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///      token is delisted later, at root submission (a confirmed event), not
     ///      here — so an incident that opens and closes without a root leaves
     ///      the listing untouched.
-    function _openIncident(IERC20 insuredToken, uint64 referenceBlock) internal returns (uint256 incidentId) {
+    function _openIncident(IERC20 insuredToken, uint64 referenceBlock)
+        internal
+        whenNotPaused
+        returns (uint256 incidentId)
+    {
         // Global precondition, token-independent: fail fast before any storage copy.
         if (_hasActiveIncident()) revert IncidentsActive();
 
@@ -643,6 +666,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     function joinClaim(IERC20 insuredToken, uint128 insuredTokenAmount, uint256 scoreToSpend, uint256 boosterAmount)
         external
         nonReentrant
+        whenNotPaused
         returns (uint256 claimId)
     {
         if (insuredTokenAmount == 0) revert ZeroAmount();
@@ -733,12 +757,18 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         set it scored. Anyone may relay the signed root; the
     ///         optimistic dispute window and {closeIncident} still apply, and a
     ///         corrected root may be resubmitted within the submit window.
-    /// @param incidentId  In-flight incident to settle.
-    /// @param root        Settlement root — the commitment over the claim table.
-    /// @param signature   {teeSigner}'s EIP-712 signature over the Settlement
-    ///                    struct (domain: name "DefiInsurance", version "1",
-    ///                    this chain id, this contract).
-    function settleIncident(uint256 incidentId, bytes32 root, bytes calldata signature) external {
+    /// @param incidentId   In-flight incident to settle.
+    /// @param root         Settlement root — the commitment over the claim table.
+    /// @param poolPayouts  Enclave-committed total payout per pool, aligned to the
+    ///                     incident's {incidentPools} snapshot. Each is checked
+    ///                     against that pool's {SingleAssetCoverPool.maxPayoutPerIncident}.
+    /// @param signature    {teeSigner}'s EIP-712 signature over the Settlement
+    ///                     struct (domain: name "DefiInsurance", version "1",
+    ///                     this chain id, this contract).
+    function settleIncident(uint256 incidentId, bytes32 root, uint256[] calldata poolPayouts, bytes calldata signature)
+        external
+        whenNotPaused
+    {
         Incident storage inc = incidents[incidentId];
 
         // Cheap phase + root checks first — fail fast before the ECDSA recover.
@@ -752,11 +782,36 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
             revert OutsideSettlementPhase(incidentId);
         }
 
+        address[] memory poolAddrs = incidentPools[incidentId];
+        if (poolPayouts.length != poolAddrs.length) {
+            revert SettlementPoolMismatch(poolPayouts.length, poolAddrs.length);
+        }
+
         // Authorize: a valid teeSigner signature bound to this incident's exact
-        // live claim set via unresolved (frozen across the submit window, on-chain).
-        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(SETTLEMENT_TYPEHASH, incidentId, root, inc.unresolved)));
+        // live claim set via unresolved (frozen across the submit window, on-chain)
+        // and to the committed per-pool payout totals.
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    SETTLEMENT_TYPEHASH, incidentId, root, inc.unresolved, keccak256(abi.encodePacked(poolPayouts))
+                )
+            )
+        );
         address recovered = ECDSA.recover(digest, signature);
         if (recovered != teeSigner || teeSigner == address(0)) revert UnauthorizedSettlementSigner(recovered);
+
+        // Bound LP loss per incident: each pool's committed total must be within its
+        // cap (pool frozen ⇒ this is the open-balance cap). Recorded as the pool's
+        // remaining payable budget, which {finalizeClaim} draws down — so the ACTUAL
+        // summed payout per pool is hard-capped at this committed total, not just the
+        // signer's assertion. Overwriting a corrected root within the submit window
+        // re-sets the budget wholesale; finalize can't start until after dispute, so
+        // no draw-down is ever lost to a re-settle.
+        for (uint256 i = 0; i < poolAddrs.length; i++) {
+            uint256 cap = ISingleAssetCoverPool(poolAddrs[i]).maxPayoutPerIncident();
+            if (poolPayouts[i] > cap) revert PayoutCapExceeded(i, poolPayouts[i], cap);
+        }
+        incidentPoolBudget[incidentId] = poolPayouts;
 
         inc.root = root;
         inc.rootSubmittedAt = uint64(block.timestamp);
@@ -801,6 +856,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     function finalizeClaim(uint256 claimId, uint256[] calldata amounts, uint256 scoreSpent, bytes32[] calldata proof)
         external
         nonReentrant
+        whenNotPaused
     {
         Claim storage c = claims[claimId];
         if (c.user != msg.sender) revert UnauthorizedClaim(claimId);
@@ -851,10 +907,26 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
             c.boosterAmount = 0;
         }
 
-        // Pay each pool its settlement-row amount (each does its own over-allocation
-        // check + loss socialization); zeros are skipped by the pool.
+        // Pay each pool its settlement-row amount, drawing down that pool's remaining
+        // per-incident budget ({incidentPoolBudget}, set to the TEE-committed
+        // poolPayouts at settle). This hard-caps the ACTUAL summed payout per pool at
+        // the committed total — the cap holds against the real leaves, not just the
+        // signer's declared number. On an honest root Σ(row amounts) == committed, so
+        // the budget lands exactly at 0 and every claim finalizes. Only a malformed
+        // root whose leaves over-allocate a pool (Σ > committed) can exhaust the
+        // budget early and revert a later claim; that is a bad root — the dispute
+        // window / {closeIncident} is its primary defense, and this is the LP-loss
+        // backstop for one that slips through (the reverted claimant recovers escrow
+        // via {withdrawNonFinalizedClaim}). Each pool also re-checks amount ≤ its live
+        // balance and socializes the loss; zeros are skipped by the pool.
+        uint256[] storage budget = incidentPoolBudget[incidentId];
         for (uint256 i = 0; i < poolAddrs.length; i++) {
-            if (amounts[i] != 0) ISingleAssetCoverPool(poolAddrs[i]).payClaim(msg.sender, amounts[i]);
+            uint256 amt = amounts[i];
+            if (amt == 0) continue;
+            uint256 remaining = budget[i];
+            if (amt > remaining) revert PayoutCapExceeded(i, amt, remaining);
+            budget[i] = remaining - amt;
+            ISingleAssetCoverPool(poolAddrs[i]).payClaim(msg.sender, amt);
         }
 
         // The consumed insurance score is recorded as an EVENT, not on-chain state:
@@ -870,6 +942,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         incident was closed (admin- or auto-), voided (no root by the
     ///         deadline), or its finalize window expired unused. Callable
     ///         anytime after, forever.
+    /// @dev    Deliberately NOT whenNotPaused (unlike open/join/settle/finalize):
+    ///         escrow recovery — and {cancelClaim} — must never be blockable by a
+    ///         pause, so a pause can't trap claimant funds.
     /// @param claimId  Caller's claim whose escrow to recover.
     function withdrawNonFinalizedClaim(uint256 claimId) external nonReentrant {
         Claim storage c = claims[claimId];

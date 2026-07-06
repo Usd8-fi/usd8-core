@@ -52,7 +52,7 @@ contract SettlementIntegrationTest is Test {
         usdc = new MockERC20("USDC", "USDC", 6);
         lp = new MockERC20("LP", "LP", 18);
         booster = new MockERC1155();
-        authority = new Registry(admin, admin);
+        authority = new Registry(admin, admin, 8000);
         USD8 impl = new USD8();
         usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (authority, admin)))));
 
@@ -63,12 +63,12 @@ contract SettlementIntegrationTest is Test {
                 new BeaconProxy(
                     address(beacon),
                     abi.encodeCall(
-                        SingleAssetCoverPool.initialize, (authority, IERC20(address(usdc)), IERC20(address(usd8)), 0)
+                        SingleAssetCoverPool.initialize, (authority, IERC20(address(usdc)), IERC20(address(usd8)))
                     )
                 )
             )
         );
-        pool.seed(0); // minResidual 0: open the {seeded} gate before staking
+        pool.seed(0); // zero-seed: open the {seeded} gate before staking
 
         defi = new DefiInsurance(authority);
 
@@ -87,9 +87,19 @@ contract SettlementIntegrationTest is Test {
         vm.stopPrank();
     }
 
+    /// @dev Per-pool payout caps aligned to the current pool set (always ≥ the
+    ///      integration payouts, which are well under the cap).
+    function _pp() internal view returns (uint256[] memory pp) {
+        (, address[] memory poolAddrs) = authority.pools();
+        pp = new uint256[](poolAddrs.length);
+        for (uint256 i = 0; i < poolAddrs.length; i++) {
+            pp[i] = SingleAssetCoverPool(poolAddrs[i]).maxPayoutPerIncident();
+        }
+    }
+
     /// @dev Sign a settlement root as the TEE, binding the incident's current
-    ///      on-chain unresolved count (mirrors settleIncident).
-    function _teeSign(uint256 incidentId, bytes32 root) internal view returns (bytes memory) {
+    ///      on-chain unresolved count and committed per-pool payouts (mirrors settleIncident).
+    function _teeSign(uint256 incidentId, bytes32 root, uint256[] memory pp) internal view returns (bytes memory) {
         (,,, uint256 unresolved,,,,) = defi.incidents(incidentId);
         bytes32 domain = keccak256(
             abi.encode(
@@ -102,10 +112,11 @@ contract SettlementIntegrationTest is Test {
         );
         bytes32 structHash = keccak256(
             abi.encode(
-                keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved)"),
+                keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts)"),
                 incidentId,
                 root,
-                unresolved
+                unresolved,
+                keccak256(abi.encodePacked(pp))
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEE_PK, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
@@ -114,7 +125,8 @@ contract SettlementIntegrationTest is Test {
 
     /// @dev Relay a TEE-signed root (keeps the caller's stack shallow).
     function _settle(uint256 incidentId, bytes32 root) internal {
-        defi.settleIncident(incidentId, root, _teeSign(incidentId, root));
+        uint256[] memory pp = _pp();
+        defi.settleIncident(incidentId, root, pp, _teeSign(incidentId, root, pp));
     }
 
     function test_OffchainRootAndProofsDriveCorrectPayout() public {

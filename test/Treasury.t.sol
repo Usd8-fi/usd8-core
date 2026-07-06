@@ -62,7 +62,7 @@ contract TreasuryTest is Test {
         vm.etch(USDC_ADDR, address(template).code);
         usdc = MockERC20(USDC_ADDR);
 
-        authority = new Registry(timelock, admin);
+        authority = new Registry(timelock, admin, 8000);
         USD8 impl = new USD8();
         bytes memory init = abi.encodeCall(USD8.initialize, (authority, address(this)));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
@@ -199,7 +199,7 @@ contract TreasuryTest is Test {
     }
 
     function test_SetAuthorityMigratesRegistry() public {
-        Registry newAuth = new Registry(timelock, admin);
+        Registry newAuth = new Registry(timelock, admin, 8000);
         vm.prank(timelock);
         treasury.setAuthority(newAuth);
         assertEq(address(treasury.authority()), address(newAuth));
@@ -216,7 +216,7 @@ contract TreasuryTest is Test {
     }
 
     function test_SetAuthorityOnlyTimelock() public {
-        Registry newAuth = new Registry(timelock, admin);
+        Registry newAuth = new Registry(timelock, admin, 8000);
         vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
         treasury.setAuthority(newAuth);

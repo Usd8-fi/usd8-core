@@ -21,6 +21,7 @@ import {
   poolsAt,
   poolTotalAssetsAt,
   boosterNftAt,
+  maxPayoutBpsAt,
   spentScoreByUser,
   priceUsd1e18,
   decimalsOf,
@@ -91,6 +92,10 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   }
 
   const boosterCollection = await boosterNftAt(client, openBlock);
+  // Per-incident payout cap — read at openBlock (topology anchor); it can't change
+  // mid-incident (Registry.setMaxPayoutBps is frozen-gated), so this is the same
+  // value settleIncident checks the committed poolPayouts against.
+  const maxPayoutBps = await maxPayoutBpsAt(client, openBlock);
 
   // Insurance score already spent per user, summed from ScoreSpent logs across
   // every payout module ever registered, pinned to blocks before openBlock.
@@ -113,6 +118,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
     boosterCollection,
     boosterId: BOOSTER_ID,
     spentOf,
+    maxPayoutBps,
   });
   return { s, onchainRoot };
 }
@@ -128,6 +134,7 @@ function printSettlement(s: Settlement, withProofs: boolean) {
     twapRatio: s.twapRatio.toString(),
     root: s.root,
     poolOrder: s.poolOrder,
+    poolPayouts: s.poolPayouts.map((p) => p.toString()),
     rows: s.rows.map((r) => ({
       claimId: r.claimId.toString(),
       user: r.user,
