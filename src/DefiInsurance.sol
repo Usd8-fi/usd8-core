@@ -359,6 +359,23 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         pool's per-incident budget that {finalizeClaim} draws down — so LP
     ///         loss per pool is hard-capped at the committed total (see
     ///         {incidentPoolBudget}).
+    ///
+    ///         DELIBERATE (audit M-04): the struct binds the claim COUNT
+    ///         ({unresolved}), not a hash of the exact claim set (ids / users /
+    ///         escrows / score requests / cancels). So a compromised or buggy signer
+    ///         could sign a root that omits or misallocates claims while keeping the
+    ///         same count. This is the accepted optimistic-settlement / TEE trust
+    ///         boundary, NOT an on-chain forgery: the root is public, anyone
+    ///         recomputes the correct claim table from on-chain {ClaimRegistered} /
+    ///         cancel events, and a wrong set is vetoed via {closeIncident} within
+    ///         the dispute window (omitted claimants recover escrow). We considered
+    ///         binding an on-chain cumulative claims/input hash (updated on
+    ///         join/cancel, signed here) and chose not to: it would move claim-set
+    ///         integrity from dispute-caught to settle-enforced, but a compromised
+    ///         signer already has other levers (wrong per-leaf amounts, bounded only
+    ///         by {poolPayouts}/the cap), so the dispute window remains the backstop
+    ///         regardless. Revisit if the trust model tightens (e.g. multi-signer /
+    ///         non-optimistic settlement).
     bytes32 internal constant SETTLEMENT_TYPEHASH =
         keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts)");
 
@@ -400,6 +417,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     error BoosterAmountTooLarge(uint256 boosterAmount);
     error SettlementPoolMismatch(uint256 given, uint256 expected);
     error PayoutCapExceeded(uint256 poolIndex, uint256 requested, uint256 cap);
+    error PayoutModuleNotRegistered();
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -444,6 +462,30 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         _setAuthority(_authority);
         nextIncidentId = 1;
         nextClaimId = 1;
+        // Safe nonzero settlement defaults so an incident opened before governance
+        // tunes them can still settle, instead of the off-chain TWAP throwing on
+        // sampleStepBlocks == 0 and forcing the incident to void (M-02). Assumes
+        // ~12s blocks; setSettlementParams (timelock, between incidents) refines
+        // them and can never set sampleStepBlocks back to 0. Governance SHOULD
+        // review these for the product before opening the first incident.
+        settlementParams = SettlementParams({
+            twapLookbackBlocks: 300, // ~1h TWAP window before referenceBlock
+            holdingMarginBlocks: 300, // ~1h continuous-holding margin for eligibility
+            sampleStepBlocks: 60 // ~12min TWAP sample stride (≈6 samples)
+        });
+    }
+
+    /// @dev Reverts while an incident is active. Settlement reconstructs an
+    ///      incident's economic config by archive-reading it at the incident's
+    ///      {Incident.openBlock} — which returns END-OF-BLOCK state — so a config
+    ///      mutation in the same block after the open (or any later block during the
+    ///      incident) would desync the signed root from the config actually in force
+    ///      at open (audit M-01). An incident goes active atomically in its open tx,
+    ///      so gating these setters on it forecloses that window: nothing can change
+    ///      settlement-critical config from the open tx through resolution.
+    modifier notDuringIncident() {
+        if (_hasActiveIncident()) revert IncidentsActive();
+        _;
     }
 
     // ═══════════════════════════ Insured token management (timelock) ═══════════════════════════
@@ -486,7 +528,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     /// @notice Update an insured token's coverage factor κ. Timelock only.
     /// @param insuredToken  Listed insured token to update.
     /// @param _maxCoverageBps  New κ in (0, 100%] (bps).
-    function setMaxCoverageBps(IERC20 insuredToken, uint256 _maxCoverageBps) external onlyTimelock {
+    function setMaxCoverageBps(IERC20 insuredToken, uint256 _maxCoverageBps) external onlyTimelock notDuringIncident {
         if (insuredTokens[insuredToken].maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
         if (_maxCoverageBps == 0 || _maxCoverageBps > BPS_DENOMINATOR) {
             revert InvalidMaxCoverageBps(_maxCoverageBps, BPS_DENOMINATOR);
@@ -503,6 +545,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     function setUnderlyingConversion(IERC20 insuredToken, address conversionAddress, bytes calldata conversionCallData)
         external
         onlyTimelock
+        notDuringIncident
     {
         InsuredToken storage t = insuredTokens[insuredToken];
         if (t.maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
@@ -514,7 +557,11 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     /// @notice Update an insured token's underlying→USD price oracle. Timelock only.
     /// @param insuredToken  Listed insured token to update.
     /// @param underlyingPriceOracle   New oracle address (non-zero).
-    function setUnderlyingPriceOracle(IERC20 insuredToken, address underlyingPriceOracle) external onlyTimelock {
+    function setUnderlyingPriceOracle(IERC20 insuredToken, address underlyingPriceOracle)
+        external
+        onlyTimelock
+        notDuringIncident
+    {
         if (insuredTokens[insuredToken].maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
         if (underlyingPriceOracle == address(0)) revert ZeroAddress();
         insuredTokens[insuredToken].underlyingPriceOracle = underlyingPriceOracle;
@@ -522,19 +569,21 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     }
 
     /// @notice Remove an approved insured token. Admin or timelock — deny-only
-    ///         and recoverable (re-add to relist); moves no funds. Allowed even
-    ///         if a prior incident is unresolved — existing claims continue.
+    ///         and recoverable (re-add to relist); moves no funds. Blocked while an
+    ///         incident is active (notDuringIncident, M-01): the active incident's
+    ///         config must stay stable across settlement; delist once it resolves.
     /// @param insuredToken  Approved insured token to delist.
-    function removeInsuredToken(IERC20 insuredToken) external onlyAdminOrTimelock {
+    function removeInsuredToken(IERC20 insuredToken) external onlyAdminOrTimelock notDuringIncident {
         if (insuredTokens[insuredToken].maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
         _delistInsuredToken(insuredToken);
     }
 
-    /// @notice Set the global settlement windows (blocks). Timelock only. Safe at
-    ///         any time: each incident is settled against these params as of its
-    ///         {Incident.openBlock}, so a change only affects later incidents.
+    /// @notice Set the global settlement windows (blocks). Timelock only; blocked
+    ///         while an incident is active (notDuringIncident, M-01). Each incident
+    ///         is settled against these params as of its {Incident.openBlock}, and
+    ///         freezing them for the incident's life keeps that archive read stable.
     /// @param p  New settlement windows. See {SettlementParams}.
-    function setSettlementParams(SettlementParams calldata p) external onlyTimelock {
+    function setSettlementParams(SettlementParams calldata p) external onlyTimelock notDuringIncident {
         // sampleStepBlocks is the TWAP loop stride off-chain; 0 would never advance.
         if (p.sampleStepBlocks == 0) revert InvalidSettlementParams();
         settlementParams = p;
@@ -607,6 +656,14 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     {
         // Global precondition, token-independent: fail fast before any storage copy.
         if (_hasActiveIncident()) revert IncidentsActive();
+        // This module must be the registered payout module, else Registry.frozen()
+        // (which delegates to the CURRENT module's incidentActive) would stay false
+        // and pools wouldn't freeze — LPs could move mid-incident and break the
+        // deterministic-capital assumption settlement relies on (audit L-04).
+        // Reachable only in a misconfig/transition (module cleared via the
+        // setPayoutModule(0) brake, or an incident opened in a de-registered old
+        // instance during a module swap); this turns that into a clean revert.
+        if (authority.payoutModule() != address(this)) revert PayoutModuleNotRegistered();
 
         InsuredToken memory it = insuredTokens[insuredToken];
         if (it.maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
@@ -839,6 +896,13 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         if (inc.root != bytes32(0) && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) {
             revert IncidentFinalizing(incidentId);
         }
+        // ACCEPTED (audit C7): if a root was already submitted, settleIncident has
+        // delisted the insured token, and closing here does NOT re-list it — a
+        // vetoed incident's token must be manually re-added via {addInsuredToken}
+        // before it can be insured again. Intentional: a veto means the token/event
+        // needs governance review anyway, so relisting is a deliberate manual step,
+        // not an automatic one. (An incident closed before any root leaves the
+        // listing untouched, since delisting only happens at root submission.)
         inc.closed = true;
         activeIncidentId = 0;
         emit IncidentClosed(incidentId, msg.sender);
@@ -901,6 +965,14 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         // They must still hold them and have approved this contract; otherwise this
         // reverts and the claim can't finalize (keeping them is their responsibility).
         // Burned from the collection snapshotted at join, not the pool's current one.
+        //
+        // ACCEPTED (audit C2): a claimant who burns/moves their booster first makes
+        // their own finalize revert, so the claim stays unresolved and the pool
+        // stays frozen for the rest of the finalize window. This is liveness-only,
+        // not fund loss (the griefer forfeits their own boost and recovers escrow
+        // afterward), and it extends the freeze no further than a claimant simply
+        // never calling finalize already could — the freeze is bounded by the
+        // finalize window either way. So it is not a new DoS; accepted as designed.
         uint256 boosterAmount = c.boosterAmount;
         if (boosterAmount != 0) {
             IERC1155Burnable(c.boosterCollection).burn(msg.sender, BOOSTER_ID, boosterAmount);
@@ -983,8 +1055,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         SUBMIT_DEADLINE and escrow is returned; a mistaken or bad-root
     ///         incident is instead vetoed with {closeIncident}.
     /// @param newSigner  The new enclave key's address (zero to disable).
-    function setTeeSigner(address newSigner) external onlyTimelock {
-        if (_hasActiveIncident()) revert IncidentsActive();
+    function setTeeSigner(address newSigner) external onlyTimelock notDuringIncident {
         emit TeeSignerSet(teeSigner, newSigner);
         teeSigner = newSigner;
     }

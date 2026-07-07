@@ -322,26 +322,43 @@ export async function ratioAt(
   return BigInt(res.data ?? "0x0");
 }
 
+// Max age (seconds) a Chainlink feed's answer may have, measured at the pinned
+// block, before settlement treats it as stale and refuses to value against it
+// (audit C5). Conservative default (24h) covering long-heartbeat USD feeds; tune
+// down per-feed if all configured oracles have tighter heartbeats. A stale feed
+// throws here → no root is produced → the incident voids (escrow recoverable)
+// rather than settling on a frozen price the dispute window can't self-correct.
+const MAX_ORACLE_STALENESS = 86_400n;
+
 /**
  * USD price from a Chainlink-style oracle at `blockNumber`, normalized to 1e18.
  * Reads the oracle's own `decimals()` and pins the block so the value is
- * reproducible.
+ * reproducible. Rejects a non-positive answer, an incomplete round
+ * (startedAt/updatedAt == 0), and a feed staler than {MAX_ORACLE_STALENESS} at the
+ * pinned block. (answeredInRound is intentionally NOT checked — deprecated on
+ * modern OCR feeds; updatedAt is the correct freshness signal.)
  */
 export async function priceUsd1e18(client: PublicClient, oracle: `0x${string}`, blockNumber: bigint): Promise<bigint> {
-  const [, answer] = (await client.readContract({
+  const [, answer, startedAt, updatedAt] = (await client.readContract({
     address: oracle,
     abi: FEED_ABI,
     functionName: "latestRoundData",
     blockNumber,
   })) as [bigint, bigint, bigint, bigint, bigint];
   if (answer <= 0n) throw new Error(`oracle ${oracle} returned non-positive price`);
-  const dec = (await client.readContract({
-    address: oracle,
-    abi: FEED_ABI,
-    functionName: "decimals",
-    blockNumber,
-  })) as number;
-  return BigInt(answer) * 10n ** (18n - BigInt(dec));
+  // Round completeness + staleness: compare the feed's last-update time to the
+  // pinned block's own timestamp (both deterministic, so every honest recompute agrees).
+  if (startedAt === 0n || updatedAt === 0n) throw new Error(`oracle ${oracle} round incomplete`);
+  const blockTs = (await client.getBlock({ blockNumber })).timestamp;
+  if (blockTs > updatedAt && blockTs - updatedAt > MAX_ORACLE_STALENESS) {
+    throw new Error(`oracle ${oracle} stale: updatedAt ${updatedAt}, block ts ${blockTs} (> ${MAX_ORACLE_STALENESS}s)`);
+  }
+  const dec = BigInt(
+    (await client.readContract({ address: oracle, abi: FEED_ABI, functionName: "decimals", blockNumber })) as number
+  );
+  // Normalize both directions so a feed with > 18 decimals doesn't throw a
+  // negative-exponent RangeError (Chainlink USD feeds are 8-dec; guard exotics).
+  return dec <= 18n ? answer * 10n ** (18n - dec) : answer / 10n ** (dec - 18n);
 }
 
 export async function decimalsOf(client: PublicClient, token: `0x${string}`): Promise<number> {

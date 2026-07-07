@@ -334,6 +334,16 @@ contract SingleAssetCoverPool is Initializable, ReentrancyGuardTransient, Manage
     ///      rate. The new end-time is a USD-amount-weighted average of the
     ///      remaining schedule and a fresh {rewardsDuration}, so a tiny donation
     ///      barely moves the schedule while a large one behaves like a fresh window.
+    ///
+    ///      ACCEPTED (audit L-01/C6): `newRate = total / newDuration` floors, so the
+    ///      remainder (`total mod newDuration`, always < newDuration ≤ rewardsDuration
+    ///      = 604800) is never streamed. It was already added to {rewardReserve} in
+    ///      full by {receiveProfitDistribution}, so it stays there — protected by
+    ///      {_sweepable} (accounted as owed) yet unclaimable (never in any staker's
+    ///      earned) and unstreamed. We deliberately DO NOT roll it forward or make it
+    ///      sweepable: at < ~6e-13 USD8 per distribution it is economically zero, and
+    ///      the extra state/branch isn't worth it. Dust of this size is ignored by
+    ///      design across the pool.
     function _streamReward(uint256 amount) internal {
         _checkpointReward();
 

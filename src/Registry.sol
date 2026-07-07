@@ -279,6 +279,15 @@ contract Registry {
     // ─────────────────────────── Pause (admin or timelock) ───────────────────────────
 
     /// @notice Set the pause flag for one target contract. Admin or timelock.
+    /// @dev    INTENTIONALLY NOT frozen-gated (unlike topology setters): pause is
+    ///         the fast admin emergency lever and MUST work during an active
+    ///         incident — e.g. to halt a pool or the payout module if something
+    ///         goes wrong mid-settlement. The accepted trade-off (audit C4) is that
+    ///         this same power can pause a pool mid-incident and thereby deny an
+    ///         already-validated, dispute-survived payout (payClaim is whenNotPaused);
+    ///         claimants then recover escrow via withdrawNonFinalizedClaim, and an
+    ///         admin can unpause to let finalization resume. It requires a trusted
+    ///         admin key — griefing at worst, never theft. See {SingleAssetCoverPool.payClaim}.
     function setPaused(address target, bool p) external {
         _requireAdminOrTimelock(msg.sender);
         paused[target] = p;

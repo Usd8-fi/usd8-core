@@ -395,20 +395,34 @@ contract SingleAssetCoverPoolTest is Test {
         vm.stopPrank();
     }
 
-    function test_SettlementParamsMutableButScoredTokensFrozenDuringIncident() public {
+    function test_SettlementConfigFrozenDuringIncident() public {
         _registerClaim(bob, lp1, 50e18); // opens incident
 
-        // settlementParams is safe to retune mid-incident: the live incident is
-        // settled against state as of its openBlock, so the change only affects
-        // future incidents. No longer reverts IncidentsActive.
+        // M-01: settlement-critical config is frozen for the incident's whole life,
+        // so the off-chain openBlock config read can't be desynced by a mid-incident
+        // mutation. setSettlementParams now reverts IncidentsActive.
         DefiInsurance.SettlementParams memory p =
             DefiInsurance.SettlementParams({twapLookbackBlocks: 1, holdingMarginBlocks: 1, sampleStepBlocks: 1});
         vm.startPrank(admin);
+        vm.expectRevert(DefiInsurance.IncidentsActive.selector);
         defi.setSettlementParams(p);
 
-        // Scored-token curation stays frozen (guards live payout accounting).
+        // Scored-token curation stays frozen too (Registry-side).
         vm.expectRevert(Registry.Frozen.selector);
         authority.setScoredToken(IERC20(address(usd8)), 1, 1);
+        vm.stopPrank();
+    }
+
+    /// @dev M-01: insured-token config setters are also frozen during an incident.
+    function test_InsuredConfigFrozenDuringIncident() public {
+        _registerClaim(bob, lp1, 50e18); // opens incident on lp1
+        vm.startPrank(admin);
+        vm.expectRevert(DefiInsurance.IncidentsActive.selector);
+        defi.setMaxCoverageBps(IERC20(address(lp1)), 5000);
+        vm.expectRevert(DefiInsurance.IncidentsActive.selector);
+        defi.setUnderlyingPriceOracle(IERC20(address(lp1)), FEED);
+        vm.expectRevert(DefiInsurance.IncidentsActive.selector);
+        defi.removeInsuredToken(IERC20(address(lp2)));
         vm.stopPrank();
     }
 
@@ -434,14 +448,13 @@ contract SingleAssetCoverPoolTest is Test {
         (,,,,,, uint64 openBlock,) = defi.incidents(1);
         assertEq(openBlock, expectedOpen);
 
-        // A later retune cannot alter this incident — it is valued against
-        // openBlock — so params are freely mutable while it is live.
+        // M-01: config is frozen while the incident is live, so the openBlock read
+        // can't be desynced by a mid-incident retune — setSettlementParams reverts.
         DefiInsurance.SettlementParams memory p2 =
             DefiInsurance.SettlementParams({twapLookbackBlocks: 999, holdingMarginBlocks: 1, sampleStepBlocks: 1});
         vm.prank(admin);
+        vm.expectRevert(DefiInsurance.IncidentsActive.selector);
         defi.setSettlementParams(p2);
-        (uint64 tw,,) = defi.settlementParams();
-        assertEq(tw, 999);
     }
 
     function test_AdminCanRemoveInsuredToken() public {
@@ -694,6 +707,16 @@ contract SingleAssetCoverPoolTest is Test {
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.InsuredTokenNotApproved.selector, IERC20(address(lp3))));
         defi.openClaimIncident(IERC20(address(lp3)), uint64(block.number - 1));
+    }
+
+    /// @dev L-04: an incident can't open unless this module is the registered
+    ///      payoutModule — else Registry.frozen() wouldn't freeze the pools.
+    function test_OpenRevertsIfNotRegisteredPayoutModule() public {
+        vm.prank(admin);
+        authority.setPayoutModule(address(0)); // de-register (also the emergency brake)
+        vm.prank(admin);
+        vm.expectRevert(DefiInsurance.PayoutModuleNotRegistered.selector);
+        defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
     }
 
     /// @dev I1: a referenceBlock older than OPEN_MAX_REFERENCE_AGE is rejected, so
