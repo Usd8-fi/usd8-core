@@ -33,14 +33,9 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///
 /// @dev    Both roles (timelock + admin) land on a single EOA
 ///         ({DEFAULT_ADMIN}) — fine for beta, MUST be migrated to a Safe +
-///         TimelockController before opening to real user volume. Override
-///         the admin per-run with the OVERRIDE_ADMIN env var (useful for
-///         testnet deploys with a different signer).
-///
-///         Optional env vars:
-///           OVERRIDE_ADMIN     — replace the hardcoded {DEFAULT_ADMIN}.
-///           AAVE_USDC_VAULT    — the Aave ERC-4626 USDC vault (else {AAVE_USDC_VAULT}).
-///           MORPHO_USDC_VAULT  — the Morpho ERC-4626 USDC vault (else {MORPHO_USDC_VAULT}).
+///         TimelockController before opening to real user volume. All deploy
+///         parameters (admin, vault addresses, rates) are hardcoded constants
+///         below — edit them in-place for a different network/signer.
 ///
 /// ════════════════════════════ HARD RULES ════════════════════════════
 /// Operational invariants that are NOT (all) enforced on-chain. Whoever
@@ -112,8 +107,7 @@ contract DeployScript is Script {
 
     /// @notice ERC-4626 USDC vaults for the two launch Treasury strategies (Aave +
     ///         Morpho). Each reports asset() == USDC (checked on mainnet), which the
-    ///         ERC4626Strategy constructor also enforces. Override per-run via env
-    ///         (AAVE_USDC_VAULT / MORPHO_USDC_VAULT).
+    ///         ERC4626Strategy constructor also enforces.
     ///           - AAVE_USDC_VAULT   = stataEthUSDC (Aave v3 static aUSDC ERC-4626 wrapper).
     ///           - MORPHO_USDC_VAULT = steakUSDC (Steakhouse USDC MetaMorpho vault).
     ///         Re-confirm liquidity/curation before large allocations; the queue
@@ -137,14 +131,12 @@ contract DeployScript is Script {
     }
 
     function run() external {
-        address admin = vm.envOr("OVERRIDE_ADMIN", DEFAULT_ADMIN);
-
         vm.startBroadcast();
         Deployed memory d = _deployAndWire(msg.sender);
-        _handOffRoles(d, msg.sender, admin);
+        _handOffRoles(d, msg.sender, DEFAULT_ADMIN);
         vm.stopBroadcast();
 
-        _logResults(d, admin);
+        _logResults(d, DEFAULT_ADMIN);
     }
 
     function _deployAndWire(address deployer) internal returns (Deployed memory d) {
@@ -235,10 +227,8 @@ contract DeployScript is Script {
         // USDC ERC-4626 vault (constructor reverts unless asset() == USDC). Added to
         // the withdrawal queue in order (index 0 = Aave, consulted first on redeem).
         // Idle USDC stays idle until governance moves it via depositToStrategy.
-        address aaveVault = vm.envOr("AAVE_USDC_VAULT", AAVE_USDC_VAULT);
-        address morphoVault = vm.envOr("MORPHO_USDC_VAULT", MORPHO_USDC_VAULT);
-        d.aaveStrategy = address(new ERC4626Strategy(address(d.treasury), IERC4626(aaveVault)));
-        d.morphoStrategy = address(new ERC4626Strategy(address(d.treasury), IERC4626(morphoVault)));
+        d.aaveStrategy = address(new ERC4626Strategy(address(d.treasury), IERC4626(AAVE_USDC_VAULT)));
+        d.morphoStrategy = address(new ERC4626Strategy(address(d.treasury), IERC4626(MORPHO_USDC_VAULT)));
         d.treasury.addStrategy(ERC4626Strategy(d.aaveStrategy), 0);
         d.treasury.addStrategy(ERC4626Strategy(d.morphoStrategy), 1);
     }
