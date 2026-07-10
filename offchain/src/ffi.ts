@@ -7,7 +7,7 @@
 // the SAME payload, abi.encode'd by Foundry:
 //
 //   (uint256 incidentId, uint256[] claimIds, address[] users,
-//    uint256[][] amounts, uint256[] scoreSpents)
+//    uint256[][] amounts, uint256[] scoreSpents, uint256[] eligibles)
 //
 // where amounts[i] aligns to the registered pool list. Output is abi-encoded
 // hex so Foundry can decode it with abi.decode. Commands:
@@ -28,11 +28,24 @@ function emit(type: string, value: unknown): void {
 }
 
 if (cmd === "root" || cmd === "proof") {
-  const [incidentId, ids, users, amounts, spents] = decodeAbiParameters(
-    [{ type: "uint256" }, { type: "uint256[]" }, { type: "address[]" }, { type: "uint256[][]" }, { type: "uint256[]" }],
+  const [incidentId, ids, users, amounts, spents, eligibles] = decodeAbiParameters(
+    [
+      { type: "uint256" },
+      { type: "uint256[]" },
+      { type: "address[]" },
+      { type: "uint256[][]" },
+      { type: "uint256[]" },
+      { type: "uint256[]" },
+    ],
     hex
-  ) as [bigint, bigint[], `0x${string}`[], bigint[][], bigint[]];
-  const rows = ids.map((id, i) => ({ claimId: id, user: users[i], amounts: [...amounts[i]], scoreSpent: spents[i] }));
+  ) as [bigint, bigint[], `0x${string}`[], bigint[][], bigint[], bigint[]];
+  const rows = ids.map((id, i) => ({
+    claimId: id,
+    user: users[i],
+    amounts: [...amounts[i]],
+    scoreSpent: spents[i],
+    eligibleAmount: eligibles[i],
+  }));
   const tree = settlementTree(incidentId, rows);
   if (cmd === "root") {
     emit("bytes32", tree.root);

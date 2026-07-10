@@ -17,7 +17,7 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Registry} from "./Registry.sol";
-import {Managed} from "./Managed.sol";
+import {RegistryManaged} from "./RegistryManaged.sol";
 
 /// @notice Minimal view of the deployed ERC-1155 USD8Booster: standard
 ///         transfers plus the ERC1155Burnable batch burn (this contract, as
@@ -29,7 +29,7 @@ interface IERC1155Burnable is IERC1155 {
 }
 
 /// @notice Minimal view of a single-asset stake pool. DefiInsurance is the
-///         {Registry.payoutModule}: it reads the registered pool set from the
+///         {Registry.defiInsurance}: it reads the registered pool set from the
 ///         Registry and pays each its settlement-row amount out of pooled capital.
 ///         Pools are product-agnostic; the insurance logic lives here.
 interface ISingleAssetCoverPool {
@@ -41,76 +41,70 @@ interface ISingleAssetCoverPool {
 /// @title  DefiInsurance v1
 /// @notice DeFi-depeg insurance built on the {SingleAssetCoverPool} capital base
 ///         (one pool per stake asset, registered on the {Registry}). Holders of a
-///         covered token that suffers a depeg escrow it here to claim a payout out
-///         of the pools' staked capital. This contract owns all product logic —
-///         insured-token registry, incident lifecycle, claimant escrow, settlement
-///         — and calls the pools only to pay claims ({SingleAssetCoverPool.payClaim}).
-///         It is the single {Registry.payoutModule}; the score a claim consumes is
-///         recorded as a {ScoreSpent} event (no on-chain ledger). Other products
-///         (e.g. travel insurance) could later take over the payout-module slot.
+///         covered token that suffers a depeg escrow it here and are paid out of the
+///         pools' staked capital. This contract owns all product logic — insured-token
+///         registry, the four-phase claim lifecycle, claimant escrow, settlement — and
+///         calls the pools only to pay ({SingleAssetCoverPool.payClaim}). It is the
+///         single {Registry.defiInsurance}; the score a claim consumes is recorded as a
+///         {ScoreSpent} event plus a cumulative total on the {Registry}.
 ///
-///         Incidents are processed ONE AT A TIME: while one is active the whole
-///         system is frozen ({Registry.frozen}) — pool exits and topology curation
-///         (pool set, scored tokens) are blocked — so settlement runs against a
-///         single deterministic pool set. The freeze is implicit: the pools read
-///         {Registry.frozen}, which reads this module's {incidentActive}.
+///         ONE claim at a time: while a claim is live the whole system is frozen
+///         ({Registry.payoutIncidentActive}) — CoverPool exits and topology curation
+///         (pool set, scored tokens) are blocked — so settlement runs against a single
+///         deterministic pool set. The freeze is implicit: the pools read the Registry,
+///         which reads this module's {activeIncidentId}.
 ///
-///         Both lifecycle transitions are TEE-signed and permissionless to
-///         relay, with admin/timelock kept only as fallbacks:
-///         - OPEN: anyone may {openIncidentSigned} carrying the TEE's EIP-712
-///           attestation that the token depegged (the enclave evaluates the
-///           depeg off-chain — the same trust root that signs settlement).
-///           Admin/timelock retains {openClaimIncident} for when the TEE is
-///           down/censoring or for events it can't attest.
-///         - SETTLE: anyone may {settleIncident} with the settlement root computed
-///           off-chain over the incident's on-chain claim set plus an EIP-712
-///           signature from {teeSigner} — the key held only inside the
-///           published TEE build that runs the open-source settlement code. The
-///           root is the merkle commitment to the whole settlement table (the
-///           dispute anchor); each per-claim payout is proven against it at
-///           {finalizeClaim}, so a payout can only be one that survived dispute.
-///           Settlement stays optimistic: anyone reproduces the root, a
-///           corrected root may be resubmitted within the submit window, and the
-///           admin/timelock can {closeIncident} to kill a bad one (deny-only —
-///           never redirects funds).
+///         FOUR PHASES. Durations are the state constants; every CoverPool stays LOCKED
+///         from the start of CLAIM until FINALIZE ends (or the claim voids in SETTLE):
 ///
-///         Incident timeline (t measured from open; durations are the state
-///         constants; the pool stays LOCKED for the whole span):
+///           CLAIM ({CLAIM_WINDOW}, 5d) — the FIRST {joinClaim} on a token opens the
+///             window (there is no separate open step) and locks every CoverPool. That
+///             first claim carries a TEE attestation — the enclave, running the
+///             published depeg-detection code, signs {OPEN_TYPEHASH} (the same trust
+///             root that signs SETTLE) — and anyone may relay it. Later claimants just
+///             {joinClaim} (no attestation) / {cancelClaim} for the rest of the window.
+///             The admin/timelock {openClaimIncident} is a claim-less fallback for when
+///             the TEE is down/censoring or the event can't be attested. The open block
+///             is recorded ({Incident.openBlock}) so the settlement config (insured-token
+///             recipe, scored-token set) is reconstructible from on-chain state at that
+///             block, immune to any later retune.
 ///
-///           t=0     OPEN — pool locked; {Incident.openBlock} recorded so the
-///            │            settlement config (insured-token recipe, windows,
-///            │            scored-token set) is reconstructible from on-chain
-///            │            state at that block, immune to any later retune.
-///            │            {openIncidentSigned} (TEE-attested) or
-///            │            {openClaimIncident} (admin/timelock fallback).
-///            │  ┄ CLAIM_WINDOW (4d): {joinClaim} / {cancelClaim}.
-///            ▼
-///           4d      claim window ends.
-///            │  ┄ SUBMIT phase (≤ SUBMIT_DEADLINE = 3d): {settleIncident} posts
-///            │      the TEE-signed root; a corrected root may OVERWRITE here.
-///            │      No root by t=7d ⇒ incident VOID, escrow recoverable.
-///            ▼
-///           T_s     root submitted, at some point in (4d, 7d].
-///            │  ┄ DISPUTE_PERIOD (4d): no payouts; {closeIncident} may veto —
-///            │      this is the LAST stage a close is allowed.
-///            ▼
-///           T_s+4d  dispute ends — root is now final.
-///            │  ┄ FINALIZE_WINDOW (4d): {finalizeClaim} pays each claim; no
-///            │      close possible. The pool UNLOCKS the instant the LAST claim
-///            │      finalizes — often well before +4d.
-///            ▼
-///           T_s+8d  incident fully resolved.
+///           SETTLE ({SUBMIT_DEADLINE}, 0–3d after CLAIM) — anyone may {settleIncident}
+///             with the settlement merkle root computed off-chain over the claim set,
+///             carrying an EIP-712 signature from {teeSigner} (the key held only inside
+///             the published TEE build that runs the open-source settlement code). The
+///             root is the dispute anchor: each per-claim payout is proven against it at
+///             FINALIZE, so a payout can only be one that survived DISPUTE. Optimistic —
+///             anyone reproduces the root. ONE TEE settlement per incident (no resubmit);
+///             a bad root is disputed by governance and re-rooted by the timelock, not
+///             overwritten by another TEE root. If NO root is posted by the deadline the
+///             claim VOIDS: escrow becomes recoverable and the CoverPools reopen.
 ///
-///         Total pool-lock: CLAIM_WINDOW + [0, SUBMIT_DEADLINE] + DISPUTE_PERIOD
-///         + FINALIZE_WINDOW = 12–15 days (≈7 days if it voids). Early unlocks:
-///         {closeIncident} ends it any time up to the dispute-period end;
-///         all-finalized ends it inside the finalize window.
-/// @dev    Non-upgradeable. To change it, deploy a fresh instance and re-point
-///         the {Registry} payout-module slot (only between incidents — the old
-///         instance still custodies escrow + open claims). Custodies insured-token
-///         escrow only; committed boosters stay in the claimant's wallet and are
-///         burned from it at finalize (not escrowed here).
-contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
+///           DISPUTE ({DISPUTE_PERIOD}, 2d after a root is posted) — no payouts yet. The
+///             admin/timelock reviews the settled (TEE-signed) root and may act on it —
+///             deny-only, never redirects funds: {closeIncident} terminates it (unfreeze,
+///             escrow recoverable), or {disputeIncident} halts it (pool stays frozen
+///             awaiting a timelock {correctSettlement}, which supplies the right root and
+///             runs a fresh DISPUTE → FINALIZE; auto-voids past {CORRECTION_WINDOW}).
+///             This is the LAST stage either is allowed; after it the root is final.
+///
+///           FINALIZE ({FINALIZE_WINDOW}, 0–4d after DISPUTE) — each claimant
+///             {finalizeClaim}s to pull their payout, proven against the final root. No
+///             intervention possible. The CoverPools REOPEN the instant the last claim
+///             finalizes — often well before the window ends.
+///
+///         Total CoverPool lock: CLAIM + [0, SETTLE] + DISPUTE + FINALIZE = 11–14 days
+///         (≈8 days if the claim voids in SETTLE). Early reopen: a {closeIncident} ends it
+///         any time up to the end of DISPUTE; all-finalized ends it inside FINALIZE. A
+///         {disputeIncident} instead holds the freeze until the correction finalizes or the
+///         window
+///         lapses.
+/// @dev    Non-upgradeable. To change it, deploy a fresh instance and re-point the
+///         {Registry} payout-module slot (only between claims — the old instance still
+///         custodies escrow + live claims). Custodies insured-token escrow only;
+///         committed boosters stay in the claimant's wallet and are burned from it at
+///         FINALIZE (not escrowed here).
+contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     using SafeERC20 for IERC20;
 
     // ─────────────────────────── State ───────────────────────────
@@ -132,7 +126,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     uint256 internal constant BPS_DENOMINATOR = 10_000;
 
     /// @notice Per-insured-token config. maxCoverageBps == 0 means not listed.
-    /// @param maxCoverageBps  κ in (0, 100%] (bps) while listed.
+    /// @param maxCoverageBps  Coverage factor κ, in (0, 100%] (bps) while listed: the
+    ///                      fraction of a claimant's loss this product covers. The
+    ///                      off-chain settler caps each payout at κ × loss,
+    ///                      payoutUsd = min(spentShare × poolUsd, κ × lossUsd). Only
+    ///                      stored/validated on-chain; the κ × loss cap is applied
+    ///                      off-chain at settlement, so κ appears in no on-chain formula.
     /// @param underlyingPriceOracle  underlying→USD oracle (Chainlink AggregatorV3
     ///                      interface; for non-USD/comparative/LP underlyings,
     ///                      point at an adapter conforming to it). Settlement
@@ -168,24 +167,35 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     /// @notice Listed insured tokens in admin-determined order.
     IERC20[] public insuredTokenList;
 
-    // ─────────────────────────── State (incidents + claims) ───────────────────────────
+    // ─────────────────────────── State (claim lifecycle) ───────────────────────────
 
-    /// @notice Length of an incident's claim window.
-    uint64 public constant CLAIM_WINDOW = 4 days;
+    /// @notice Length of the CLAIM phase: the window in which claimants may
+    ///         {joinClaim} / {cancelClaim} after the first open locks the CoverPools.
+    uint64 public constant CLAIM_WINDOW = 5 days;
 
-    /// @notice Deadline to submit a settlement root, measured from the claim
-    ///         window end. No root by then ⇒ incident void, escrow recoverable.
+    /// @notice Length of the SETTLE phase: the deadline to submit a settlement root,
+    ///         measured from the CLAIM phase end. No root by then ⇒ the claim voids and
+    ///         escrow is recoverable.
     uint64 public constant SUBMIT_DEADLINE = 3 days;
 
-    /// @notice Dispute period, measured from {Incident.rootSubmittedAt} — a fixed
-    ///         window so a late submission can never compress it. No payout
-    ///         before it elapses; admin/timelock may {closeIncident} until then.
-    uint64 public constant DISPUTE_PERIOD = 4 days;
+    /// @notice Length of the DISPUTE phase, measured from {Incident.rootSubmittedAt} —
+    ///         a fixed window so a late settlement can never compress it. No payout
+    ///         before it elapses; admin/timelock may dispute ({disputeIncident}) or close ({closeIncident}) it until then.
+    uint64 public constant DISPUTE_PERIOD = 2 days;
 
-    /// @notice Finalization window after the dispute period ends. Total pool lock
-    ///         is CLAIM_WINDOW + [0, SUBMIT_DEADLINE] + DISPUTE_PERIOD +
-    ///         FINALIZE_WINDOW = 12–15 days (7 days if the incident voids).
+    /// @notice Length of the FINALIZE phase, after DISPUTE ends. Total CoverPool lock is
+    ///         CLAIM_WINDOW + [0, SUBMIT_DEADLINE] + DISPUTE_PERIOD + FINALIZE_WINDOW =
+    ///         11–14 days (8 days if the claim voids in SETTLE).
     uint64 public constant FINALIZE_WINDOW = 4 days;
+
+    /// @notice How long a {Status.Disputed} incident stays frozen awaiting a timelock
+    ///         {correctSettlement}. The halt ({disputeIncident})
+    ///         is a fast, non-timelocked brake; the correction that replaces the bad
+    ///         root is timelocked, so it can't land inside the bad root's DISPUTE
+    ///         window — this is the runway that lets it. Generous enough to clear the
+    ///         timelock delay, but bounded so a stalled/captured governance can't freeze
+    ///         LP capital forever: past it the disputed incident auto-voids and unfreezes.
+    uint64 public constant CORRECTION_WINDOW = 3 days;
 
     /// @notice Max age, in blocks, of an incident's referenceBlock at open. A TEE
     ///         open attestation ({OPEN_TYPEHASH}) pins referenceBlock but carries no
@@ -205,7 +215,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///                        -- on every resolution (cancel/finalize/withdraw). The
     ///                        incident's claims are fully resolved when it reaches 0.
     ///                        Bound into the settlement signature: it is frozen across
-    ///                        the entire submit window (joins and cancels end at
+    ///                        the entire SETTLE phase (joins and cancels end at
     ///                        window-close; finalization can't start until the dispute
     ///                        period passes), so it pins the exact live claim set the
     ///                        enclave scored — which it reconstructs from the on-chain
@@ -222,8 +232,10 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///                        or settled incident. Settlement is already an archive
     ///                        computation (TWAP/min-balance over historical ranges),
     ///                        so this read adds no new dependency.
-    /// @param closed          True once terminated ({closeIncident}); the pool
-    ///                        unlocks and claimants recover escrow.
+    /// @param status          Governance lifecycle state (see {Status}). Open unless a
+    ///                        a dispute moved it to Disputed (halted, still frozen, awaiting a
+    ///                        timelock correction) or Closed (killed; pool unlocks and
+    ///                        claimants recover escrow).
     struct Incident {
         IERC20 insuredToken;
         uint64 claimWindowEndTime;
@@ -232,7 +244,23 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         uint64 rootSubmittedAt;
         uint64 referenceBlock;
         uint64 openBlock;
-        bool closed;
+        Status status;
+        uint64 disputedAt;
+    }
+
+    /// @notice Governance lifecycle state of an incident. Mutually exclusive by
+    ///         construction (unlike two bools), so an auditor need not prove the
+    ///         "both set" combo unreachable.
+    /// @custom:value Open    Running its phase machine; no governance intervention.
+    /// @custom:value Disputed  A bad root was halted ({disputeIncident}):
+    ///                       root cleared, pool STILL frozen, awaiting a timelock
+    ///                       {correctSettlement} (or auto-void past {CORRECTION_WINDOW}).
+    /// @custom:value Closed  Terminated ({closeIncident}): pool
+    ///                       unlocks, claimants recover escrow, next incident may open.
+    enum Status {
+        Open,
+        Disputed,
+        Closed
     }
 
     /// @notice All incidents by id. Id 0 is reserved.
@@ -256,10 +284,6 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
 
     /// @notice Next incident id to assign. Starts at 1.
     uint256 public nextIncidentId;
-
-    /// @notice The single in-flight incident, or 0 if none. While active it
-    ///         blocks new incidents and keeps the pool locked.
-    uint256 public activeIncidentId;
 
     /// @notice One user's claim: pure escrow registration. All economics are
     ///         computed off-chain over the complete claimant table.
@@ -326,17 +350,32 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
 
     /// @notice Global settlement windows, in BLOCKS. Timelock-settable. Read
     ///         off-chain as of each incident's {Incident.openBlock}, so a change
-    ///         only ever affects incidents opened after it. See the field docs.
+    ///         only ever affects incidents opened after it. All three gate the
+    ///         off-chain settlement math (never on-chain). Bias is anti-gaming /
+    ///         anti-manipulation over precision: a value that's conservative but hard
+    ///         to move beats one that's accurate but cheap to game. See field docs.
     /// @param twapLookbackBlocks   W: averaging window for the token→underlying
     ///                             ratio, TWAP'd over [referenceBlock − W,
-    ///                             referenceBlock] — the pre-incident value.
-    /// @param holdingMarginBlocks  margin: how far before {Incident.referenceBlock}
-    ///                             the holding must reach. Eligibility is the MIN
-    ///                             balance over [referenceBlock − margin,
-    ///                             joinBlock − 1] — ending the block before the
-    ///                             claim's joinClaim so the escrow transfer itself
-    ///                             can't reduce it — capped at escrow (anti-gaming).
+    ///                             referenceBlock] — the pre-incident "before" value.
+    ///                             LONG on purpose: a wide TWAP is expensive to
+    ///                             manipulate, and a result that lags below spot is
+    ///                             acceptable (it only ever under-values the loss),
+    ///                             whereas a short, spot-tracking window is gameable.
+    ///                             Only the ratio leg; the underlying→USD price is a
+    ///                             separate oracle, not smoothed here.
+    /// @param holdingMarginBlocks  margin: required PRE-INCIDENT holding length.
+    ///                             Eligibility is the MIN balance over
+    ///                             [referenceBlock − margin, referenceBlock], capped
+    ///                             at escrow. Anchored entirely before the incident:
+    ///                             holdings AFTER referenceBlock are irrelevant (the
+    ///                             claimant still swaps the token in as escrow, and
+    ///                             {finalizeClaim} refunds any escrow above the signed
+    ///                             eligible amount). Longer = stronger proof of genuine
+    ///                             prior exposure, but a wider window also MIN's down
+    ///                             holders who varied their balance in the run-up.
     /// @param sampleStepBlocks     stride between TWAP samples (cost↔precision).
+    ///                             Only affects {twapLookbackBlocks}; eligibility uses
+    ///                             exact Transfer-log replay, not sampling.
     struct SettlementParams {
         uint64 twapLookbackBlocks;
         uint64 holdingMarginBlocks;
@@ -349,8 +388,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
 
     /// @notice EIP-712 struct the TEE signs over for {settleIncident}. Binding
     ///         {Incident.unresolved} pins the signature to the exact live claim set
-    ///         the enclave scored: it is frozen across the whole submit window (no
-    ///         join/cancel after window-close, no finalize until the dispute period
+    ///         the enclave scored: it is frozen across the whole SETTLE phase (no
+    ///         join/cancel after window-close, no finalize until the DISPUTE phase
     ///         passes), every claim is on-chain, and a root signed for a different
     ///         count can never be submitted here (the digest wouldn't recover teeSigner).
     ///         {poolPayouts} is the enclave-committed total payout per pool (aligned
@@ -367,17 +406,17 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         same count. This is the accepted optimistic-settlement / TEE trust
     ///         boundary, NOT an on-chain forgery: the root is public, anyone
     ///         recomputes the correct claim table from on-chain {ClaimRegistered} /
-    ///         cancel events, and a wrong set is vetoed via {closeIncident} within
-    ///         the dispute window (omitted claimants recover escrow). We considered
+    ///         cancel events, and a wrong set is disputed via {disputeIncident} within
+    ///         the DISPUTE phase (omitted claimants recover escrow). We considered
     ///         binding an on-chain cumulative claims/input hash (updated on
     ///         join/cancel, signed here) and chose not to: it would move claim-set
     ///         integrity from dispute-caught to settle-enforced, but a compromised
     ///         signer already has other levers (wrong per-leaf amounts, bounded only
-    ///         by {poolPayouts}/the cap), so the dispute window remains the backstop
+    ///         by {poolPayouts}/the cap), so the DISPUTE phase remains the backstop
     ///         regardless. Revisit if the trust model tightens (e.g. multi-signer /
     ///         non-optimistic settlement).
     bytes32 internal constant SETTLEMENT_TYPEHASH =
-        keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts)");
+        keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools)");
 
     /// @notice EIP-712 struct the TEE signs to open an incident. The enclave —
     ///         running the published depeg-detection code — attests that
@@ -406,18 +445,22 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     error IncidentFinalizing(uint256 incidentId);
     error OutsideSettlementPhase(uint256 incidentId);
     error NoStandingRoot(uint256 incidentId);
+    error AlreadySettled(uint256 incidentId);
+    error AlreadyDisputed(uint256 incidentId);
+    error NotDisputed(uint256 incidentId);
     error FinalizeNotOpen(uint256 incidentId);
     error InvalidProof(uint256 claimId);
+    error EligibleExceedsEscrow(uint256 eligibleAmount, uint256 escrow);
     error ClaimNotWithdrawable(uint256 claimId);
     error IncidentsActive();
     error InvalidSettlementParams();
-    error NoActiveIncidentToJoin(IERC20 insuredToken);
+    error UnexpectedOpenAttestation();
     error UnauthorizedOpenSigner(address recovered);
     error UnauthorizedSettlementSigner(address recovered);
     error BoosterAmountTooLarge(uint256 boosterAmount);
     error SettlementPoolMismatch(uint256 given, uint256 expected);
     error PayoutCapExceeded(uint256 poolIndex, uint256 requested, uint256 cap);
-    error PayoutModuleNotRegistered();
+    error DefiInsuranceNotRegistered();
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -430,6 +473,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     event IncidentOpened(uint256 indexed incidentId, IERC20 indexed insuredToken, uint64 claimWindowEndTime);
     event IncidentSettled(uint256 indexed incidentId, bytes32 root);
     event IncidentClosed(uint256 indexed incidentId, address indexed closer);
+    event IncidentDisputed(uint256 indexed incidentId, address indexed disputer);
+    event IncidentCorrected(uint256 indexed incidentId, bytes32 root);
     event ClaimRegistered(
         uint256 indexed claimId,
         uint256 indexed incidentId,
@@ -444,22 +489,23 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     event TeeSignerSet(address indexed oldSigner, address indexed newSigner);
 
     /// @notice Emitted on {finalizeClaim} for the insurance score a claim consumed.
-    ///         This IS the spent-score ledger — the settler sums these logs per user
-    ///         (pinned before an incident's openBlock) for the available budget.
+    ///         The incident-tagged log the settler sums per user (pinned before an
+    ///         incident's openBlock) for the available budget; the cumulative total is
+    ///         also mirrored on-chain via {Registry.recordScoreSpent}.
     event ScoreSpent(address indexed user, uint256 amount, uint256 indexed incidentId);
 
     // ─────────────────────────── Constructor ─────────────────────
 
     /// @notice Deploy the (non-upgradeable) insurance product. To replace it,
-    ///         deploy a fresh DefiInsurance and re-point {Registry.setPayoutModule}
+    ///         deploy a fresh DefiInsurance and re-point {Registry.setDefiInsurance}
     ///         — done only while no incident is in flight, since the old contract
     ///         still custodies escrow and any open claims.
-    /// @param _authority  Shared access + topology registry. This contract must be
-    ///                    registered via {Registry.setPayoutModule}. The timelock's
+    /// @param _registry  Shared access + topology registry(). This contract must be
+    ///                    registered via {Registry.setDefiInsurance}. The timelock's
     ///                    minDelay MUST be comfortably under {DISPUTE_PERIOD} so it
-    ///                    can {closeIncident} on a bad root in time.
-    constructor(Registry _authority) EIP712("DefiInsurance", "1") {
-        _setAuthority(_authority);
+    ///                    can {disputeIncident} on a bad root in time.
+    constructor(Registry _registry) EIP712("DefiInsurance", "1") {
+        _setRegistry(_registry);
         nextIncidentId = 1;
         nextClaimId = 1;
         // Safe nonzero settlement defaults so an incident opened before governance
@@ -469,9 +515,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         // them and can never set sampleStepBlocks back to 0. Governance SHOULD
         // review these for the product before opening the first incident.
         settlementParams = SettlementParams({
-            twapLookbackBlocks: 300, // ~1h TWAP window before referenceBlock
-            holdingMarginBlocks: 300, // ~1h continuous-holding margin for eligibility
-            sampleStepBlocks: 60 // ~12min TWAP sample stride (≈6 samples)
+            twapLookbackBlocks: 50_400, // ~7d TWAP window before referenceBlock (anti-manipulation over recency)
+            holdingMarginBlocks: 50_400, // ~7d required pre-incident holding for eligibility before refBlock
+            sampleStepBlocks: 300 // ~1h TWAP sample stride (≈168 samples over a 7d window)
         });
     }
 
@@ -484,20 +530,26 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///      so gating these setters on it forecloses that window: nothing can change
     ///      settlement-critical config from the open tx through resolution.
     modifier notDuringIncident() {
-        if (_hasActiveIncident()) revert IncidentsActive();
+        if (_activeIncidentId() != 0) revert IncidentsActive();
         _;
     }
 
-    // ═══════════════════════════ Insured token management (timelock) ═══════════════════════════
+    /// @dev The token must be a listed insured token (maxCoverageBps != 0).
+    modifier onlyApprovedToken(IERC20 token) {
+        if (insuredTokens[token].maxCoverageBps == 0) revert InsuredTokenNotApproved(token);
+        _;
+    }
+
+    // ─────────────────────────── Insured token management (timelock) ───────────────────────────
 
     /// @notice Approve a new insured token and set the economic config settlement
     ///         consumes. Timelock only. Must not be a pool stake asset, nor
     ///         already listed.
     /// @param insuredToken         Token to insure.
-    /// @param _maxCoverageBps      κ in (0, 100%] (bps); the timelock picks it.
-    /// @param underlyingPriceOracle  underlying→USD oracle (non-zero). Not the insured token. e.g. insure token is sGHO, underlying is GHO, underlyingPriceOracle is for GHO.
-    /// @param conversionAddress    token→underlying staticcall target (0 = identity).
-    /// @param conversionCallData   calldata for that staticcall. See {InsuredToken}.
+    /// @param _maxCoverageBps      κ in (0, 100%] (bps); the timelock picks it. e.g. 8000=80%.
+    /// @param underlyingPriceOracle  underlying→USD oracle (non-zero). Not the insured token. e.g. insure token is aUSDC, underlying is USDC, underlyingPriceOracle is for USDC.
+    /// @param conversionAddress    token→underlying staticcall target (0 = identity). aUSDC -> USDC conversion.
+    /// @param conversionCallData   calldata for that staticcall. depending on the conversionAddress, the fn name might be different, so we need conversionCallData.
     function addInsuredToken(
         IERC20 insuredToken,
         uint256 _maxCoverageBps,
@@ -506,7 +558,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         bytes calldata conversionCallData
     ) external onlyTimelock {
         if (address(insuredToken) == address(0) || underlyingPriceOracle == address(0)) revert ZeroAddress();
-        if (authority.poolOf(insuredToken) != address(0)) revert TokenConflict();
+        if (registry().coverPool(insuredToken) != address(0)) revert TokenConflict();
         if (insuredTokens[insuredToken].maxCoverageBps != 0) revert InsuredTokenAlreadyApproved(insuredToken);
         if (_maxCoverageBps == 0 || _maxCoverageBps > BPS_DENOMINATOR) {
             revert InvalidMaxCoverageBps(_maxCoverageBps, BPS_DENOMINATOR);
@@ -528,8 +580,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     /// @notice Update an insured token's coverage factor κ. Timelock only.
     /// @param insuredToken  Listed insured token to update.
     /// @param _maxCoverageBps  New κ in (0, 100%] (bps).
-    function setMaxCoverageBps(IERC20 insuredToken, uint256 _maxCoverageBps) external onlyTimelock notDuringIncident {
-        if (insuredTokens[insuredToken].maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
+    function setMaxCoverageBps(IERC20 insuredToken, uint256 _maxCoverageBps)
+        external
+        onlyTimelock
+        notDuringIncident
+        onlyApprovedToken(insuredToken)
+    {
         if (_maxCoverageBps == 0 || _maxCoverageBps > BPS_DENOMINATOR) {
             revert InvalidMaxCoverageBps(_maxCoverageBps, BPS_DENOMINATOR);
         }
@@ -546,9 +602,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         external
         onlyTimelock
         notDuringIncident
+        onlyApprovedToken(insuredToken)
     {
         InsuredToken storage t = insuredTokens[insuredToken];
-        if (t.maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
         t.underlyingConversionAddress = conversionAddress;
         t.underlyingConversionCallData = conversionCallData;
         emit UnderlyingConversionSet(insuredToken, conversionAddress, conversionCallData);
@@ -561,8 +617,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         external
         onlyTimelock
         notDuringIncident
+        onlyApprovedToken(insuredToken)
     {
-        if (insuredTokens[insuredToken].maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
         if (underlyingPriceOracle == address(0)) revert ZeroAddress();
         insuredTokens[insuredToken].underlyingPriceOracle = underlyingPriceOracle;
         emit UnderlyingPriceOracleSet(insuredToken, underlyingPriceOracle);
@@ -573,8 +629,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         incident is active (notDuringIncident, M-01): the active incident's
     ///         config must stay stable across settlement; delist once it resolves.
     /// @param insuredToken  Approved insured token to delist.
-    function removeInsuredToken(IERC20 insuredToken) external onlyAdminOrTimelock notDuringIncident {
-        if (insuredTokens[insuredToken].maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
+    function removeInsuredToken(IERC20 insuredToken)
+        external
+        onlyAdminOrTimelock
+        notDuringIncident
+        onlyApprovedToken(insuredToken)
+    {
         _delistInsuredToken(insuredToken);
     }
 
@@ -590,47 +650,26 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         emit SettlementParamsSet(p);
     }
 
-    /// @dev Rescuable via {Managed-rescueToken}: only the non-accountable
-    ///      insured-token balance (forfeited revenue or strays) — live claim
-    ///      escrow ({escrowedInsuredTokens}) is protected. While an incident on
-    ///      the token is live its balance is in flux, so the cap is 0 (blocked).
+    /// @dev Rescuable via {RegistryManaged-sweepToken}: only the non-accountable
+    ///      balance — the surplus ABOVE live claim escrow ({escrowedInsuredTokens}),
+    ///      i.e. strays and already-forfeited escrow. The escrow is protected by the
+    ///      `bal - accounted` cap regardless of incident status (the accounting tracks
+    ///      it in lockstep, so `bal >= accounted` always), and this contract's token
+    ///      balance never feeds settlement (payouts come from the pools). So the
+    ///      surplus is always safe to recover — no need to block during an incident.
     function _sweepable(address token) internal view override returns (uint256) {
-        if (_hasActiveIncident() && incidents[activeIncidentId].insuredToken == IERC20(token)) return 0;
         uint256 accounted = escrowedInsuredTokens[IERC20(token)];
         uint256 bal = IERC20(token).balanceOf(address(this));
         return bal > accounted ? bal - accounted : 0;
     }
 
-    // ═══════════════════════════ Incident + claim lifecycle ═══════════════════════════
+    // ─────────────────────────── Claim lifecycle ───────────────────────────
 
-    /// @notice Open an incident permissionlessly with a TEE attestation. The
-    ///         enclave — running the published depeg-detection code — evaluates
-    ///         the depeg off-chain and signs {OPEN_TYPEHASH}(insuredToken,
-    ///         referenceBlock, nextIncidentId); anyone may relay it. This is the
-    ///         primary open path: the "should we open" decision lives in the
-    ///         TEE (the same trust root that signs settlement), not in on-chain
-    ///         rate logic. Opens WITHOUT a claim; use {closeIncident} to abort a
-    ///         mistaken open. A spurious open is only a pool freeze, never a
-    ///         drain (payout still needs a signed root surviving the dispute).
-    /// @param  insuredToken    Token the TEE attested a covered event on.
-    /// @param  referenceBlock  Pre-incident "before" block the TEE pinned.
-    /// @param  signature       {teeSigner}'s EIP-712 signature over the open struct.
-    /// @return incidentId      The newly opened incident id.
-    function openIncidentSigned(IERC20 insuredToken, uint64 referenceBlock, bytes calldata signature)
-        external
-        returns (uint256 incidentId)
-    {
-        bytes32 digest = _hashTypedDataV4(
-            keccak256(abi.encode(OPEN_TYPEHASH, address(insuredToken), referenceBlock, nextIncidentId))
-        );
-        address recovered = ECDSA.recover(digest, signature);
-        if (recovered != teeSigner || teeSigner == address(0)) revert UnauthorizedOpenSigner(recovered);
-        return _openIncident(insuredToken, referenceBlock);
-    }
-
-    /// @notice Open an incident on insuredToken. Admin/timelock fallback for
-    ///         when the TEE is down/censoring, or for covered events the TEE
-    ///         can't attest. Opens WITHOUT a claim; use {closeIncident} to abort.
+    /// @notice Open a claim claim-lessly on insuredToken. Admin/timelock fallback for
+    ///         when the TEE is down/censoring, or for covered events the TEE can't
+    ///         attest. Opens the claim window WITHOUT filing a claim; use
+    ///         {closeIncident} to abort. The permissionless (TEE-attested) open path is
+    ///         the first {joinClaim} itself.
     /// @param  insuredToken    Token a covered event occurred on.
     /// @param  referenceBlock  Pre-incident block (< block.number, non-zero)
     ///                         the admin pins as the "before" valuation point.
@@ -645,28 +684,27 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
 
     /// @dev Shared open path: validates and records {openBlock}. The system freeze
     ///      is implicit — pools read {Registry.frozen}, which reads this module's
-    ///      {incidentActive}, true once the incident is recorded below. The insured
+    ///      {activeIncidentId}, non-zero once the incident is recorded below. The insured
     ///      token is delisted later, at root submission (a confirmed event), not
     ///      here — so an incident that opens and closes without a root leaves
     ///      the listing untouched.
     function _openIncident(IERC20 insuredToken, uint64 referenceBlock)
         internal
         whenNotPaused
+        onlyApprovedToken(insuredToken)
         returns (uint256 incidentId)
     {
-        // Global precondition, token-independent: fail fast before any storage copy.
-        if (_hasActiveIncident()) revert IncidentsActive();
-        // This module must be the registered payout module, else Registry.frozen()
-        // (which delegates to the CURRENT module's incidentActive) would stay false
+        // One-at-a-time guard (token approval is enforced by onlyApprovedToken).
+        if (_activeIncidentId() != 0) revert IncidentsActive();
+        // This module must be the registered payout module, else Registry.payoutIncidentActive()
+        // (which delegates to the CURRENT module's activeIncidentId) would stay 0
         // and pools wouldn't freeze — LPs could move mid-incident and break the
         // deterministic-capital assumption settlement relies on (audit L-04).
         // Reachable only in a misconfig/transition (module cleared via the
-        // setPayoutModule(0) brake, or an incident opened in a de-registered old
+        // setDefiInsurance(0) brake, or an incident opened in a de-registered old
         // instance during a module swap); this turns that into a clean revert.
-        if (authority.payoutModule() != address(this)) revert PayoutModuleNotRegistered();
+        if (registry().defiInsurance() != address(this)) revert DefiInsuranceNotRegistered();
 
-        InsuredToken memory it = insuredTokens[insuredToken];
-        if (it.maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
         // Non-zero, in the past, and recent: the freshness bound doubles as the
         // open attestation's expiry (I1) — a stale signed open can't be relayed late.
         if (
@@ -674,10 +712,11 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
                 || block.number - referenceBlock > OPEN_MAX_REFERENCE_AGE
         ) revert InvalidReferenceBlock(referenceBlock);
 
-        // No explicit pool lock: this module is the single {Registry.payoutModule},
-        // so the pools' freeze (registry.frozen()) reads our incidentActive()
-        // implicitly once the incident below is recorded. _hasActiveIncident()
-        // above is the one-at-a-time guard.
+        // No explicit pool lock: this module is the single {Registry.defiInsurance},
+        // so the pools' freeze (registry().payoutIncidentActive()) reads our activeIncidentId()
+        // implicitly once the incident below is recorded. The _activeIncidentId() check
+        // above is the one-at-a-time guard. No activeIncidentId to write: it is derived
+        // as the last-opened incident ({nextIncidentId} - 1), which is this one.
 
         incidentId = nextIncidentId;
         nextIncidentId = incidentId + 1;
@@ -690,54 +729,94 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
             rootSubmittedAt: 0,
             referenceBlock: referenceBlock,
             openBlock: uint64(block.number),
-            closed: false
+            status: Status.Open,
+            disputedAt: 0
         });
-        activeIncidentId = incidentId;
 
         // Snapshot the pool set at open. finalizeClaim pays each claim's amounts[]
         // row against THIS list (not live {Registry.pools}), so payouts stay aligned
         // to the exact order the settler built the row over at openBlock — even if
-        // topology were mutated mid-incident (only reachable via the setPayoutModule(0)
+        // topology were mutated mid-incident (only reachable via the setDefiInsurance(0)
         // emergency brake, which bypasses the freeze). Without the snapshot a reorder
         // would mispay or revert.
-        (, address[] memory poolAddrs) = authority.pools();
+        (, address[] memory poolAddrs) = registry().coverPools();
         incidentPools[incidentId] = poolAddrs;
 
         emit IncidentOpened(incidentId, insuredToken, wEnd);
     }
 
-    /// @notice File a claim on the live incident for insuredToken. Requires an
-    ///         incident already open on it (via {openIncidentSigned} or
-    ///         {openClaimIncident}) with its claim window still open. Escrows the
-    ///         insured token (and any booster units); the claim's parameters are
+    /// @notice File a claim on insuredToken — and OPEN one if none is live yet.
+    ///         There is no separate open step: the FIRST claim on a token opens the
+    ///         CLAIM window, gated by a TEE attestation (referenceBlock + signature
+    ///         over {OPEN_TYPEHASH}); the enclave — running the published
+    ///         depeg-detection code — decides "should this open", not on-chain rate
+    ///         logic, and anyone may relay it. A spurious open is only a CoverPool
+    ///         freeze, never a drain (payout still needs a signed root surviving
+    ///         DISPUTE). If a claim is ALREADY live on the token, pass referenceBlock
+    ///         = 0 and empty signature and this just joins it. Escrows the insured
+    ///         token (and records any booster units); the claim's parameters are
     ///         emitted in {ClaimRegistered} for off-chain settlement to replay.
-    /// @param insuredToken        Token whose open incident to join.
+    ///         Admin/timelock can instead open claim-lessly via {openClaimIncident}.
+    /// @param insuredToken        Token to claim on (and, on the first claim, open on).
     /// @param insuredTokenAmount  Escrow for this claim.
-    /// @param scoreToSpend        Insurance score the claimant requests to spend
-    ///                            (capped off-chain to their available).
+    /// @param scoreToSpend        Usd8 History Score the claimant REQUESTS to spend — the payout
+    ///                            weight (share = your spent / all spent, capped at κ ×
+    ///                            loss). Only a request: the settler caps it to
+    ///                            `min(requested, available)`, so `type(uint256).max`
+    ///                            means "spend all available" and can never overspend.
+    ///                            Only emitted here (never stored/validated on-chain);
+    ///                            the capped amount is recorded at {finalizeClaim} via
+    ///                            {ScoreSpent} + {Registry.recordScoreSpent}, so an
+    ///                            unfinalized claim spends nothing.
     /// @param boosterAmount       Units of the canonical booster ({BOOSTER_ID}) to
-    ///                            commit (0 = none). Each unit boosts the score.
-    ///                            Not transferred now — kept by the claimant and
-    ///                            burned from them at {finalizeClaim}.
+    ///                            commit (0 = none). Each unit boosts the score. Not
+    ///                            transferred now — kept by the claimant and burned from
+    ///                            them at {finalizeClaim}. You MUST still hold (and have
+    ///                            approved) at least this many by then: committing more
+    ///                            than you hold makes the finalize burn revert, blocking
+    ///                            YOUR OWN finalization until you do. Holding them
+    ///                            through finalize is the claimant's responsibility.
+    /// @param referenceBlock      Pre-incident "before" block the TEE pinned — used
+    ///                            ONLY when first claim opens; MUST be 0 when rest claims joining.
+    /// @param signature           {teeSigner}'s EIP-712 open attestation — used ONLY
+    ///                            when first claim opens; MUST be empty when rest claimsjoining.
     /// @return claimId The newly minted claim id.
-    function joinClaim(IERC20 insuredToken, uint128 insuredTokenAmount, uint256 scoreToSpend, uint256 boosterAmount)
-        external
-        nonReentrant
-        whenNotPaused
-        returns (uint256 claimId)
-    {
+    function joinClaim(
+        IERC20 insuredToken,
+        uint128 insuredTokenAmount,
+        uint256 scoreToSpend,
+        uint256 boosterAmount,
+        uint64 referenceBlock,
+        bytes calldata signature
+    ) external nonReentrant whenNotPaused returns (uint256 claimId) {
         if (insuredTokenAmount == 0) revert ZeroAmount();
 
-        uint256 incidentId = activeIncidentId;
-        // An incident must be live on THIS token with an open window. A different
-        // token holding the pool means one-at-a-time blocks us.
-        if (incidentId == 0 || !_incidentActive(incidentId)) revert NoActiveIncidentToJoin(insuredToken);
-        Incident storage cur = incidents[incidentId];
-        if (cur.insuredToken != insuredToken) revert IncidentsActive();
-        if (block.timestamp > cur.claimWindowEndTime) revert ClaimWindowClosed(insuredToken, cur.claimWindowEndTime);
-        // One live claim per account per incident: stops a user splitting one
-        // insurance-score budget across many claims to inflate their payout share.
-        if (activeClaimId[incidentId][msg.sender] != 0) revert DuplicateClaim(incidentId);
+        uint256 incidentId = _activeIncidentId();
+        if (incidentId != 0) {
+            // A claim is already live — just join it; no open attestation expected.
+            if (referenceBlock != 0 || signature.length != 0) revert UnexpectedOpenAttestation();
+            Incident storage cur = incidents[incidentId];
+            // A different token holding the system means one-at-a-time blocks us.
+            if (cur.insuredToken != insuredToken) revert IncidentsActive();
+            if (block.timestamp > cur.claimWindowEndTime) {
+                revert ClaimWindowClosed(insuredToken, cur.claimWindowEndTime);
+            }
+            // One live claim per account per claim: stops a user splitting one
+            // insurance-score budget across many claims to inflate their payout share.
+            // Only meaningful here — a claim that OPENS below is on a fresh incidentId,
+            // so it is always duplicate-free (checking it there just wastes a SLOAD).
+            if (activeClaimId[incidentId][msg.sender] != 0) revert DuplicateClaim(incidentId);
+        } else {
+            // No live claim → this FIRST claim opens one, gated by the TEE attestation.
+            // _openIncident enforces token-approved / one-at-a-time / referenceBlock
+            // freshness / module-registered, and starts the CLAIM window.
+            bytes32 digest = _hashTypedDataV4(
+                keccak256(abi.encode(OPEN_TYPEHASH, address(insuredToken), referenceBlock, nextIncidentId))
+            );
+            address recovered = ECDSA.recover(digest, signature);
+            if (recovered != teeSigner || teeSigner == address(0)) revert UnauthorizedOpenSigner(recovered);
+            incidentId = _openIncident(insuredToken, referenceBlock);
+        }
 
         uint128 escrow = uint128(_pullToken(insuredToken, msg.sender, insuredTokenAmount));
         if (escrow == 0) revert ZeroAmount();
@@ -758,7 +837,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
             // Bound to uint128 so the stored value never diverges from the uint256
             // emitted in {ClaimRegistered} that the settler replays (I2).
             if (boosterAmount > type(uint128).max) revert BoosterAmountTooLarge(boosterAmount);
-            address booster = authority.boosterNFT();
+            address booster = registry().boosterNFT();
             if (booster == address(0)) revert BoosterNFTUnset();
             // Not escrowed: recorded and burned from the claimant at finalize.
             claims[claimId].boosterAmount = uint128(boosterAmount);
@@ -783,7 +862,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         still open; returns the escrow. No id argument — an account has at
     ///         most one live claim per incident, looked up from {activeClaimId}.
     function cancelClaim() external nonReentrant {
-        uint256 incidentId = activeIncidentId;
+        uint256 incidentId = _activeIncidentId();
         uint256 claimId = activeClaimId[incidentId][msg.sender];
         if (claimId == 0) revert NoActiveClaim();
 
@@ -804,16 +883,20 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         emit ClaimCancelled(claimId, msg.sender);
     }
 
-    // ═══════════════════════════ Settlement (TEE-signed root only) ═══════════════════════════
+    // ─────────────────────────── Settlement (TEE-signed root only) ───────────────────────────
 
     /// @notice Submit the settlement root permissionlessly, carrying the TEE's
-    ///         EIP-712 signature. The enclave — running the published settlement
-    ///         code — reconstructs the claimant table from on-chain claims and
-    ///         signs Settlement(incidentId, root, unresolved); binding unresolved
-    ///         means the signature is only valid for the exact (frozen) live claim
-    ///         set it scored. Anyone may relay the signed root; the
-    ///         optimistic dispute window and {closeIncident} still apply, and a
-    ///         corrected root may be resubmitted within the submit window.
+    ///         EIP-712 signature. The enclave — running the open sourced settlement
+    ///         code — reconstructs the claimant table from on-chain claims and signs
+    ///         Settlement(incidentId, root, unresolved, poolPayouts, pools); binding
+    ///         unresolved means the signature is only valid for the exact (frozen) live
+    ///         claim set it scored, and binding `pools` pins the same ordered pool set the
+    ///         contract snapshotted (positional row alignment). Anyone may relay the signed
+    ///         root; the optimistic DISPUTE
+    ///         phase and governance intervention ({disputeIncident} / {closeIncident}) still apply. ONE TEE settlement per incident — no
+    ///         resubmit ({AlreadySettled}); a bad root is disputed via {disputeIncident} and
+    ///         replaced by the timelock via {correctSettlement}, never overwritten by
+    ///         another TEE root.
     /// @param incidentId   In-flight incident to settle.
     /// @param root         Settlement root — the commitment over the claim table.
     /// @param poolPayouts  Enclave-committed total payout per pool, aligned to the
@@ -829,41 +912,147 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         Incident storage inc = incidents[incidentId];
 
         // Cheap phase + root checks first — fail fast before the ECDSA recover.
-        // A corrected root may OVERWRITE a standing one while still inside the
-        // submit window (resetting the dispute clock) — a bad root is fixed by
-        // resubmission, no separate void step. A closed incident has
-        // activeIncidentId == 0, so it is rejected here.
+        // A closed incident is not the active one ({_activeIncidentId} returns 0 for
+        // it), so it is rejected here.
         if (root == bytes32(0)) revert NoStandingRoot(incidentId);
-        if (incidentId != activeIncidentId) revert NotActiveIncident(incidentId);
+        if (incidentId != _activeIncidentId()) revert NotActiveIncident(incidentId);
+        // A disputed incident (root cleared, frozen) has distrusted its TEE — only a
+        // timelock {correctSettlement} may re-root it, never a fresh TEE settle here.
+        if (inc.status != Status.Open) revert AlreadyDisputed(incidentId);
+        // ONE TEE settlement per incident — no resubmit/overwrite. Settlement is
+        // deterministic (config + claim set frozen at open, signer can't rotate mid-
+        // incident), so an honest TEE has exactly one root to submit and a compromised
+        // one gains nothing from resubmitting. A wrong root is disputed ({disputeIncident})
+        // and replaced by the timelock via {correctSettlement}, never overwritten by
+        // another TEE root here. This also makes settle and finalize trivially exclusive
+        // — no re-settle can collide with a payout.
+        if (inc.root != bytes32(0)) revert AlreadySettled(incidentId);
         if (block.timestamp <= inc.claimWindowEndTime || block.timestamp > inc.claimWindowEndTime + SUBMIT_DEADLINE) {
             revert OutsideSettlementPhase(incidentId);
         }
 
-        address[] memory poolAddrs = incidentPools[incidentId];
-        if (poolPayouts.length != poolAddrs.length) {
-            revert SettlementPoolMismatch(poolPayouts.length, poolAddrs.length);
-        }
-
-        // Authorize: a valid teeSigner signature bound to this incident's exact
-        // live claim set via unresolved (frozen across the submit window, on-chain)
-        // and to the committed per-pool payout totals.
+        // Authorize: a valid teeSigner signature bound to this incident's exact live
+        // claim set via unresolved (frozen across the SETTLE phase, on-chain), the
+        // committed per-pool payout totals, AND the incident's pool set/order. Binding
+        // `pools` pins the positional row alignment: the enclave must have scored against
+        // the SAME ordered pool list the contract snapshotted at open ({incidentPools}),
+        // so an enumeration-order divergence (an honest settler bug) fails here at settle
+        // — before any payout — rather than silently misallocating loss across pools.
         bytes32 digest = _hashTypedDataV4(
             keccak256(
                 abi.encode(
-                    SETTLEMENT_TYPEHASH, incidentId, root, inc.unresolved, keccak256(abi.encodePacked(poolPayouts))
+                    SETTLEMENT_TYPEHASH,
+                    incidentId,
+                    root,
+                    inc.unresolved,
+                    keccak256(abi.encodePacked(poolPayouts)),
+                    keccak256(abi.encodePacked(incidentPools[incidentId]))
                 )
             )
         );
         address recovered = ECDSA.recover(digest, signature);
         if (recovered != teeSigner || teeSigner == address(0)) revert UnauthorizedSettlementSigner(recovered);
 
-        // Bound LP loss per incident: each pool's committed total must be within its
-        // cap (pool frozen ⇒ this is the open-balance cap). Recorded as the pool's
-        // remaining payable budget, which {finalizeClaim} draws down — so the ACTUAL
-        // summed payout per pool is hard-capped at this committed total, not just the
-        // signer's assertion. Overwriting a corrected root within the submit window
-        // re-sets the budget wholesale; finalize can't start until after dispute, so
-        // no draw-down is ever lost to a re-settle.
+        _commitRoot(incidentId, inc, root, poolPayouts);
+        emit IncidentSettled(incidentId, root);
+    }
+
+    /// @notice Formally dispute the standing (or pending) settlement — the fast, non-
+    ///         timelocked governance halt that DEFENDS claimants. Admin or timelock; deny-
+    ///         only, never redirects funds. Clears the bad root but keeps the pool FROZEN,
+    ///         marking the incident Disputed and starting the {CORRECTION_WINDOW} clock;
+    ///         the timelock then supplies the right root via {correctSettlement}. This is
+    ///         what makes correction viable: the correction is timelocked, so it can't land
+    ///         inside the bad root's DISPUTE window — this halt freezes the pool so LPs
+    ///         can't flee in the interim.
+    ///
+    ///         Allowed only from Open and only UP TO the end of the DISPUTE phase: once
+    ///         FINALIZE opens the root is final and claims may already be paying out, so
+    ///         intervening then would strand honest claimants mid-payout. Re-disputing an
+    ///         already-Disputed incident is barred so a captured governance can't keep
+    ///         resetting the auto-void clock — the only move left on it is {closeIncident}.
+    ///         No id argument — one incident is live at a time ({activeIncidentId}).
+    ///
+    ///         Only for emergency when TEE is compromised. admin cant steal.
+    function disputeIncident() external onlyAdminOrTimelock {
+        uint256 incidentId = _requireActiveIncident();
+        Incident storage inc = incidents[incidentId];
+        if (inc.status != Status.Open) revert AlreadyDisputed(incidentId);
+        if (inc.root != bytes32(0) && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) {
+            revert IncidentFinalizing(incidentId);
+        }
+        inc.root = bytes32(0);
+        inc.rootSubmittedAt = 0;
+        inc.disputedAt = uint64(block.timestamp);
+        inc.status = Status.Disputed;
+        emit IncidentDisputed(incidentId, msg.sender);
+    }
+
+    /// @notice Terminate the in-flight incident: unfreeze the pool and let claimants
+    ///         recover escrow via {withdrawNonFinalizedClaim}. Admin or timelock; deny-
+    ///         only, never redirects funds. For a spurious event / bad open, or to give up
+    ///         on a Disputed incident instead of correcting it. Callable from Open or
+    ///         Disputed, but only UP TO the end of the DISPUTE phase — once FINALIZE opens
+    ///         the root is final and claims may already be paying out, so closing then
+    ///         would strand honest claimants mid-payout. No id argument — one incident is
+    ///         live at a time ({activeIncidentId}).
+    ///
+    ///         Only for emergency when TEE is compromised. admin cant steal.
+    function closeIncident() external onlyAdminOrTimelock {
+        uint256 incidentId = _requireActiveIncident();
+        Incident storage inc = incidents[incidentId];
+        // Bar close once FINALIZE has opened on a standing root (payouts may be underway).
+        // A Disputed incident has no root (cleared at dispute), so this never blocks it.
+        if (inc.root != bytes32(0) && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) {
+            revert IncidentFinalizing(incidentId);
+        }
+        // ACCEPTED (audit C7): if a root was already submitted, settleIncident delisted the
+        // insured token, and closing does NOT re-list it — the token must be manually
+        // re-added via {addInsuredToken} before it can be insured again. A close means the
+        // token/event needs governance review anyway.
+        inc.status = Status.Closed;
+        emit IncidentClosed(incidentId, msg.sender);
+    }
+
+    /// @notice Replace a disputed incident's root with the correct one. Timelock only, and
+    ///         only from the Disputed state ({disputeIncident}). No TEE signature — the
+    ///         compromised enclave is cut out; the timelock IS the recovery authority and
+    ///         computes the root off-chain from its own honest settler. The pool stays
+    ///         frozen throughout (Disputed → Open, never unfrozen), so LPs can't flee
+    ///         between the dispute and the corrected payout. Runs the normal DISPUTE →
+    ///         FINALIZE afterward (rootSubmittedAt reset to now), so even a bad correction
+    ///         can itself be disputed before it pays out. Per-pool caps are enforced
+    ///         exactly as in {settleIncident} (shared {_commitRoot}), so the timelock can't
+    ///         over-drain. No id argument — one incident is live at a time.
+    /// @param root         The corrected settlement root (non-zero).
+    /// @param poolPayouts  Corrected per-pool payout totals, aligned to {incidentPools}.
+    function correctSettlement(bytes32 root, uint256[] calldata poolPayouts) external onlyTimelock {
+        uint256 incidentId = _requireActiveIncident();
+        if (root == bytes32(0)) revert NoStandingRoot(incidentId);
+        Incident storage inc = incidents[incidentId];
+        if (inc.status != Status.Disputed) revert NotDisputed(incidentId);
+
+        _commitRoot(incidentId, inc, root, poolPayouts);
+        inc.status = Status.Open;
+        emit IncidentCorrected(incidentId, root);
+    }
+
+    /// @dev Commit a settlement root and its per-pool payout budget — the shared tail of
+    ///      {settleIncident} (TEE-signed) and {correctSettlement} (timelock). Validates the
+    ///      payout row against {incidentPools}, checks each pool's committed total against
+    ///      its {SingleAssetCoverPool.maxPayoutPerIncident} cap (pool frozen ⇒ the open-
+    ///      balance cap), and records it as the pool's remaining payable budget which
+    ///      {finalizeClaim} draws down — so the ACTUAL summed payout per pool is hard-capped
+    ///      at this committed total, not just the signer's assertion. Stamps rootSubmittedAt
+    ///      (starting a fresh DISPUTE window) and delists the insured token on the confirmed
+    ///      event (no-op if already delisted).
+    function _commitRoot(uint256 incidentId, Incident storage inc, bytes32 root, uint256[] calldata poolPayouts)
+        private
+    {
+        address[] memory poolAddrs = incidentPools[incidentId];
+        if (poolPayouts.length != poolAddrs.length) {
+            revert SettlementPoolMismatch(poolPayouts.length, poolAddrs.length);
+        }
         for (uint256 i = 0; i < poolAddrs.length; i++) {
             uint256 cap = ISingleAssetCoverPool(poolAddrs[i]).maxPayoutPerIncident();
             if (poolPayouts[i] > cap) revert PayoutCapExceeded(i, poolPayouts[i], cap);
@@ -872,69 +1061,46 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
 
         inc.root = root;
         inc.rootSubmittedAt = uint64(block.timestamp);
-        _delistInsuredToken(inc.insuredToken); // idempotent: no-op on an overwrite; delist on first confirmed event
-        emit IncidentSettled(incidentId, root);
+        _delistInsuredToken(inc.insuredToken);
     }
 
-    /// @notice Terminate the in-flight incident. Admin or timelock — the no-delay
-    ///         deny-only brake. Unfreezes the pool immediately; claimants recover
-    ///         escrow via {withdrawNonFinalizedClaim}. Use this to abort a
-    ///         mistaken incident, or to kill one whose root is bad and
-    ///         uncorrectable. A corrected (not bad) root is instead fixed by
-    ///         resubmitting inside the submit window — see {settleIncident}.
-    ///
-    ///         Allowed only UP TO the end of the dispute period. Once the
-    ///         finalize window opens the root is final and claims may already be
-    ///         paying out — closing then would strand honest claimants mid-payout
-    ///         (fast finalizers paid, the rest closed out), so the veto window is
-    ///         the dispute period, never after. No id argument — one incident is
-    ///         live at a time ({activeIncidentId}).
-    function closeIncident() external onlyAdminOrTimelock {
-        uint256 incidentId = activeIncidentId;
-        if (incidentId == 0 || !_incidentActive(incidentId)) revert NotActiveIncident(incidentId);
-        Incident storage inc = incidents[incidentId];
-        if (inc.root != bytes32(0) && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) {
-            revert IncidentFinalizing(incidentId);
-        }
-        // ACCEPTED (audit C7): if a root was already submitted, settleIncident has
-        // delisted the insured token, and closing here does NOT re-list it — a
-        // vetoed incident's token must be manually re-added via {addInsuredToken}
-        // before it can be insured again. Intentional: a veto means the token/event
-        // needs governance review anyway, so relisting is a deliberate manual step,
-        // not an automatic one. (An incident closed before any root leaves the
-        // listing untouched, since delisting only happens at root submission.)
-        inc.closed = true;
-        activeIncidentId = 0;
-        emit IncidentClosed(incidentId, msg.sender);
-    }
-
-    /// @notice Finalize a claim against the standing root with its merkle proof.
-    ///         amounts is the claimant's per-pool payout row aligned to the pool set snapshotted at
-    ///         open; proof is its merkle path against the standing {Incident.root}.
-    ///         Paid out of each pool via {ISingleAssetCoverPool.payClaim}; escrow forfeits.
-    /// @param claimId     Caller's claim to finalize.
+    /// @notice Finalize your live claim on the active incident against the standing root
+    ///         with its merkle proof. No id argument — an account has at most one live
+    ///         claim per incident, looked up from {activeClaimId} (as {cancelClaim}); the
+    ///         claim is the caller's by construction, so no ownership check is needed.
+    ///         amounts is the claimant's per-pool payout row aligned to the pool set
+    ///         snapshotted at open; proof is its merkle path against the standing
+    ///         {Incident.root}. Paid out of each pool via {ISingleAssetCoverPool.payClaim};
+    ///         escrow forfeits. Reverts {NoActiveClaim} if the incident is no longer active
+    ///         (closed/void/finalize-expired) — escrow is recovered via
+    ///         {withdrawNonFinalizedClaim} then.
     /// @param amounts     Per-pool payout row, aligned to the incident's pool list.
     /// @param scoreSpent  Insurance score this claim consumes (off-chain-capped),
     ///                    recorded via the {ScoreSpent} event.
+    /// @param eligibleAmount  Insured-token amount actually covered, as signed in the leaf
+    ///                    (= min(pre-incident holding, escrow)). This much escrow is
+    ///                    forfeited; any escrow above it is refunded to the claimant,
+    ///                    so over-escrowing is harmless.
     /// @param proof       Merkle proof of the claim's leaf against {Incident.root}.
-    function finalizeClaim(uint256 claimId, uint256[] calldata amounts, uint256 scoreSpent, bytes32[] calldata proof)
+    function finalizeClaim(uint256[] calldata amounts, uint256 scoreSpent, uint256 eligibleAmount, bytes32[] calldata proof)
         external
         nonReentrant
         whenNotPaused
     {
+        uint256 incidentId = _activeIncidentId();
+        uint256 claimId = activeClaimId[incidentId][msg.sender];
+        if (claimId == 0) revert NoActiveClaim();
         Claim storage c = claims[claimId];
-        if (c.user != msg.sender) revert UnauthorizedClaim(claimId);
         if (c.resolved) revert ClaimAlreadyResolved(claimId);
 
-        uint256 incidentId = c.incidentId;
         Incident storage inc = incidents[incidentId];
-        // A closed (admin-vetoed) incident is terminal: only escrow recovery via
-        // {withdrawNonFinalizedClaim} is valid after it — never a payout. Without
-        // this, close leaves root/rootSubmittedAt intact, so once the dispute
-        // period elapsed the timing gate below would pass and a proof for the
-        // vetoed root would still drain the pool.
+        // Payout is valid only in the Open state: a Killed incident is terminal, and a
+        // Disputed one has its root cleared (so the merkle check below would fail anyway) —
+        // the status gate makes the intent explicit and blocks a payout on a distrusted
+        // root regardless of timing. A correction lands the incident back in Open.
         if (
-            inc.closed || inc.root == bytes32(0) || block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD
+            inc.status != Status.Open || inc.root == bytes32(0)
+                || block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD
                 || block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW
         ) {
             revert FinalizeNotOpen(incidentId);
@@ -949,17 +1115,27 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
             // Merkle-prove this exact payout row is a leaf of the TEE-signed,
             // dispute-reviewed root: a payout can only be one that survived dispute.
             // Leaf is the OZ StandardMerkleTree double-hash of the claim tuple.
-            bytes32 leaf =
-                keccak256(bytes.concat(keccak256(abi.encode(incidentId, claimId, msg.sender, amounts, scoreSpent))));
+            bytes32 leaf = keccak256(
+                bytes.concat(keccak256(abi.encode(incidentId, claimId, msg.sender, amounts, scoreSpent, eligibleAmount)))
+            );
             if (!MerkleProof.verifyCalldata(proof, inc.root, leaf)) revert InvalidProof(claimId);
         }
 
         c.resolved = true;
         inc.unresolved -= 1;
 
-        // Escrow leaves live accounting; forfeited tokens stay here as
-        // unaccounted balance, sweepable as protocol revenue.
-        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
+        // Escrow settles. Only the signed `eligibleAmount` is forfeited (kept here as
+        // unaccounted balance, sweepable as protocol revenue); any excess the claimant
+        // over-escrowed is refunded, so escrowing more than one's pre-incident holding
+        // is harmless. eligibleAmount ≤ escrow always holds off-chain (eligibleAmount =
+        // min(pre-incident holding, escrow)); guarded here against a malformed leaf.
+        {
+            uint256 escrow = c.insuredTokenAmount;
+            if (eligibleAmount > escrow) revert EligibleExceedsEscrow(eligibleAmount, escrow);
+            escrowedInsuredTokens[inc.insuredToken] -= escrow;
+            uint256 refund = escrow - eligibleAmount;
+            if (refund > 0) inc.insuredToken.safeTransfer(msg.sender, refund);
+        }
 
         // Burn the committed boosters from the claimant — the cost of the boost.
         // They must still hold them and have approved this contract; otherwise this
@@ -968,15 +1144,17 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         //
         // ACCEPTED (audit C2): a claimant who burns/moves their booster first makes
         // their own finalize revert, so the claim stays unresolved and the pool
-        // stays frozen for the rest of the finalize window. This is liveness-only,
+        // stays frozen for the rest of the FINALIZE phase. This is liveness-only,
         // not fund loss (the griefer forfeits their own boost and recovers escrow
         // afterward), and it extends the freeze no further than a claimant simply
         // never calling finalize already could — the freeze is bounded by the
-        // finalize window either way. So it is not a new DoS; accepted as designed.
-        uint256 boosterAmount = c.boosterAmount;
-        if (boosterAmount != 0) {
-            IERC1155Burnable(c.boosterCollection).burn(msg.sender, BOOSTER_ID, boosterAmount);
-            c.boosterAmount = 0;
+        // FINALIZE phase either way. So it is not a new DoS; accepted as designed.
+        {
+            uint256 boosterAmount = c.boosterAmount;
+            if (boosterAmount != 0) {
+                IERC1155Burnable(c.boosterCollection).burn(msg.sender, BOOSTER_ID, boosterAmount); //continue here.
+                c.boosterAmount = 0;
+            }
         }
 
         // Pay each pool its settlement-row amount, drawing down that pool's remaining
@@ -987,7 +1165,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         // the budget lands exactly at 0 and every claim finalizes. Only a malformed
         // root whose leaves over-allocate a pool (Σ > committed) can exhaust the
         // budget early and revert a later claim; that is a bad root — the dispute
-        // window / {closeIncident} is its primary defense, and this is the LP-loss
+        // window / {disputeIncident} is its primary defense, and this is the LP-loss
         // backstop for one that slips through (the reverted claimant recovers escrow
         // via {withdrawNonFinalizedClaim}). Each pool also re-checks amount ≤ its live
         // balance and socializes the loss; zeros are skipped by the pool.
@@ -1001,19 +1179,24 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
             ISingleAssetCoverPool(poolAddrs[i]).payClaim(msg.sender, amt);
         }
 
-        // The consumed insurance score is recorded as an EVENT, not on-chain state:
-        // the settler sums ScoreSpent logs (pinned before the incident's openBlock)
-        // for each claimant's available budget. No cross-product double-spend risk —
-        // a single payout module.
-        if (scoreSpent != 0) emit ScoreSpent(msg.sender, scoreSpent, incidentId);
+        // Consumed insurance score is recorded two ways: an incident-tagged
+        // {ScoreSpent} event that the settler sums (pinned before the incident's
+        // openBlock) for each claimant's per-incident budget, AND a cumulative running
+        // total on the {Registry} ({recordScoreSpent}) for cheap on-chain / frontend
+        // reads. The Registry total is a mirror of this authoritative number, not a
+        // gate. No cross-product double-spend risk — a single payout module.
+        if (scoreSpent != 0) {
+            emit ScoreSpent(msg.sender, scoreSpent, incidentId);
+            registry().recordScoreSpent(msg.sender, scoreSpent);
+        }
 
         emit ClaimFinalized(claimId, msg.sender);
     }
 
-    /// @notice Recover the escrow of a claim that will never finalize: its
-    ///         incident was closed (admin- or auto-), voided (no root by the
-    ///         deadline), or its finalize window expired unused. Callable
-    ///         anytime after, forever.
+    /// @notice Recover the escrow of a claim that will never finalize: its incident was
+    ///         killed, halted with no correction in time (auto-voided past
+    ///         {CORRECTION_WINDOW}), voided (no root by the deadline), or its FINALIZE
+    ///         phase expired unused. Callable anytime after, forever.
     /// @dev    Deliberately NOT whenNotPaused (unlike open/join/settle/finalize):
     ///         escrow recovery — and {cancelClaim} — must never be blockable by a
     ///         pause, so a pause can't trap claimant funds.
@@ -1024,11 +1207,26 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         if (c.resolved) revert ClaimAlreadyResolved(claimId);
 
         Incident storage inc = incidents[c.incidentId];
-        bool closed = inc.closed; // admin-closed or auto-closed
-        bool incidentVoid = inc.root == bytes32(0) && block.timestamp > inc.claimWindowEndTime + SUBMIT_DEADLINE;
-        bool finalizeExpired =
-            inc.root != bytes32(0) && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW;
-        if (!closed && !incidentVoid && !finalizeExpired) revert ClaimNotWithdrawable(claimId);
+        // Escrow is recoverable once the incident can no longer pay this claim:
+
+        //if it was killed; 
+        bool killed = inc.status == Status.Closed;
+       
+        //if it was halted and its correction never came (auto-voided past CORRECTION_WINDOW); 
+        bool disputeExpired = inc.status == Status.Disputed && block.timestamp > inc.disputedAt + CORRECTION_WINDOW;
+       
+        //The Open-state gates below exclude a live Disputed
+        // incident (frozen, still correctable) — its root==0 must NOT read as "void" yet.
+        // it voided in SETTLE (no root by the deadline);
+        bool incidentVoid = inc.status == Status.Open && inc.root == bytes32(0)
+        && block.timestamp > inc.claimWindowEndTime + SUBMIT_DEADLINE;
+
+  
+        // its FINALIZE phase expired unused.
+        bool finalizeExpired = inc.status == Status.Open && inc.root != bytes32(0)
+            && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW;
+
+        if (!killed && !disputeExpired && !incidentVoid && !finalizeExpired) revert ClaimNotWithdrawable(claimId);
 
         c.resolved = true;
         inc.unresolved -= 1;
@@ -1038,7 +1236,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         emit ClaimWithdrawn(claimId, msg.sender);
     }
 
-    // ═══════════════════════════ Role management ═══════════════════════════
+    // ─────────────────────────── Role management ───────────────────────────
 
     /// @notice Rotate the TEE settlement signer. Timelock only, and blocked while an
     ///         incident is active (L5): the settlement authority can't change out
@@ -1053,20 +1251,21 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
     ///         recovery key BETWEEN incidents, then open + settle. A dead enclave
     ///         mid-incident can't be recovered in place — the incident voids after
     ///         SUBMIT_DEADLINE and escrow is returned; a mistaken or bad-root
-    ///         incident is instead vetoed with {closeIncident}.
+    ///         incident is instead disputed ({disputeIncident}) or closed ({closeIncident}).
     /// @param newSigner  The new enclave key's address (zero to disable).
     function setTeeSigner(address newSigner) external onlyTimelock notDuringIncident {
         emit TeeSignerSet(teeSigner, newSigner);
         teeSigner = newSigner;
     }
 
-    // ═══════════════════════════ Views ═══════════════════════════
+    // ─────────────────────────── Views ───────────────────────────
 
-    /// @notice True while the in-flight incident is unresolved. The pool reads
-    ///         this (as a registered consumer) to gate staker withdrawals and
-    ///         asset curation for the incident's life.
-    function incidentActive() external view returns (bool) {
-        return _hasActiveIncident();
+    /// @notice The single active incident id, or 0 if none. Derived and validated —
+    ///         never a stale non-zero (unlike a stored pointer would be). The Registry
+    ///         reads this (as {IDefiInsurance}) and treats non-zero as "system frozen",
+    ///         so the pools gate staker withdrawals and asset curation on it.
+    function activeIncidentId() external view returns (uint256) {
+        return _activeIncidentId();
     }
 
     /// @notice The full per-token config (κ, oracle, conversion recipe).
@@ -1087,22 +1286,34 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, Managed {
         return claims[claimId].boosterAmount;
     }
 
-    // ═══════════════════════════ Internal: incident lifecycle ═══════════════════════════
+    // ─────────────────────────── Internal: incident lifecycle ───────────────────────────
 
-    /// @dev True while the in-flight incident is unresolved.
-    function _hasActiveIncident() internal view returns (bool) {
-        return activeIncidentId != 0 && _incidentActive(activeIncidentId);
+    /// @dev The single active incident id, or 0 if none — the ONE source of truth.
+    ///      Incidents are strictly one-at-a-time, so the only candidate is always the
+    ///      last-opened ({nextIncidentId} - 1); its activeness (phase machine, until it
+    ///      terminates) is validated inline. No stored pointer to go stale: every id
+    ///      this returns is guaranteed active. Callers layer their own phase check
+    ///      (claim window / settle / finalize) on top as needed.
+    function _activeIncidentId() internal view returns (uint256) {
+        uint256 id = nextIncidentId - 1; // 0 before the first open
+        if (id == 0) return 0;
+        Incident storage inc = incidents[id];
+        if (inc.status == Status.Closed) return 0; // killed — pool unfrozen
+        // Disputed: root cleared, pool STILL frozen awaiting a timelock correction. Auto-
+        // voids (unfreezes) if none lands within CORRECTION_WINDOW, so a stalled
+        // governance can't freeze forever.
+        if (inc.status == Status.Disputed) return block.timestamp <= inc.disputedAt + CORRECTION_WINDOW ? id : 0;
+        if (block.timestamp <= inc.claimWindowEndTime) return id;
+        if (inc.unresolved == 0) return 0;
+        if (inc.root == bytes32(0)) return block.timestamp <= inc.claimWindowEndTime + SUBMIT_DEADLINE ? id : 0;
+        return block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW ? id : 0;
     }
 
-    /// @dev An incident is active until its phase machine terminates (see the
-    ///      pool v1 history for the full rationale).
-    function _incidentActive(uint256 incidentId) internal view returns (bool) {
-        Incident storage inc = incidents[incidentId];
-        if (inc.closed) return false; // explicitly terminated
-        if (block.timestamp <= inc.claimWindowEndTime) return true;
-        if (inc.unresolved == 0) return false;
-        if (inc.root == bytes32(0)) return block.timestamp <= inc.claimWindowEndTime + SUBMIT_DEADLINE;
-        return block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW;
+    /// @dev {_activeIncidentId} but reverts when there is none — for sites that require
+    ///      a live incident (cancel, close).
+    function _requireActiveIncident() internal view returns (uint256 id) {
+        id = _activeIncidentId();
+        if (id == 0) revert NotActiveIncident(0);
     }
 
     /// @dev Delist an insured token (zero its maxCoverageBps) and remove it from

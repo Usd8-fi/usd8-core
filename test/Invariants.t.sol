@@ -47,32 +47,32 @@ contract PoolHandler is Test {
         asset.mint(who, amount);
         vm.startPrank(who);
         asset.approve(address(pool), amount);
-        try pool.stake(amount) {} catch {}
+        try pool.deposit(amount, who) {} catch {}
         vm.stopPrank();
     }
 
     function requestUnstake(uint256 actorSeed, uint256 shares) external {
         address who = _actor(actorSeed);
-        uint256 bal = pool.userShares(who);
+        uint256 bal = pool.balanceOf(who);
         if (bal == 0) return;
         shares = bound(shares, 1, bal);
         vm.prank(who);
-        try pool.requestUnstake(shares) {} catch {}
+        try pool.requestRedeem(shares) {} catch {}
     }
 
     function cancelUnstake(uint256 actorSeed) external {
         address who = _actor(actorSeed);
         vm.prank(who);
-        try pool.cancelUnstakeRequest() {} catch {}
+        try pool.cancelRedeemRequest() {} catch {}
     }
 
     function completeUnstake(uint256 actorSeed) external {
         address who = _actor(actorSeed);
-        // completeUnstake checkpoints but does not pay yield; capture any USD8
+        // completeRedeem checkpoints but does not pay yield; capture any USD8
         // delta defensively (expected 0) so the reward-conservation ghost holds.
         uint256 before = usd8.balanceOf(who);
         vm.prank(who);
-        try pool.completeUnstake() {
+        try pool.completeRedeem() {
             ghostWithdrawn += usd8.balanceOf(who) - before;
         } catch {}
     }
@@ -80,7 +80,7 @@ contract PoolHandler is Test {
     function withdrawYield(uint256 actorSeed) external {
         address who = _actor(actorSeed);
         vm.prank(who);
-        try pool.withdrawYield() returns (uint256 got) {
+        try pool.claimReward() returns (uint256 got) {
             ghostWithdrawn += got;
         } catch {}
     }
@@ -113,11 +113,13 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
     MockERC20 asset;
     PoolHandler handler;
     address admin = address(0xA11CE);
-    Registry authority;
+    Registry registry;
 
     function setUp() public {
-        authority = new Registry(admin, admin, 8000);
-        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (authority, admin)))));
+        registry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
+        );
+        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, admin)))));
         asset = new MockERC20("AST", "AST", 18);
 
         SingleAssetCoverPool impl = new SingleAssetCoverPool();
@@ -127,14 +129,14 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
                 new BeaconProxy(
                     address(beacon),
                     abi.encodeCall(
-                        SingleAssetCoverPool.initialize, (authority, IERC20(address(asset)), IERC20(address(usd8)))
+                        SingleAssetCoverPool.initialize,
+                        (registry, IERC20(address(asset)), IERC20(address(usd8)), "Cover", "cp")
                     )
                 )
             )
         );
-        pool.seed(0); // zero-seed: open the {seeded} gate before the handler stakes
         vm.startPrank(admin);
-        authority.addPool(IERC20(address(asset)), address(pool));
+        registry.addPool(address(pool));
         vm.stopPrank();
 
         handler = new PoolHandler(pool, usd8, asset, admin);
@@ -164,8 +166,8 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
 
     // Property 2: share accounting. sum(user shares) == totalShares; totalAssets <= balance.
     function invariant_shareAccounting() public view {
-        uint256 sumShares = pool.userShares(address(0xA11)) + pool.userShares(address(0xB0B));
-        assertEq(sumShares, pool.totalShares(), "share sum != totalShares");
+        uint256 sumShares = pool.balanceOf(address(0xA11)) + pool.balanceOf(address(0xB0B));
+        assertEq(sumShares, pool.totalSupply(), "share sum != totalShares");
         // totalAssets is backed by real token balance held by the pool.
         assertLe(pool.totalAssets(), asset.balanceOf(address(pool)), "totalAssets > balance");
     }
@@ -180,11 +182,13 @@ contract StatelessFuzzTest is Test {
 
     // ── property 4: SavingsUSD8 totalAssets never reverts; no JIT free yield ──
     function _deploySavings() internal returns (USD8 usd8, SavingsUSD8 vault) {
-        Registry authority = new Registry(admin, admin, 8000);
-        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (authority, admin)))));
+        Registry registry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
+        );
+        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, admin)))));
         vault = SavingsUSD8(
             address(
-                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (authority, usd8)))
+                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (registry, usd8)))
             )
         );
     }
@@ -269,11 +273,15 @@ contract StatelessFuzzTest is Test {
 
         // address(this) is the timelock (so it can setTreasury here); admin is
         // added to the admin set for the fuzz's admin-gated harvest path.
-        Registry authority = new Registry(address(this), admin, 8000);
-        usd8 = USD8(
-            address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (authority, address(this)))))
+        Registry registry = Registry(
+            address(
+                new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (address(this), admin)))
+            )
         );
-        treasury = new Treasury(usd8, authority);
+        usd8 = USD8(
+            address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, address(this)))))
+        );
+        treasury = new Treasury(usd8, registry);
         usd8.setTreasury(address(treasury));
     }
 

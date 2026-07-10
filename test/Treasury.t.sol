@@ -14,7 +14,7 @@ import {USD8} from "../src/USD8.sol";
 import {SavingsUSD8} from "../src/SavingsUSD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {Registry} from "../src/Registry.sol";
-import {Managed} from "../src/Managed.sol";
+import {RegistryManaged} from "../src/RegistryManaged.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -23,7 +23,7 @@ import {LossyWithdrawStrategy} from "./mocks/LossyWithdrawStrategy.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
 
 contract TreasuryTest is Test {
-    Registry authority;
+    Registry registry;
     USD8 usd8;
     Treasury treasury;
     MockERC20 usdc;
@@ -62,18 +62,20 @@ contract TreasuryTest is Test {
         vm.etch(USDC_ADDR, address(template).code);
         usdc = MockERC20(USDC_ADDR);
 
-        authority = new Registry(timelock, admin, 8000);
+        registry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, admin))))
+        );
         USD8 impl = new USD8();
-        bytes memory init = abi.encodeCall(USD8.initialize, (authority, address(this)));
+        bytes memory init = abi.encodeCall(USD8.initialize, (registry, address(this)));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         usd8 = USD8(address(proxy));
-        treasury = new Treasury(usd8, authority);
+        treasury = new Treasury(usd8, registry);
         vm.prank(timelock);
         usd8.setTreasury(address(treasury));
 
         assertEq(usd8.treasury(), address(treasury));
-        assertEq(authority.timelock(), timelock);
-        assertTrue(authority.isAdmin(admin));
+        assertEq(registry.timelock(), timelock);
+        assertTrue(registry.isAdmin(admin));
     }
 
     function test_ConstantsMatchSpec() public view {
@@ -85,21 +87,21 @@ contract TreasuryTest is Test {
     // -- Pause system (single strict pause) -------------------------------
 
     function test_PauseDefaultsToFalse() public view {
-        assertFalse(authority.paused(address(treasury)));
+        assertFalse(registry.paused(address(treasury)));
     }
 
     function test_AdminCanSetPaused() public {
         vm.prank(timelock);
-        vm.expectEmit(true, false, false, true, address(authority));
+        vm.expectEmit(true, false, false, true, address(registry));
         emit PausedSet(address(treasury), true);
-        authority.setPaused(address(treasury), true);
-        assertTrue(authority.paused(address(treasury)));
+        registry.setPaused(address(treasury), true);
+        assertTrue(registry.paused(address(treasury)));
     }
 
     function test_NonAdminCannotSetPaused() public {
         vm.expectRevert(_unauthorizedAdmin(alice));
         vm.prank(alice);
-        authority.setPaused(address(treasury), true);
+        registry.setPaused(address(treasury), true);
     }
 
     function test_PausedBlocksMintAndRedeem() public {
@@ -110,7 +112,7 @@ contract TreasuryTest is Test {
         vm.stopPrank();
 
         vm.prank(timelock);
-        authority.setPaused(address(treasury), true);
+        registry.setPaused(address(treasury), true);
 
         usdc.mint(alice, 1e6);
         vm.startPrank(alice);
@@ -124,8 +126,8 @@ contract TreasuryTest is Test {
 
     function test_PauseCanBeCleared() public {
         vm.startPrank(timelock);
-        authority.setPaused(address(treasury), true);
-        authority.setPaused(address(treasury), false);
+        registry.setPaused(address(treasury), true);
+        registry.setPaused(address(treasury), false);
         vm.stopPrank();
 
         usdc.mint(alice, 1e6);
@@ -141,32 +143,32 @@ contract TreasuryTest is Test {
         address newTimelock = address(0xC0FFEE);
 
         vm.prank(timelock);
-        vm.expectEmit(true, true, false, true, address(authority));
+        vm.expectEmit(true, true, false, true, address(registry));
         emit TimelockChanged(timelock, newTimelock);
-        authority.setTimelock(newTimelock);
+        registry.setTimelock(newTimelock);
 
-        assertEq(authority.timelock(), newTimelock);
+        assertEq(registry.timelock(), newTimelock);
 
         // Old timelock loses all role-gated access (it is not admin either).
         vm.expectRevert(_unauthorizedAdmin(timelock));
         vm.prank(timelock);
-        authority.setPaused(address(treasury), true);
+        registry.setPaused(address(treasury), true);
 
         vm.prank(newTimelock);
-        authority.setPaused(address(treasury), true);
-        assertTrue(authority.paused(address(treasury)));
+        registry.setPaused(address(treasury), true);
+        assertTrue(registry.paused(address(treasury)));
     }
 
     function test_NonTimelockCannotTransferTimelock() public {
         vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
-        authority.setTimelock(alice);
+        registry.setTimelock(alice);
     }
 
     function test_SetTimelockRejectsZero() public {
         vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        authority.setTimelock(address(0));
+        registry.setTimelock(address(0));
     }
 
     function test_TimelockCanSetAdmin() public {
@@ -174,11 +176,11 @@ contract TreasuryTest is Test {
         MockStrategy strat = new MockStrategy(usdc);
 
         vm.prank(timelock);
-        vm.expectEmit(true, false, false, true, address(authority));
+        vm.expectEmit(true, false, false, true, address(registry));
         emit AdminSet(newAdmin, true);
-        authority.setAdmin(newAdmin, true);
+        registry.setAdmin(newAdmin, true);
 
-        assertTrue(authority.isAdmin(newAdmin));
+        assertTrue(registry.isAdmin(newAdmin));
 
         vm.prank(timelock);
         treasury.addStrategy(strat, type(uint256).max);
@@ -189,43 +191,13 @@ contract TreasuryTest is Test {
     function test_NonTimelockCannotSetAdmin() public {
         vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
-        authority.setAdmin(alice, true);
+        registry.setAdmin(alice, true);
     }
 
     function test_SetAdminRejectsZero() public {
         vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        authority.setAdmin(address(0), true);
-    }
-
-    function test_SetAuthorityMigratesRegistry() public {
-        Registry newAuth = new Registry(timelock, admin, 8000);
-        vm.prank(timelock);
-        treasury.setAuthority(newAuth);
-        assertEq(address(treasury.authority()), address(newAuth));
-
-        // Gating now flows through the NEW registry: pause there, mint reverts.
-        vm.prank(timelock);
-        newAuth.setPaused(address(treasury), true);
-        usdc.mint(alice, 1e6);
-        vm.startPrank(alice);
-        usdc.approve(address(treasury), 1e6);
-        vm.expectRevert(Registry.Paused.selector);
-        treasury.mintUSD8(1e6);
-        vm.stopPrank();
-    }
-
-    function test_SetAuthorityOnlyTimelock() public {
-        Registry newAuth = new Registry(timelock, admin, 8000);
-        vm.expectRevert(_unauthorizedTimelock(alice));
-        vm.prank(alice);
-        treasury.setAuthority(newAuth);
-    }
-
-    function test_SetAuthorityRejectsZero() public {
-        vm.expectRevert(Managed.ZeroAddress.selector);
-        vm.prank(timelock);
-        treasury.setAuthority(Registry(address(0)));
+        registry.setAdmin(address(0), true);
     }
 
     function test_AdminCanRunStrategyFundFlows() public {
@@ -255,7 +227,7 @@ contract TreasuryTest is Test {
         assertEq(usd8.balanceOf(alice), 100e18);
         assertEq(usd8.treasury(), address(treasury));
 
-        Treasury treasuryB = new Treasury(usd8, authority);
+        Treasury treasuryB = new Treasury(usd8, registry);
 
         vm.prank(timelock);
         usd8.setTreasury(address(treasuryB));
@@ -297,7 +269,7 @@ contract TreasuryTest is Test {
     function test_DistributeRevenueToSavingsUsesProfitVesting() public {
         SavingsUSD8 savings = SavingsUSD8(
             address(
-                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (authority, usd8)))
+                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (registry, usd8)))
             )
         );
 
@@ -436,7 +408,7 @@ contract TreasuryTest is Test {
     function test_HarvestAndDistributeToVestingReceiver() public {
         SavingsUSD8 savings = SavingsUSD8(
             address(
-                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (authority, usd8)))
+                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (registry, usd8)))
             )
         );
         // Give the vault a depositor so receiveProfitDistribution accepts profit.
@@ -489,7 +461,7 @@ contract TreasuryTest is Test {
 
     function test_SetProfitReceiverZeroAddressReverts() public {
         vm.prank(admin);
-        vm.expectRevert(Managed.ZeroAddress.selector);
+        vm.expectRevert(RegistryManaged.ZeroAddress.selector);
         treasury.setProfitReceiver(address(0), 1, Treasury.RevenueDistributionMode.DirectTransfer);
     }
 
@@ -670,7 +642,7 @@ contract TreasuryTest is Test {
         treasury.addStrategy(strat, type(uint256).max);
 
         vm.prank(timelock);
-        authority.setPaused(address(treasury), true);
+        registry.setPaused(address(treasury), true);
 
         bytes memory pauseErr = abi.encodeWithSelector(Registry.Paused.selector);
 
@@ -694,16 +666,16 @@ contract TreasuryTest is Test {
 
     function test_SystemPauseDoesNotBlockUnpausing() public {
         vm.startPrank(timelock);
-        authority.setPaused(address(treasury), true);
-        authority.setPaused(address(treasury), false);
+        registry.setPaused(address(treasury), true);
+        registry.setPaused(address(treasury), false);
         vm.stopPrank();
-        assertFalse(authority.paused(address(treasury)));
+        assertFalse(registry.paused(address(treasury)));
     }
 
     function test_SystemPauseDoesNotBlockAddRemoveStrategy() public {
         MockStrategy strat = new MockStrategy(usdc);
         vm.prank(timelock);
-        authority.setPaused(address(treasury), true);
+        registry.setPaused(address(treasury), true);
 
         vm.prank(timelock);
         treasury.addStrategy(strat, type(uint256).max);
@@ -1266,13 +1238,13 @@ contract TreasuryTest is Test {
 
     function test_RescueTokenRejectsUSDC() public {
         vm.prank(timelock);
-        vm.expectRevert(abi.encodeWithSelector(Managed.NothingToSweep.selector, address(usdc)));
+        vm.expectRevert(abi.encodeWithSelector(RegistryManaged.NothingToSweep.selector, address(usdc)));
         treasury.sweepToken(IERC20(address(usdc)), recipient);
     }
 
     function test_RescueTokenRejectsUSD8() public {
         vm.prank(timelock);
-        vm.expectRevert(abi.encodeWithSelector(Managed.NothingToSweep.selector, address(usd8)));
+        vm.expectRevert(abi.encodeWithSelector(RegistryManaged.NothingToSweep.selector, address(usd8)));
         treasury.sweepToken(IERC20(address(usd8)), recipient);
     }
 

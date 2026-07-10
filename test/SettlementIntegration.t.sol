@@ -38,7 +38,7 @@ contract SettlementIntegrationTest is Test {
     USD8 usd8;
     SingleAssetCoverPool pool;
     DefiInsurance defi;
-    Registry authority;
+    Registry registry;
 
     address admin = address(0xA11CE);
     address alice = address(0xBEEF); // underwriter
@@ -52,9 +52,11 @@ contract SettlementIntegrationTest is Test {
         usdc = new MockERC20("USDC", "USDC", 6);
         lp = new MockERC20("LP", "LP", 18);
         booster = new MockERC1155();
-        authority = new Registry(admin, admin, 8000);
+        registry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
+        );
         USD8 impl = new USD8();
-        usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (authority, admin)))));
+        usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (registry, admin)))));
 
         SingleAssetCoverPool pImpl = new SingleAssetCoverPool();
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(pImpl), admin);
@@ -63,18 +65,18 @@ contract SettlementIntegrationTest is Test {
                 new BeaconProxy(
                     address(beacon),
                     abi.encodeCall(
-                        SingleAssetCoverPool.initialize, (authority, IERC20(address(usdc)), IERC20(address(usd8)))
+                        SingleAssetCoverPool.initialize,
+                        (registry, IERC20(address(usdc)), IERC20(address(usd8)), "Cover", "cp")
                     )
                 )
             )
         );
-        pool.seed(0); // zero-seed: open the {seeded} gate before staking
 
-        defi = new DefiInsurance(authority);
+        defi = new DefiInsurance(registry);
 
         vm.startPrank(admin);
-        authority.addPool(IERC20(address(usdc)), address(pool));
-        authority.setPayoutModule(address(defi));
+        registry.addPool(address(pool));
+        registry.setDefiInsurance(address(defi));
         defi.addInsuredToken(IERC20(address(lp)), 8000, FEED, address(0), "");
         defi.setTeeSigner(vm.addr(TEE_PK));
         vm.stopPrank();
@@ -83,14 +85,14 @@ contract SettlementIntegrationTest is Test {
         usdc.mint(alice, 1000e6);
         vm.startPrank(alice);
         usdc.approve(address(pool), 1000e6);
-        pool.stake(1000e6);
+        pool.deposit(1000e6, alice);
         vm.stopPrank();
     }
 
     /// @dev Per-pool payout caps aligned to the current pool set (always ≥ the
     ///      integration payouts, which are well under the cap).
     function _pp() internal view returns (uint256[] memory pp) {
-        (, address[] memory poolAddrs) = authority.pools();
+        (, address[] memory poolAddrs) = registry.coverPools();
         pp = new uint256[](poolAddrs.length);
         for (uint256 i = 0; i < poolAddrs.length; i++) {
             pp[i] = SingleAssetCoverPool(poolAddrs[i]).maxPayoutPerIncident();
@@ -100,7 +102,7 @@ contract SettlementIntegrationTest is Test {
     /// @dev Sign a settlement root as the TEE, binding the incident's current
     ///      on-chain unresolved count and committed per-pool payouts (mirrors settleIncident).
     function _teeSign(uint256 incidentId, bytes32 root, uint256[] memory pp) internal view returns (bytes memory) {
-        (,,, uint256 unresolved,,,,) = defi.incidents(incidentId);
+        (,,, uint256 unresolved,,,,,) = defi.incidents(incidentId);
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -110,13 +112,17 @@ contract SettlementIntegrationTest is Test {
                 address(defi)
             )
         );
+        (, address[] memory poolAddrs) = registry.coverPools();
         bytes32 structHash = keccak256(
             abi.encode(
-                keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts)"),
+                keccak256(
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools)"
+                ),
                 incidentId,
                 root,
                 unresolved,
-                keccak256(abi.encodePacked(pp))
+                keccak256(abi.encodePacked(pp)),
+                keccak256(abi.encodePacked(poolAddrs))
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEE_PK, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
@@ -148,22 +154,24 @@ contract SettlementIntegrationTest is Test {
         uint256[][] memory amounts = new uint256[][](2);
         amounts[0] = _u256(bobPay);
         amounts[1] = _u256(carolPay);
-        bytes memory rootPayload = abi.encode(incidentId, _u256(cb, cc), _addr(bob, carol), amounts, _u256(60, 40));
+        // eligibles: each claim's escrow (bob and carol each escrowed 100 LP).
+        bytes memory rootPayload =
+            abi.encode(incidentId, _u256(cb, cc), _addr(bob, carol), amounts, _u256(60, 40), _u256(100e18, 100e18));
 
         bytes32 root = abi.decode(_ffi("root", rootPayload, ""), (bytes32));
         bytes32[] memory proofBob = abi.decode(_ffi("proof", rootPayload, vm.toString(cb)), (bytes32[]));
         bytes32[] memory proofCarol = abi.decode(_ffi("proof", rootPayload, vm.toString(cc)), (bytes32[]));
 
         // ── 3) Settle with the off-chain root, finalize each claim with its proof. ──
-        (, uint64 wEnd,,,,,,) = defi.incidents(incidentId);
+        (, uint64 wEnd,,,,,,,) = defi.incidents(incidentId);
         vm.warp(wEnd + 1);
         _settle(incidentId, root);
-        vm.warp(block.timestamp + 4 days + 1); // past DISPUTE_PERIOD
+        vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1); // past DISPUTE_PERIOD
 
         vm.prank(bob);
-        defi.finalizeClaim(cb, _u256(bobPay), 60, proofBob);
+        defi.finalizeClaim(_u256(bobPay), 60, 100e18, proofBob);
         vm.prank(carol);
-        defi.finalizeClaim(cc, _u256(carolPay), 40, proofCarol);
+        defi.finalizeClaim(_u256(carolPay), 40, 100e18, proofCarol);
 
         // ── Payouts match the off-chain amounts exactly. Spent score is now an
         //    event (ScoreSpent), not on-chain state, so it isn't asserted here. ──
@@ -177,7 +185,7 @@ contract SettlementIntegrationTest is Test {
         lp.mint(who, amount);
         vm.startPrank(who);
         lp.approve(address(defi), amount);
-        claimId = defi.joinClaim(IERC20(address(lp)), amount, score, 0);
+        claimId = defi.joinClaim(IERC20(address(lp)), amount, score, 0, 0, "");
         vm.stopPrank();
     }
 

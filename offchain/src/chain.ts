@@ -10,18 +10,18 @@ export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as cons
 // The per-incident config is NOT snapshot on-chain — it is reconstructed by
 // reading these at the incident's openBlock (see {incidentConfigOf}).
 export const DEFI_ABI = parseAbi([
-  "function incidents(uint256) view returns (address insuredToken, uint64 claimWindowEndTime, bytes32 root, uint256 unresolved, uint64 rootSubmittedAt, uint64 referenceBlock, uint64 openBlock, bool closed)",
+  "function incidents(uint256) view returns (address insuredToken, uint64 claimWindowEndTime, bytes32 root, uint256 unresolved, uint64 rootSubmittedAt, uint64 referenceBlock, uint64 openBlock, uint8 status, uint64 disputedAt)",
   "function getInsuredToken(address) view returns ((uint256 maxCoverageBps, address underlyingPriceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData))",
   "function settlementParams() view returns (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks)",
 ]);
 
 // Registry surface: topology (pool set), scored tokens, booster collection.
 export const REGISTRY_ABI = parseAbi([
-  "function pools() view returns (address[] assets, address[] poolAddrs)",
-  "function poolsLength() view returns (uint256)",
+  "function coverPools() view returns (address[] assets, address[] poolAddrs)",
+  "function coverPoolsLength() view returns (uint256)",
   "function getScoredTokens() view returns ((address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[])",
   "function boosterNFT() view returns (address)",
-  "function maxPayoutBps() view returns (uint256)",
+  "function maxCoverPoolPayoutBps() view returns (uint256)",
 ]);
 
 // SingleAssetCoverPool surface: per-pool asset + valuation.
@@ -40,8 +40,8 @@ export const SCORE_SPENT = parseAbiItem(
 );
 // Payout-module history: enumerates every module ever registered so ScoreSpent
 // logs can be summed across all of them.
-export const PAYOUT_MODULE_SET = parseAbiItem(
-  "event PayoutModuleSet(address indexed oldModule, address indexed newModule)"
+export const DEFI_INSURANCE_SET = parseAbiItem(
+  "event DefiInsuranceSet(address indexed oldModule, address indexed newModule)"
 );
 export const ERC20_TRANSFER = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 export const ERC1155_TRANSFER_SINGLE = parseAbiItem(
@@ -214,7 +214,7 @@ export async function poolsAt(
   const [assets, poolAddrs] = (await client.readContract({
     address: CONFIG.registry,
     abi: REGISTRY_ABI,
-    functionName: "pools",
+    functionName: "coverPools",
     blockNumber,
   })) as readonly [`0x${string}`[], `0x${string}`[]];
   return { assets: [...assets], poolAddrs: [...poolAddrs] };
@@ -241,11 +241,11 @@ export async function boosterNftAt(client: PublicClient, blockNumber: bigint): P
 }
 
 /** The universal per-incident payout cap (bps) as of `blockNumber`. */
-export async function maxPayoutBpsAt(client: PublicClient, blockNumber: bigint): Promise<bigint> {
+export async function maxCoverPoolPayoutBpsAt(client: PublicClient, blockNumber: bigint): Promise<bigint> {
   return (await client.readContract({
     address: CONFIG.registry,
     abi: REGISTRY_ABI,
-    functionName: "maxPayoutBps",
+    functionName: "maxCoverPoolPayoutBps",
     blockNumber,
   })) as bigint;
 }
@@ -253,7 +253,7 @@ export async function maxPayoutBpsAt(client: PublicClient, blockNumber: bigint):
 /**
  * Insurance score already spent per user, from the ScoreSpent event ledger.
  * Sums ScoreSpent logs across EVERY payout module ever registered (enumerated
- * from the Registry's PayoutModuleSet events), pinned to blocks strictly before
+ * from the Registry's DefiInsuranceSet events), pinned to blocks strictly before
  * `openBlock`.
  *
  * INTENTIONAL asymmetry with earnedScoreOf, which anchors at the earlier
@@ -269,7 +269,7 @@ export async function spentScoreByUser(client: PublicClient, openBlock: bigint):
   if (openBlock === 0n) return spent;
   const toBlock = openBlock - 1n;
 
-  const sets = await client.getLogs({ address: CONFIG.registry, event: PAYOUT_MODULE_SET, fromBlock: 0n, toBlock });
+  const sets = await client.getLogs({ address: CONFIG.registry, event: DEFI_INSURANCE_SET, fromBlock: 0n, toBlock });
   const modules = new Map<string, `0x${string}`>();
   for (const s of sets) {
     const m = s.args.newModule as `0x${string}`;

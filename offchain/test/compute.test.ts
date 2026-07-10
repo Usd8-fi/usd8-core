@@ -65,7 +65,7 @@ function baseOpts(assetBalance: bigint) {
     boosterCollection: BOOSTER,
     boosterId: 1n,
     spentOf: (_u: `0x${string}`) => 0n,
-    maxPayoutBps: 10_000n, // no per-incident cap by default; a dedicated test exercises it
+    maxCoverPoolPayoutBps: 10_000n, // no per-incident cap by default; a dedicated test exercises it
   };
 }
 
@@ -100,7 +100,7 @@ describe("settle — payout math", () => {
     setEarned();
     // Scarce pool ($100) would pay $60/$40 = the whole pool, but a 80% cap limits
     // the incident to $80 total; both claims are haircut pro-rata (×80/100).
-    const s = await settle({} as any, 1n, cfg, events, { ...baseOpts(100n * WAD), maxPayoutBps: 8000n });
+    const s = await settle({} as any, 1n, cfg, events, { ...baseOpts(100n * WAD), maxCoverPoolPayoutBps: 8000n });
     expect(s.rows.map((r) => r.payoutUsd)).toEqual([48n * WAD, 32n * WAD]);
     expect(s.rows.map((r) => r.amounts)).toEqual([[48n * WAD], [32n * WAD]]);
     expect(s.poolPayouts).toEqual([80n * WAD]); // = balance × 80%, the on-chain cap
@@ -136,16 +136,16 @@ describe("settle — payout math", () => {
     expect(s.rows[0].lossUsd).toEqual(30n * WAD);
   });
 
-  it("eligibility ends at joinBlock−1; score/price pinned to referenceBlock", async () => {
+  it("eligibility window ends at referenceBlock; score/price pinned to referenceBlock", async () => {
     setEarned();
     const opts = baseOpts(100n * WAD); // referenceBlock=100, windowEndBlock=110; joins at 105/106
     await settle({} as any, 1n, cfg, events, opts);
-    // Insured-token min-balance reads end one block before each claim's join, so
-    // the escrow transfer never slashes the min, but continuous holding right up
-    // to filing is required (closes the sell-at-par gap).
+    // Insured-token min-balance is anchored ENTIRELY pre-incident: the window ends at
+    // referenceBlock for every claim, so transfers after the incident are ignored
+    // (finalize refunds any over-escrow).
     const elig = (chain.minBalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls;
     expect(elig.map((c) => c[1])).toEqual([opts.insuredToken, opts.insuredToken]);
-    expect(elig.map((c) => c[4])).toEqual(events.map((e) => e.blockNumber - 1n)); // [104, 105]
+    expect(elig.map((c) => c[4])).toEqual(events.map(() => opts.referenceBlock)); // both end at referenceBlock (100)
     // Score integral still ends at referenceBlock — no farming score during the
     // claim window to inflate payout weight.
     const score = (chain.tokenBlockIntegral as unknown as { mock: { calls: any[][] } }).mock.calls;
@@ -218,8 +218,8 @@ describe("settle — booster cap", () => {
 
 describe("settlementTree / proofs", () => {
   const rows = [
-    { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n },
-    { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n },
+    { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n, eligibleAmount: 100n * WAD },
+    { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n, eligibleAmount: 100n * WAD },
   ];
 
   it("proofs verify against the root with the canonical leaf encoding", () => {
@@ -230,11 +230,12 @@ describe("settlementTree / proofs", () => {
     }
   });
 
-  it("root is deterministic and changes with amounts or scoreSpent", () => {
+  it("root is deterministic and changes with amounts, scoreSpent, or eligible", () => {
     const base = settlementTree(1n, rows).root;
     expect(settlementTree(1n, rows).root).toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], amounts: [61n * WAD] }, rows[1]]).root).not.toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], scoreSpent: 59n }, rows[1]]).root).not.toEqual(base);
+    expect(settlementTree(1n, [{ ...rows[0], eligibleAmount: 99n * WAD }, rows[1]]).root).not.toEqual(base);
   });
 });
 

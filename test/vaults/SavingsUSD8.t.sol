@@ -16,7 +16,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {USD8} from "../../src/USD8.sol";
 import {SavingsUSD8} from "../../src/SavingsUSD8.sol";
 import {Registry} from "../../src/Registry.sol";
-import {Managed} from "../../src/Managed.sol";
+import {RegistryManaged} from "../../src/RegistryManaged.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @dev Minimal v2 implementation used to exercise the UUPS upgrade path.
@@ -27,7 +27,7 @@ contract SavingsUSD8V2 is SavingsUSD8 {
 }
 
 contract SavingsUSD8Test is Test {
-    Registry authority;
+    Registry registry;
     USD8 usd8;
     SavingsUSD8 impl;
     SavingsUSD8 vault; // proxy
@@ -49,13 +49,15 @@ contract SavingsUSD8Test is Test {
     }
 
     function setUp() public {
-        authority = new Registry(timelock, admin, 8000);
+        registry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, admin))))
+        );
         USD8 implUSD8 = new USD8();
-        bytes memory usd8Init = abi.encodeCall(USD8.initialize, (authority, usd8Treasury));
+        bytes memory usd8Init = abi.encodeCall(USD8.initialize, (registry, usd8Treasury));
         usd8 = USD8(address(new ERC1967Proxy(address(implUSD8), usd8Init)));
 
         impl = new SavingsUSD8();
-        bytes memory init = abi.encodeCall(SavingsUSD8.initialize, (authority, usd8));
+        bytes memory init = abi.encodeCall(SavingsUSD8.initialize, (registry, usd8));
         vault = SavingsUSD8(address(new ERC1967Proxy(address(impl), init)));
     }
 
@@ -72,31 +74,51 @@ contract SavingsUSD8Test is Test {
         vm.stopPrank();
     }
 
+    /// @dev A stray direct USD8 donation is excluded from totalAssets (share price
+    ///      unchanged) and recoverable as protocol surplus via sweepToken.
+    function test_StrayDonationExcludedAndSweepable() public {
+        _depositForAlice(100e18);
+        uint256 assetsBefore = vault.totalAssets();
+        uint256 shareToAssets = vault.convertToAssets(1e18);
+
+        // Direct donation (NOT receiveProfitDistribution): lands in balanceOf only.
+        _mintUSD8To(address(vault), 30e18);
+
+        assertEq(vault.totalAssets(), assetsBefore, "donation must not inflate totalAssets");
+        assertEq(vault.convertToAssets(1e18), shareToAssets, "share price unchanged");
+
+        // The 30e18 above accounted principal is sweepable to the protocol.
+        vm.prank(timelock);
+        vault.sweepToken(usd8, admin);
+        assertEq(usd8.balanceOf(admin), 30e18, "stray donation swept");
+        assertEq(vault.totalAssets(), assetsBefore, "sweep leaves accounted assets intact");
+    }
+
     // -- Basics ------------------------------------------------------------
 
     function test_InitializeWiring() public view {
         assertEq(address(vault.asset()), address(usd8));
-        assertEq(authority.timelock(), timelock);
-        assertTrue(authority.isAdmin(admin));
+        assertEq(registry.timelock(), timelock);
+        assertTrue(registry.isAdmin(admin));
         assertEq(vault.profitMaxUnlockTime(), UNLOCK);
         assertEq(vault.name(), "Savings USD8");
         assertEq(vault.symbol(), "sUSD8");
     }
 
     function test_InitializeRejectsZeroAsset() public {
-        bytes memory init = abi.encodeCall(SavingsUSD8.initialize, (authority, USD8(address(0))));
-        vm.expectRevert(Managed.ZeroAddress.selector);
+        bytes memory init = abi.encodeCall(SavingsUSD8.initialize, (registry, USD8(address(0))));
+        vm.expectRevert(RegistryManaged.ZeroAddress.selector);
         new ERC1967Proxy(address(impl), init);
     }
 
     function test_InitializeOnlyOnce() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        vault.initialize(authority, usd8);
+        vault.initialize(registry, usd8);
     }
 
     function test_ImplementationDisabled() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(authority, usd8);
+        impl.initialize(registry, usd8);
     }
 
     function test_SetProfitMaxUnlockTime() public {
@@ -202,7 +224,7 @@ contract SavingsUSD8Test is Test {
     function test_PausedBlocksAllUserActions() public {
         _depositForAlice(100e18);
         vm.prank(timelock);
-        authority.setPaused(address(vault), true);
+        registry.setPaused(address(vault), true);
 
         // All four max* views report 0 while paused.
         assertEq(vault.maxDeposit(alice), 0);
@@ -229,7 +251,7 @@ contract SavingsUSD8Test is Test {
 
         // Unpause restores deposit/redeem.
         vm.prank(timelock);
-        authority.setPaused(address(vault), false);
+        registry.setPaused(address(vault), false);
         vm.prank(alice);
         vault.redeem(100e18, alice, alice);
         assertEq(usd8.balanceOf(alice), 150e18);
@@ -238,77 +260,77 @@ contract SavingsUSD8Test is Test {
     function test_SetPausedOnlyRoles() public {
         vm.expectRevert(_unauthorizedAdmin(alice));
         vm.prank(alice);
-        authority.setPaused(address(vault), true);
+        registry.setPaused(address(vault), true);
     }
 
     function test_TimelockCanTransferTimelock() public {
         address newTimelock = address(0xC0FFEE);
 
         vm.prank(timelock);
-        authority.setTimelock(newTimelock);
+        registry.setTimelock(newTimelock);
 
-        assertEq(authority.timelock(), newTimelock);
+        assertEq(registry.timelock(), newTimelock);
 
         // Old timelock loses role-gated access (it is not admin either).
         vm.expectRevert(_unauthorizedAdmin(timelock));
         vm.prank(timelock);
-        authority.setPaused(address(vault), true);
+        registry.setPaused(address(vault), true);
 
         vm.prank(newTimelock);
-        authority.setPaused(address(vault), true);
-        assertTrue(authority.paused(address(vault)));
+        registry.setPaused(address(vault), true);
+        assertTrue(registry.paused(address(vault)));
     }
 
     function test_NonTimelockCannotTransferTimelock() public {
         vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
-        authority.setTimelock(alice);
+        registry.setTimelock(alice);
     }
 
     function test_SetTimelockRejectsZero() public {
         vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        authority.setTimelock(address(0));
+        registry.setTimelock(address(0));
     }
 
     function test_TimelockCanSetAdmin() public {
         address newAdmin = address(0xC0FFEE);
 
         vm.prank(timelock);
-        authority.setAdmin(newAdmin, true);
-        assertTrue(authority.isAdmin(newAdmin));
+        registry.setAdmin(newAdmin, true);
+        assertTrue(registry.isAdmin(newAdmin));
 
         // New admin holds the fast role (setPaused is admin-or-timelock).
         vm.prank(newAdmin);
-        authority.setPaused(address(vault), true);
+        registry.setPaused(address(vault), true);
 
         // Timelock can remove an admin; the removed one loses access.
         vm.prank(timelock);
-        authority.setAdmin(admin, false);
+        registry.setAdmin(admin, false);
         vm.expectRevert(_unauthorizedAdmin(admin));
         vm.prank(admin);
-        authority.setPaused(address(vault), false);
+        registry.setPaused(address(vault), false);
     }
 
     function test_NonTimelockCannotSetAdmin() public {
         vm.expectRevert(_unauthorizedTimelock(alice));
         vm.prank(alice);
-        authority.setAdmin(alice, true);
+        registry.setAdmin(alice, true);
     }
 
     function test_SetAdminRejectsZero() public {
         vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        authority.setAdmin(address(0), true);
+        registry.setAdmin(address(0), true);
     }
 
     function test_PauseCanBeCleared() public {
         vm.startPrank(timelock);
-        authority.setPaused(address(vault), true);
+        registry.setPaused(address(vault), true);
         // The unpause path must always be reachable, even while paused.
-        authority.setPaused(address(vault), false);
+        registry.setPaused(address(vault), false);
         vm.stopPrank();
-        assertFalse(authority.paused(address(vault)));
+        assertFalse(registry.paused(address(vault)));
     }
 
     // -- Sweep -------------------------------------------------------------
@@ -323,7 +345,7 @@ contract SavingsUSD8Test is Test {
         // The underlying asset is protected (cap 0).
         _depositForAlice(100e18);
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(Managed.NothingToSweep.selector, address(usd8)));
+        vm.expectRevert(abi.encodeWithSelector(RegistryManaged.NothingToSweep.selector, address(usd8)));
         vault.sweepToken(IERC20(address(usd8)), alice);
     }
 

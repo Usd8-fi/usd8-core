@@ -2,7 +2,7 @@
 // recomputable by anyone from on-chain state at the incident's openBlock, which
 // is what the dispute window verifies.
 
-import { type PublicClient } from "viem";
+import { type PublicClient, keccak256, encodePacked } from "viem";
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
 import {
   WAD,
@@ -44,6 +44,9 @@ export interface Settlement {
   twapRatio: bigint;
   root: `0x${string}`; // merkle root over the payout-table leaves (see settlementTree)
   poolOrder: `0x${string}`[]; // pool asset addresses, aligned to `amounts`
+  poolAddrs: `0x${string}`[]; // pool CONTRACT addresses, SAME order/index as poolOrder — the on-chain
+  // incidentPools snapshot; amounts[i] pays poolAddrs[i]. Signed via the `pools` hash so the
+  // signature commits to the exact ordered list the payout row was computed against.
   poolPayouts: bigint[]; // total payout committed per pool (Σ amounts[i]); signed + checked ≤ cap at settle
   rows: SettledRow[];
 }
@@ -119,13 +122,14 @@ export async function settle(
     referenceBlock: bigint; // pre-incident block (Incident.referenceBlock: HWM block or admin-pinned)
     windowEndBlock: bigint;
     poolOrder: `0x${string}`[]; // pool asset addresses, aligned to the openBlock pool list
+    poolAddrs: `0x${string}`[]; // pool CONTRACT addresses, SAME order as poolOrder (= incidentPools)
     poolBalances: bigint[]; // SingleAssetCoverPool.totalAssets() per pool at windowEndBlock
     poolAssetUsd1e18: bigint[]; // USD price per whole asset token at windowEndBlock
     poolAssetDecimals: number[];
     boosterCollection: `0x${string}`; // Registry.boosterNFT() at openBlock (0 = none)
     boosterId: bigint;
     spentOf: (user: `0x${string}`) => bigint; // insurance score already spent (ScoreSpent ledger)
-    maxPayoutBps: bigint; // Registry.maxPayoutBps: per-incident cap, as a share of each pool's balance
+    maxCoverPoolPayoutBps: bigint; // Registry.maxCoverPoolPayoutBps: per-incident cap, as a share of each pool's balance
   }
 ): Promise<Settlement> {
   // Pre-incident value, anchored at Incident.referenceBlock.
@@ -142,11 +146,13 @@ export async function settle(
     .filter((e) => !events.some((c) => c.kind === "cancel" && c.claimId === e.claimId));
   const rows: SettledRow[] = [];
   for (const e of live) {
-    // Eligible = continuous min holding over [B − margin, joinBlock − 1], capped
-    // at escrow. The window ends one block BEFORE this claim's joinClaim so the
-    // escrow transfer never depresses the min, yet the claimant must have held
-    // continuously from before the incident right up to filing.
-    const minHeld = await minBalanceOver(client, opts.insuredToken, e.user, holdFrom, e.blockNumber - 1n);
+    // Eligible = min holding over [B − margin, B] (B = referenceBlock), capped at
+    // escrow. Anchored entirely PRE-INCIDENT: it proves genuine prior exposure and
+    // ignores any transfers after referenceBlock. The claimant still swaps the token
+    // in as escrow at joinClaim; finalizeClaim forfeits only `eligible` and refunds
+    // any escrow above it, so escrowing more than one's eligible (or moving tokens
+    // after the incident) is never over-charged.
+    const minHeld = await minBalanceOver(client, opts.insuredToken, e.user, holdFrom, refBlock);
     const eligible = minHeld < e.amount ? minHeld : e.amount;
     // lossUsd = eligible × TWAP ratio × underlying USD price (1e18).
     const lossUsd = (((eligible * twap) / WAD) * underlyingUsd) / 10n ** BigInt(opts.insuredDecimals);
@@ -208,12 +214,12 @@ export async function settle(
     r.payoutUsd = share < cap ? share : cap;
   }
 
-  // Per-incident LP-loss cap (Registry.maxPayoutBps). Payouts are apportioned
+  // Per-incident LP-loss cap (Registry.maxCoverPoolPayoutBps). Payouts are apportioned
   // pro-rata to each pool's balance, so capping the aggregate USD payout at
   // poolUsd × bps caps every pool at balance × bps — matching each pool's on-chain
   // maxPayoutPerIncident, which settleIncident checks poolPayouts against. Haircut
   // all claims uniformly if the raw total would exceed it.
-  const maxTotalUsd = (poolUsd * opts.maxPayoutBps) / BPS;
+  const maxTotalUsd = (poolUsd * opts.maxCoverPoolPayoutBps) / BPS;
   const rawTotalUsd = rows.reduce((a, r) => a + r.payoutUsd, 0n);
   if (rawTotalUsd > maxTotalUsd && rawTotalUsd > 0n) {
     for (const r of rows) r.payoutUsd = (r.payoutUsd * maxTotalUsd) / rawTotalUsd;
@@ -234,6 +240,7 @@ export async function settle(
     twapRatio: twap,
     root: tree.root as `0x${string}`,
     poolOrder: opts.poolOrder,
+    poolAddrs: opts.poolAddrs,
     poolPayouts,
     rows,
   };
@@ -241,18 +248,19 @@ export async function settle(
 
 // Leaf encoding — SINGLE source of truth. The on-chain leaf in
 // DefiInsurance.finalizeClaim (keccak256(bytes.concat(keccak256(abi.encode(
-// incidentId, claimId, user, amounts, scoreSpent))))) and the FFI helper both
-// mirror this exact tuple and type order; `amounts` aligns to the registered
-// pool list. Drift here breaks every on-chain proof.
-export const LEAF_ENCODING = ["uint256", "uint256", "address", "uint256[]", "uint256"] as const;
+// incidentId, claimId, user, amounts, scoreSpent, eligible))))) and the FFI helper
+// both mirror this exact tuple and type order; `amounts` aligns to the registered
+// pool list, `eligible` is the covered insured-token amount (forfeited from escrow,
+// rest refunded at finalize). Drift here breaks every on-chain proof.
+export const LEAF_ENCODING = ["uint256", "uint256", "address", "uint256[]", "uint256", "uint256"] as const;
 
 /** Build the OZ StandardMerkleTree over settlement rows using {LEAF_ENCODING}. */
 export function settlementTree(
   incidentId: bigint,
-  rows: { claimId: bigint; user: `0x${string}`; amounts: bigint[]; scoreSpent: bigint }[]
+  rows: { claimId: bigint; user: `0x${string}`; amounts: bigint[]; scoreSpent: bigint; eligibleAmount: bigint }[]
 ) {
   return StandardMerkleTree.of(
-    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent]) as unknown as any[][],
+    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent, r.eligibleAmount]) as unknown as any[][],
     LEAF_ENCODING as unknown as string[]
   );
 }
@@ -274,9 +282,16 @@ export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
 export function settlementTypedData(
   chainId: number,
   defiInsurance: `0x${string}`,
-  s: Pick<Settlement, "incidentId" | "root" | "poolPayouts">,
+  s: Pick<Settlement, "incidentId" | "root" | "poolPayouts" | "poolAddrs">,
   unresolved: bigint
 ) {
+  // The `pools` hash is taken from s.poolAddrs — the SAME ordered pool list the payout row
+  // was computed against (parallel to poolOrder) — NOT a fresh chain read. That's what makes
+  // the binding meaningful: the signature commits to the exact list used for computation, so
+  // a reordered compute-list can't silently pass. It must equal the contract's incidentPools
+  // (registry.coverPools().poolAddrs at openBlock). Hashed as solidityPacked (20-byte-per-
+  // address) to match the on-chain keccak256(abi.encodePacked(incidentPools[id])).
+  const poolsHash = keccak256(encodePacked(s.poolAddrs.map(() => "address" as const), s.poolAddrs));
   return {
     domain: { name: "DefiInsurance", version: "1", chainId, verifyingContract: defiInsurance },
     types: {
@@ -285,9 +300,10 @@ export function settlementTypedData(
         { name: "root", type: "bytes32" },
         { name: "unresolved", type: "uint256" },
         { name: "poolPayouts", type: "uint256[]" },
+        { name: "pools", type: "bytes32" },
       ],
     },
     primaryType: "Settlement",
-    message: { incidentId: s.incidentId, root: s.root, unresolved, poolPayouts: s.poolPayouts },
+    message: { incidentId: s.incidentId, root: s.root, unresolved, poolPayouts: s.poolPayouts, pools: poolsHash },
   } as const;
 }

@@ -13,7 +13,7 @@ export const CONFIG_VERSION = "3.0.0";
 export const CHAIN_ID = 1;
 
 export interface Config {
-  /** Registry — topology hub: pools(), scored tokens, boosterNFT, payout-module history. */
+  /** Registry — topology hub: coverPools(), scored tokens, boosterNFT, payout-module history. */
   registry: `0x${string}`;
   /** DefiInsurance — incidents, claims, per-incident settlement config, ScoreSpent ledger. */
   defiInsurance: `0x${string}`;

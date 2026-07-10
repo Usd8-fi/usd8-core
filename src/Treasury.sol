@@ -15,7 +15,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {USD8} from "./USD8.sol";
 import {Registry} from "./Registry.sol";
-import {Managed} from "./Managed.sol";
+import {RegistryManaged} from "./RegistryManaged.sol";
 import {IProfitDistributionReceiver} from "./interfaces/IProfitDistributionReceiver.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 
@@ -39,7 +39,7 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///         idle; admin moves it via {depositToStrategy}/{withdrawFromStrategy}. Redeem spends idle
 ///         first, then walks the list in order — the array is the withdrawal-priority queue.
 /// @custom:security-contact rick@usd8.fi
-contract Treasury is ReentrancyGuardTransient, Managed {
+contract Treasury is ReentrancyGuardTransient, RegistryManaged {
     using SafeERC20 for IERC20;
 
     /// @notice How harvested USD8 revenue is routed to a recipient.
@@ -192,10 +192,10 @@ contract Treasury is ReentrancyGuardTransient, Managed {
 
     /// @param _usd8       The USD8 token. This Treasury must be set as
     ///                    USD8's treasury address for mint/redeem.
-    /// @param _authority  Shared access + pause registry (holds timelock/admin).
-    constructor(USD8 _usd8, Registry _authority) {
+    /// @param _registry  Shared access + pause registry (holds timelock/admin).
+    constructor(USD8 _usd8, Registry _registry) {
         if (address(_usd8) == address(0)) revert ZeroAddress();
-        _setAuthority(_authority);
+        _setRegistry(_registry);
         usd8 = _usd8;
     }
 
@@ -244,7 +244,7 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         }
     }
 
-    // ═══════════════════════════ User operations (mint / redeem) ═══════════════════════════
+    // ─────────────────────────── User operations (mint / redeem) ───────────────────────────
 
     /// @notice Deposit USDC and mint USD8 at a 1:1 dollar peg. The caller
     ///         must have approved usdcAmount USDC to this contract.
@@ -296,7 +296,7 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         emit Redeemed(msg.sender, usd8Amount, usdcAmount);
     }
 
-    // ═══════════════════════════ Strategy management ═══════════════════════════
+    // ─────────────────────────── Strategy management ───────────────────────────
 
     /// @notice Approve a new strategy and insert it at index in the
     ///         redeem fallback withdrawal queue (strategies[0] is consulted
@@ -380,7 +380,7 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         emit WithdrawnFromStrategy(s, received);
     }
 
-    // ═══════════════════════════ Revenue harvesting & routing ═══════════════════════════
+    // ─────────────────────────── Revenue harvesting & routing ───────────────────────────
 
     /// @notice Harvest the protocol's surplus and split the entire resulting
     ///         revenue pool across the registered profit receivers by weight —
@@ -534,9 +534,9 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         revert ProfitReceiverNotFound(receiver);
     }
 
-    // ═══════════════════════════ Admin control ═══════════════════════════
+    // ─────────────────────────── Admin control ───────────────────────────
 
-    /// @dev Rescuable via {Managed-rescueToken}: any stray token EXCEPT the
+    /// @dev Rescuable via {RegistryManaged-rescueToken}: any stray token EXCEPT the
     ///      reserve asset ({USDC}) and the harvested-revenue token ({usd8}),
     ///      which are protected (cap 0). Their normal exits are redeem/strategy
     ///      flows (USDC) and {distributeRevenue} (USD8).
@@ -545,7 +545,7 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         return IERC20(token).balanceOf(address(this));
     }
 
-    // ═══════════════════════════ Views ═══════════════════════════
+    // ─────────────────────────── Views ───────────────────────────
 
     /// @notice Total USDC-denominated reserve controlled by this Treasury.
     ///         Sums the Treasury's idle USDC balance plus the reported
@@ -580,7 +580,7 @@ contract Treasury is ReentrancyGuardTransient, Managed {
         return profitReceivers.length;
     }
 
-    // ═══════════════════════════ Internal helpers ═══════════════════════════
+    // ─────────────────────────── Internal helpers ───────────────────────────
 
     /// @dev Ensures the Treasury holds at least amount of idle USDC. Walks
     ///      strategies in array order, re-reading the Treasury's USDC balance

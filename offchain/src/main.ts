@@ -21,7 +21,7 @@ import {
   poolsAt,
   poolTotalAssetsAt,
   boosterNftAt,
-  maxPayoutBpsAt,
+  maxCoverPoolPayoutBpsAt,
   spentScoreByUser,
   priceUsd1e18,
   decimalsOf,
@@ -56,7 +56,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
     abi: DEFI_ABI,
     functionName: "incidents",
     args: [incidentId],
-  })) as readonly [`0x${string}`, bigint, `0x${string}`, bigint, bigint, bigint, bigint, boolean];
+  })) as readonly [`0x${string}`, bigint, `0x${string}`, bigint, bigint, bigint, bigint, number, bigint];
 
   const insuredToken = inc[0];
   const windowEnd = inc[1];
@@ -78,9 +78,11 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   const cfg = await incidentConfigOf(client, insuredToken, openBlock);
   const insuredDecimals = await decimalsOf(client, insuredToken);
 
-  // Registered pool set at openBlock (frozen for the incident's life, so it
-  // equals the live list) → per-pool balances + prices at window-end. Payout
-  // rows align to this pool order.
+  // Registered pool set at openBlock (frozen for the incident's life, so it equals
+  // the live list) → per-pool balances + prices at window-end. INVARIANT: this exact
+  // order — registry.coverPools() at openBlock — is what the contract snapshotted into
+  // incidentPools, and amounts[i] pays incidentPools[i]. Never sort or reorder `assets`
+  // / `poolAddrs`; the `pools` hash in the settlement signature binds this ordering.
   const { assets, poolAddrs } = await poolsAt(client, openBlock);
   const poolBalances: bigint[] = [];
   const poolAssetUsd1e18: bigint[] = [];
@@ -95,7 +97,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   // Per-incident payout cap — read at openBlock (topology anchor); it can't change
   // mid-incident (Registry.setMaxPayoutBps is frozen-gated), so this is the same
   // value settleIncident checks the committed poolPayouts against.
-  const maxPayoutBps = await maxPayoutBpsAt(client, openBlock);
+  const maxCoverPoolPayoutBps = await maxCoverPoolPayoutBpsAt(client, openBlock);
 
   // Insurance score already spent per user, summed from ScoreSpent logs across
   // every payout module ever registered, pinned to blocks before openBlock.
@@ -112,13 +114,14 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
     referenceBlock,
     windowEndBlock,
     poolOrder: assets,
+    poolAddrs,
     poolBalances,
     poolAssetUsd1e18,
     poolAssetDecimals,
     boosterCollection,
     boosterId: BOOSTER_ID,
     spentOf,
-    maxPayoutBps,
+    maxCoverPoolPayoutBps,
   });
   return { s, onchainRoot };
 }

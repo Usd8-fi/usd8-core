@@ -17,7 +17,7 @@ import {
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Registry} from "./Registry.sol";
-import {Managed} from "./Managed.sol";
+import {RegistryManaged} from "./RegistryManaged.sol";
 
 /// @title  USD8
 /// @notice UUPS-upgradeable ERC20 stablecoin. The configured Treasury can mint
@@ -25,7 +25,7 @@ import {Managed} from "./Managed.sol";
 ///         semantics from OpenZeppelin v5.
 /// @dev    USD8 keeps authority minimal:
 ///         - timelock — the shared {Registry}'s root role; sets the Treasury
-///           address and authorizes UUPS upgrades (via {Managed-onlyTimelock}).
+///           address and authorizes UUPS upgrades (via {RegistryManaged-onlyTimelock}).
 ///         - treasury — the only account allowed to mint and burn (USD8-local,
 ///           stored here, not in {Registry}).
 ///
@@ -41,9 +41,13 @@ import {Managed} from "./Managed.sol";
 ///         - No external calls are made by mint or burn, so no reentrancy
 ///           surface is introduced beyond standard ERC20 behavior.
 /// @custom:security-contact rick@usd8.fi
-contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUpgradeable, Managed {
+contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUpgradeable, RegistryManaged {
+    // ─────────────────────────── State ───────────────────────────
+
     /// @notice Account allowed to mint and burn USD8. Intended holder: Treasury.
     address public treasury;
+
+    // ─────────────────────────── Errors / events ───────────────────────────
 
     /// @notice Thrown when a non-Treasury account tries to mint or burn.
     error UnauthorizedTreasury(address caller);
@@ -51,25 +55,27 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     /// @notice Emitted when the timelock changes the Treasury address.
     event TreasuryChanged(address indexed oldTreasury, address indexed newTreasury);
 
+    // ─────────────────────────── Constructor / initializer ───────────────────────────
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
     /// @notice Initialize the proxy. Callable exactly once.
-    /// @param  _authority      Shared access + pause registry (sets proxy storage;
+    /// @param  _registry      Shared access + pause registry (sets proxy storage;
     ///                         the impl constructor only set impl storage).
-    /// @param  initialTreasury Initial Treasury address allowed to mint/burn.
-    function initialize(Registry _authority, address initialTreasury) external initializer {
-        if (initialTreasury == address(0)) revert ZeroAddress();
+    /// @param  _treasury Initial Treasury address allowed to mint/burn.
+    function initialize(Registry _registry, address _treasury) external initializer {
+        if (_treasury == address(0)) revert ZeroAddress();
         __ERC20_init("USD8", "USD8");
         __ERC20Permit_init("USD8");
 
-        _setAuthority(_authority);
-        _setTreasury(initialTreasury);
+        _setRegistry(_registry);
+        _setTreasury(_treasury);
     }
 
-    // ═══════════════════════════ Timelock fns ═══════════════════════════
+    // ─────────────────────────── Governance (timelock) ───────────────────────────
 
     /// @notice Set the account allowed to mint and burn USD8.
     function setTreasury(address newTreasury) external onlyTimelock {
@@ -82,7 +88,7 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     ///      is also the timelock.
     function _authorizeUpgrade(address) internal view override onlyTimelock {}
 
-    // ═══════════════════════════ Treasury actions mint/burn ═══════════════════════════
+    // ─────────────────────────── Mint / burn (treasury) ───────────────────────────
 
     /// @notice Mint amount USD8 to to. Callable only by {treasury}.
     function mint(address to, uint256 amount) external onlyTreasury {
@@ -94,7 +100,7 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
         _burn(from, amount);
     }
 
-    // ═══════════════════════════ Internal helpers & modifiers ═══════════════════════════
+    // ─────────────────────────── Internal / modifiers ───────────────────────────
 
     /// @dev USD8 intentionally does NOT support ERC-2771 meta-transactions.
     ///      The treasury check uses msg.sender directly rather than
@@ -117,7 +123,7 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     /// @dev USD8 custodies no accounted tokens — it is just the ERC-20. Any
     ///      balance at this address (foreign tokens, or USD8 mis-sent to the
     ///      token contract) is stray, so the full balance is sweepable via
-    ///      {Managed-sweepToken}.
+    ///      {RegistryManaged-sweepToken}.
     function _sweepable(address token) internal view override returns (uint256) {
         return IERC20(token).balanceOf(address(this));
     }

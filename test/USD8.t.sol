@@ -26,7 +26,7 @@ contract USD8V2 is USD8 {
 }
 
 contract USD8Test is Test {
-    Registry authority;
+    Registry registry;
     USD8 impl;
     USD8 usd8; // proxy, accessed as USD8
 
@@ -40,7 +40,7 @@ contract USD8Test is Test {
     event TreasuryChanged(address indexed oldTreasury, address indexed newTreasury);
 
     function _deployProxy(address _treasury) internal returns (USD8) {
-        bytes memory init = abi.encodeCall(USD8.initialize, (authority, _treasury));
+        bytes memory init = abi.encodeCall(USD8.initialize, (registry, _treasury));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         return USD8(address(proxy));
     }
@@ -50,13 +50,17 @@ contract USD8Test is Test {
     }
 
     function setUp() public {
-        authority = new Registry(timelock, timelock, 8000); // USD8 uses only the timelock role
+        registry = Registry(
+            address(
+                new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, timelock)))
+            )
+        ); // USD8 uses only the timelock role
         impl = new USD8();
         usd8 = _deployProxy(treasury);
     }
 
-    function test_AuthorityWiring() public view {
-        assertEq(authority.timelock(), timelock);
+    function test_RegistryWiring() public view {
+        assertEq(registry.timelock(), timelock);
         assertEq(usd8.treasury(), treasury);
     }
 
@@ -91,13 +95,13 @@ contract USD8Test is Test {
 
     function test_InitializeOnlyOnce() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        usd8.initialize(authority, treasury);
+        usd8.initialize(registry, treasury);
     }
 
     function test_ImplementationDisabled() public {
         // Direct calls to the implementation must not be initializable.
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(authority, treasury);
+        impl.initialize(registry, treasury);
     }
 
     function test_MintToZeroReverts() public {
@@ -147,11 +151,11 @@ contract USD8Test is Test {
 
     function test_TimelockCanBeTransferred() public {
         vm.prank(timelock);
-        vm.expectEmit(true, true, false, true, address(authority));
+        vm.expectEmit(true, true, false, true, address(registry));
         emit TimelockChanged(timelock, newTimelock);
-        authority.setTimelock(newTimelock);
+        registry.setTimelock(newTimelock);
 
-        assertEq(authority.timelock(), newTimelock);
+        assertEq(registry.timelock(), newTimelock);
 
         // Old timelock can no longer act (setTreasury is onlyTimelock).
         vm.expectRevert(_unauthorizedTimelock(timelock));
@@ -166,13 +170,13 @@ contract USD8Test is Test {
     function test_SetTimelockRejectsZero() public {
         vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        authority.setTimelock(address(0));
+        registry.setTimelock(address(0));
     }
 
     function test_NonTimelockCannotSetTimelock() public {
         vm.expectRevert(_unauthorizedTimelock(treasury));
         vm.prank(treasury);
-        authority.setTimelock(newTimelock);
+        registry.setTimelock(newTimelock);
     }
 
     function test_SweepStrayToken() public {

@@ -48,30 +48,26 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///
 ///  1. TIMELOCK DELAY < DISPUTE_PERIOD. The governance timelock's minDelay
 ///     must be strictly less than DefiInsurance.DISPUTE_PERIOD, so a
-///     timelock-initiated closeIncident can still execute inside the
-///     dispute window. Otherwise a bad root cannot be vetoed in time.
+///     timelock-initiated disputeIncident/closeIncident can still execute
+///     inside the dispute window. (Admin can act with no delay regardless;
+///     this covers the timelock-only route.) Otherwise a bad root cannot be
+///     disputed in time.
 ///
-///  2. SEED EVERY COVER POOL, NEVER WITHDRAWN. When a pool is registered, the
-///     team must stake a permanent amount that is never unstaked, so the pool's
-///     earning base stays > 0 forever. This keeps reward emission from ever
-///     stranding (the empty-pool carry-forward edge never triggers) and prevents
-///     the pool from being share-drained to a bricked state.
-///
-///  3. KEEP A PAYOUT MODULE SET IN NORMAL OPS. The timelock replaces the module
-///     via {Registry.setPayoutModule}. Clearing it to zero is reserved as the
+///  2. KEEP A PAYOUT MODULE SET IN NORMAL OPS. The timelock replaces the module
+///     via {Registry.setDefiInsurance}. Clearing it to zero is reserved as the
 ///     emergency brake for a module stuck reporting an incident — outside that,
 ///     never leave the slot empty.
 ///
-///  4. NO DEFIINSURANCE WIRING CHANGES DURING AN ACTIVE INCIDENT. Do not
+///  3. NO DEFIINSURANCE WIRING CHANGES DURING AN ACTIVE INCIDENT. Do not
 ///     change/upgrade or re-point the DefiInsurance payout module registered
 ///     while an incident is in flight.
 ///
-///  5. ONE INCIDENT AT A TIME — WAIT OUT FINALIZATION. Do not open a new
+///  4. ONE INCIDENT AT A TIME — WAIT OUT FINALIZATION. Do not open a new
 ///     incident until the prior incident's finalization window has fully
 ///     closed. Keeps incidents cleanly isolated (the pool is only ever frozen
 ///     for / paid out of a single incident at once).
 ///
-///  6. setTimelock IS IRREVERSIBLE — TRIPLE-CHECK THE ADDRESS. setTimelock is
+///  5. setTimelock IS IRREVERSIBLE — TRIPLE-CHECK THE ADDRESS. setTimelock is
 ///     single-step, and the timelock holds upgrade authority for USD8 + SavingsUSD8
 ///     (UUPS) and owns the pool beacon (all pools upgrade through it). A wrong or
 ///     typo'd address permanently and unrecoverably loses governance AND
@@ -114,19 +110,6 @@ contract DeployScript is Script {
     ///         wstETH to underwrite coverage; rewarded in USD8.
     address constant WSTETH = 0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0;
 
-    /// @notice Permanent seed for the wstETH cover pool: the matching shares are
-    ///         burned to an uncontrollable sink so totalShares stays > 0 for good
-    ///         (profit distribution never hits NoEligibleStakers). Deployer must
-    ///         hold at least this much wstETH at run time (~0.01 wstETH).
-    uint256 constant WSTETH_SEED = 0.01e18;
-
-    /// @notice Universal per-incident payout cap (bps): a single incident can pay at
-    ///         most this share of a cover pool's balance, so LPs never lose it all at
-    ///         once (and the pool can't be drained to zero). Admin-updatable via
-    ///         {Registry.setMaxPayoutBps} between incidents — CONFIRM before mainnet.
-    ///         5000 = 50%.
-    uint256 constant MAX_PAYOUT_BPS = 5000;
-
     /// @notice ERC-4626 USDC vaults for the two launch Treasury strategies (Aave +
     ///         Morpho). Each reports asset() == USDC (checked on mainnet), which the
     ///         ERC4626Strategy constructor also enforces. Override per-run via env
@@ -139,7 +122,7 @@ contract DeployScript is Script {
     address constant MORPHO_USDC_VAULT = 0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB;
 
     struct Deployed {
-        Registry authority;
+        Registry registry;
         address usd8Impl;
         USD8 usd8;
         Treasury treasury;
@@ -168,17 +151,22 @@ contract DeployScript is Script {
         // Central access + pause registry. Deployer is timelock AND initial admin
         // for setup; roles are handed to governance on the Registry in
         // _handOffRoles. Every contract below takes this as an immutable.
-        d.authority = new Registry(deployer, deployer, MAX_PAYOUT_BPS);
+        // Registry is UUPS-upgradeable (impl + ERC-1967 proxy), timelock-gated upgrades.
+        // maxCoverPoolPayoutBps defaults to 50% in initialize.
+        d.registry = Registry(
+            address(
+                new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (deployer, deployer)))
+            )
+        );
 
         // USD8 impl + ERC-1967 proxy. Deployer is placeholder treasury so we can
         // wire the real Treasury below.
         USD8 impl = new USD8();
         d.usd8Impl = address(impl);
-        d.usd8 =
-            USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (d.authority, deployer)))));
+        d.usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (d.registry, deployer)))));
 
         // Treasury.
-        d.treasury = new Treasury(d.usd8, d.authority);
+        d.treasury = new Treasury(d.usd8, d.registry);
 
         // Flip USD8's mint/burn permission to Treasury so the seed mint goes
         // through the normal USDC-backed mint path (no unbacked supply).
@@ -193,7 +181,7 @@ contract DeployScript is Script {
         d.savingsImpl = address(savingsImpl);
         SavingsSeeder savingsSeeder = new SavingsSeeder();
         d.treasury.USDC().transfer(address(savingsSeeder), SEED_USDC);
-        d.savings = savingsSeeder.run(address(savingsImpl), d.authority, d.usd8, d.treasury, SEED_USDC, SEED_SINK);
+        d.savings = savingsSeeder.run(address(savingsImpl), d.registry, d.usd8, d.treasury, SEED_USDC, SEED_SINK);
 
         // SingleAssetCoverPool implementation behind a shared UpgradeableBeacon (owner
         // = deployer, handed to the timelock in _handOffRoles). One beacon upgrade
@@ -204,24 +192,31 @@ contract DeployScript is Script {
         d.poolBeacon = address(beacon);
         IERC20 wsteth = IERC20(WSTETH);
 
-        // Deploy AND seed the pool atomically (CoverPoolSeeder, one tx) so the
-        // permissionless one-time seed() can't be front-run between proxy creation
-        // and seeding. Until seeded the pool is inert (stake reverts NotSeeded); the
-        // seed locks WSTETH_SEED of wstETH (shares to an uncontrollable sink) so the
-        // pool always has stakers. Fund the seeder, then run it. Deployer must hold
-        // the wstETH; see {WSTETH_SEED}. Register only after it's seeded.
-        CoverPoolSeeder poolSeeder = new CoverPoolSeeder();
-        wsteth.transfer(address(poolSeeder), WSTETH_SEED);
-        d.wstethPool = poolSeeder.run(address(beacon), d.authority, wsteth, IERC20(address(d.usd8)), WSTETH_SEED);
+        // Deploy the pool beacon proxy. No seed step: totalAssets is tracked accounting
+        // (not balanceOf), so donations can't inflate price-per-share, and per-share
+        // value only ever falls (on payout) — the first-depositor inflation attack has
+        // no foothold. The OZ-style +1 virtual offset in stake/completeUnstake covers
+        // the total-loss edge without locking capital. The pool is live on init.
+        d.wstethPool = SingleAssetCoverPool(
+            address(
+                new BeaconProxy(
+                    address(beacon),
+                    abi.encodeCall(
+                        SingleAssetCoverPool.initialize,
+                        (d.registry, wsteth, IERC20(address(d.usd8)), "USD8 wstETH Cover", "cpwstETH")
+                    )
+                )
+            )
+        );
 
-        d.authority.addPool(wsteth, address(d.wstethPool));
+        d.registry.addPool(address(d.wstethPool));
 
         // Scored tokens + booster live on the Registry. sUSD8 earns 10× plain USD8;
         // scoring starts now.
         uint64 scoreStart = uint64(block.number);
-        d.authority.setScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE, scoreStart);
-        d.authority.setScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE, scoreStart);
-        d.authority.setBoosterNFT(USD8_BOOSTER);
+        d.registry.setScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE, scoreStart);
+        d.registry.setScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE, scoreStart);
+        d.registry.setBoosterNFT(USD8_BOOSTER);
 
         // Route Treasury profit to the pool (vesting-aware receiver).
         d.treasury
@@ -233,8 +228,8 @@ contract DeployScript is Script {
         // Insured tokens (incl. USD8 itself, once a token→underlying valuation recipe
         // is chosen) are left for governance via addInsuredToken, and the TEE
         // open-signer via setTeeSigner.
-        d.defiInsurance = new DefiInsurance(d.authority);
-        d.authority.setPayoutModule(address(d.defiInsurance));
+        d.defiInsurance = new DefiInsurance(d.registry);
+        d.registry.setDefiInsurance(address(d.defiInsurance));
 
         // Treasury yield strategies: Aave + Morpho, each an ERC4626Strategy over a
         // USDC ERC-4626 vault (constructor reverts unless asset() == USDC). Added to
@@ -258,14 +253,14 @@ contract DeployScript is Script {
         // the timelock LAST (after which the deployer can no longer touch it). Skip
         // the drop when deployer == admin (the documented single-EOA config) — else
         // the two calls cancel out and the system launches with an EMPTY admin set.
-        d.authority.setAdmin(admin, true);
-        if (deployer != admin) d.authority.setAdmin(deployer, false);
-        d.authority.setTimelock(admin);
+        d.registry.setAdmin(admin, true);
+        if (deployer != admin) d.registry.setAdmin(deployer, false);
+        d.registry.setTimelock(admin);
     }
 
     function _logResults(Deployed memory d, address admin) internal pure {
         console2.log("=== Registry ===");
-        console2.log("Address:           ", address(d.authority));
+        console2.log("Address:           ", address(d.registry));
         console2.log("");
         console2.log("=== USD8 ===");
         console2.log("Implementation:    ", d.usd8Impl);
@@ -295,34 +290,6 @@ contract DeployScript is Script {
     }
 }
 
-/// @notice One-shot deployer that creates a cover-pool beacon proxy AND supplies
-///         its permanent seed in a SINGLE transaction, so the permissionless
-///         {SingleAssetCoverPool.seed} can't be front-run in the gap between proxy
-///         creation and seeding (the pool does not exist until {run}). Fund this
-///         with the seed asset first; {run} is owner-only so the funds can't be
-///         hijacked, and it seeds in-place before returning the pool.
-contract CoverPoolSeeder {
-    address private immutable owner;
-
-    constructor() {
-        owner = msg.sender;
-    }
-
-    function run(address beacon, Registry authority, IERC20 asset, IERC20 reward, uint256 seedAmount)
-        external
-        returns (SingleAssetCoverPool pool)
-    {
-        require(msg.sender == owner, "CoverPoolSeeder: not owner");
-        pool = SingleAssetCoverPool(
-            address(
-                new BeaconProxy(beacon, abi.encodeCall(SingleAssetCoverPool.initialize, (authority, asset, reward)))
-            )
-        );
-        asset.approve(address(pool), seedAmount);
-        pool.seed(seedAmount);
-    }
-}
-
 /// @notice One-shot deployer that creates the SavingsUSD8 UUPS proxy AND makes the
 ///         seed deposit (dead shares to `sink`) in a SINGLE transaction, so the
 ///         first-depositor seed can't be front-run (the vault does not exist until
@@ -335,13 +302,13 @@ contract SavingsSeeder {
         owner = msg.sender;
     }
 
-    function run(address savingsImpl, Registry authority, USD8 usd8, Treasury treasury, uint256 seedUsdc, address sink)
+    function run(address savingsImpl, Registry registry, USD8 usd8, Treasury treasury, uint256 seedUsdc, address sink)
         external
         returns (SavingsUSD8 savings)
     {
         require(msg.sender == owner, "SavingsSeeder: not owner");
         savings = SavingsUSD8(
-            address(new ERC1967Proxy(savingsImpl, abi.encodeCall(SavingsUSD8.initialize, (authority, usd8))))
+            address(new ERC1967Proxy(savingsImpl, abi.encodeCall(SavingsUSD8.initialize, (registry, usd8))))
         );
         treasury.USDC().approve(address(treasury), seedUsdc);
         treasury.mintUSD8(seedUsdc); // mints fully-backed USD8 to this contract

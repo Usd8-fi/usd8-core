@@ -22,7 +22,7 @@ import {
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import {USD8} from "./USD8.sol";
 import {Registry} from "./Registry.sol";
-import {Managed} from "./Managed.sol";
+import {RegistryManaged} from "./RegistryManaged.sol";
 import {IProfitDistributionReceiver} from "./interfaces/IProfitDistributionReceiver.sol";
 
 /// @title  SavingsUSD8 (sUSD8) v1
@@ -44,7 +44,7 @@ contract SavingsUSD8 is
     ERC20PermitUpgradeable,
     ReentrancyGuardTransient,
     UUPSUpgradeable,
-    Managed,
+    RegistryManaged,
     IProfitDistributionReceiver
 {
     using SafeERC20 for IERC20;
@@ -77,6 +77,14 @@ contract SavingsUSD8 is
     ///         but the window must be nonzero.
     uint64 public profitMaxUnlockTime;
 
+    /// @notice USD8 the vault accounts as its own: deposited principal plus all
+    ///         profit ever distributed (via {receiveProfitDistribution}), net of
+    ///         withdrawals. Internal accounting instead of balanceOf, so a stray
+    ///         direct USD8 donation is NOT counted — it never touches share price and
+    ///         is instead recoverable as protocol surplus via {RegistryManaged-sweepToken}.
+    ///         {totalAssets} = this minus the still-unvested portion.
+    uint256 private _accountedAssets;
+
     // ─────────────────────────── Errors ──────────────────────────
 
     error ZeroAmount();
@@ -104,14 +112,14 @@ contract SavingsUSD8 is
     }
 
     /// @notice Initialize the proxy. Callable once.
-    /// @param _authority  Shared access + pause registry (holds timelock/admin).
+    /// @param _registry  Shared access + pause registry (holds timelock/admin).
     /// @param _usd8       The USD8 token (underlying asset).
-    function initialize(Registry _authority, USD8 _usd8) external initializer {
+    function initialize(Registry _registry, USD8 _usd8) external initializer {
         if (address(_usd8) == address(0)) revert ZeroAddress();
         __ERC20_init("Savings USD8", "sUSD8");
         __ERC20Permit_init("Savings USD8");
         __ERC4626_init(IERC20(address(_usd8)));
-        _setAuthority(_authority);
+        _setRegistry(_registry);
         profitMaxUnlockTime = DEFAULT_PROFIT_MAX_UNLOCK_TIME;
     }
 
@@ -141,7 +149,7 @@ contract SavingsUSD8 is
         }
     }
 
-    // ═══════════════════════════ Profit distribution ═══════════════════════════
+    // ─────────────────────────── Profit distribution ───────────────────────────
 
     /// @notice Receive amount of USD8 as profit distribution. Pulls
     ///         atomically via transferFrom (caller must approve). The
@@ -185,13 +193,14 @@ contract SavingsUSD8 is
         pendingProfit = uint128(newPending);
         profitStartTime = uint64(block.timestamp);
         profitEndTime = newEndTime;
+        _accountedAssets += amount; // official inflow — accrues to holders as it vests
 
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
 
         emit ProfitReported(msg.sender, amount, newPending, newEndTime);
     }
 
-    // ═══════════════════════════ Vesting math ═══════════════════════════
+    // ─────────────────────────── Vesting math ───────────────────────────
 
     /// @notice Current unvested profit. Decreases linearly to zero as
     ///         block.timestamp advances toward profitEndTime.
@@ -208,19 +217,37 @@ contract SavingsUSD8 is
         return uint256(pendingProfit) - vested;
     }
 
-    /// @notice Total assets recognized by the vault for ERC4626 math: idle USD8
-    ///         minus the still-unvested portion of reported profit. Because the
-    ///         unvested portion is excluded here, no withdrawal can spend below
-    ///         it, so the buffer never underflows.
+    /// @notice Total assets recognized by the vault for ERC4626 math: internally
+    ///         accounted USD8 ({_accountedAssets} = principal + distributed profit)
+    ///         minus the still-unvested portion of reported profit. Uses internal
+    ///         accounting rather than balanceOf, so a stray direct donation is
+    ///         excluded (never inflates share price; swept as surplus). Because the
+    ///         unvested portion is excluded here, no withdrawal can spend below it, so
+    ///         the buffer never underflows.
     function totalAssets() public view override returns (uint256) {
-        return IERC20(asset()).balanceOf(address(this)) - _unvestedProfit();
+        return _accountedAssets - _unvestedProfit();
+    }
+
+    /// @dev Keep {_accountedAssets} in lockstep with ERC4626 deposit/withdraw so
+    ///      totalAssets tracks only official inflows, never a stray donation.
+    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+        super._deposit(caller, receiver, assets, shares);
+        _accountedAssets += assets;
+    }
+
+    function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)
+        internal
+        override
+    {
+        _accountedAssets -= assets;
+        super._withdraw(caller, receiver, owner, assets, shares);
     }
 
     function decimals() public view override(ERC20Upgradeable, ERC4626Upgradeable) returns (uint8) {
         return super.decimals();
     }
 
-    // ═══════════════════════════ Admin ═══════════════════════════
+    // ─────────────────────────── Admin ───────────────────────────
 
     /// @notice Set the vesting window applied to future profit reports.
     ///         Timelock only — a fast key that could shrink the window to
@@ -235,15 +262,18 @@ contract SavingsUSD8 is
         profitMaxUnlockTime = newTime;
     }
 
-    /// @dev Rescuable via {Managed-sweepToken}: any stray token EXCEPT the
-    ///      underlying ({asset}), which backs depositor shares and is protected
-    ///      (cap 0). Direct donations of the underlying accrue to share price.
+    /// @dev Rescuable via {RegistryManaged-sweepToken}: balance ABOVE what the vault
+    ///      accounts for. For the underlying ({asset}) that is any balance beyond
+    ///      {_accountedAssets} (principal + distributed profit) — i.e. stray direct
+    ///      donations, which are excluded from totalAssets and so never back shares.
+    ///      For any other token, the full balance is stray.
     function _sweepable(address token) internal view override returns (uint256) {
-        if (token == asset()) return 0;
-        return IERC20(token).balanceOf(address(this));
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (token == asset()) return bal > _accountedAssets ? bal - _accountedAssets : 0;
+        return bal;
     }
 
-    // ═══════════════════════════ ERC4626 entry points ═══════════════════════════
+    // ─────────────────────────── ERC4626 entry points ───────────────────────────
 
     /// @dev nonReentrant on all four user-facing entry points: USD8 is itself
     ///      UUPS-upgradeable, so a future transfer hook can't open a reentrancy
@@ -293,22 +323,22 @@ contract SavingsUSD8 is
     }
 
     function maxDeposit(address receiver) public view override returns (uint256) {
-        if (authority.paused(address(this))) return 0;
+        if (registry().paused(address(this))) return 0;
         return super.maxDeposit(receiver);
     }
 
     function maxMint(address receiver) public view override returns (uint256) {
-        if (authority.paused(address(this))) return 0;
+        if (registry().paused(address(this))) return 0;
         return super.maxMint(receiver);
     }
 
     function maxWithdraw(address owner) public view override returns (uint256) {
-        if (authority.paused(address(this))) return 0;
+        if (registry().paused(address(this))) return 0;
         return super.maxWithdraw(owner);
     }
 
     function maxRedeem(address owner) public view override returns (uint256) {
-        if (authority.paused(address(this))) return 0;
+        if (registry().paused(address(this))) return 0;
         return super.maxRedeem(owner);
     }
 }
