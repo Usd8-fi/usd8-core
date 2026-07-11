@@ -10,6 +10,7 @@
 pragma solidity 0.8.28;
 
 import {Script, console2} from "forge-std/Script.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
@@ -31,11 +32,15 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///         set on the Registry. Insured tokens and extra pools are left for
 ///         governance to add after deployment.
 ///
-/// @dev    Both roles (timelock + admin) land on a single EOA
-///         ({DEFAULT_ADMIN}) — fine for beta, MUST be migrated to a Safe +
-///         TimelockController before opening to real user volume. All deploy
-///         parameters (admin, vault addresses, rates) are hardcoded constants
-///         below — edit them in-place for a different network/signer.
+/// @dev    Governance split: the timelock role is a real OZ TimelockController
+///         (minDelay {TIMELOCK_MIN_DELAY}; sole proposer/canceller
+///         {DEFAULT_ADMIN}; open execution; self-administered — admin param
+///         address(0), so delay/role changes go through its own delayed
+///         proposals). The admin role stays the {DEFAULT_ADMIN} EOA for the
+///         fast deny-only levers (pause, disputeIncident, closeIncident) —
+///         migrate it to a Safe before real user volume. All deploy parameters
+///         (admin, vault addresses, rates) are hardcoded constants below —
+///         edit them in-place for a different network/signer.
 ///
 /// ════════════════════════════ HARD RULES ════════════════════════════
 /// Operational invariants that are NOT (all) enforced on-chain. Whoever
@@ -74,8 +79,14 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///     timelock; the timelock itself is not.)
 /// ═════════════════════════════════════════════════════════════════════
 contract DeployScript is Script {
-    /// @notice Single EOA used as timelock + admin on every contract.
+    /// @notice Governance EOA: the Registry admin (fast deny-only levers) and the
+    ///         TimelockController's sole proposer/canceller.
     address constant DEFAULT_ADMIN = 0xB2E999D531D45a9115dA7706adFc651999f3c1F1;
+
+    /// @notice TimelockController minDelay. MUST stay strictly under
+    ///         DefiInsurance.DISPUTE_PERIOD (2 days) — HARD RULE 1 — including
+    ///         any future updateDelay proposal.
+    uint256 constant TIMELOCK_MIN_DELAY = 24 hours;
 
     /// @notice USDC seeded into the protocol at deploy. Minted 1:1 into USD8
     ///         and deposited into SavingsUSD8 with the shares burned, so the
@@ -116,6 +127,7 @@ contract DeployScript is Script {
     address constant MORPHO_USDC_VAULT = 0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB;
 
     struct Deployed {
+        TimelockController timelock;
         Registry registry;
         address usd8Impl;
         USD8 usd8;
@@ -140,6 +152,18 @@ contract DeployScript is Script {
     }
 
     function _deployAndWire(address deployer) internal returns (Deployed memory d) {
+        // Governance timelock (OZ TimelockController). DEFAULT_ADMIN is the sole
+        // proposer (and thereby canceller); executors = [address(0)] opens
+        // execution to anyone once the delay has elapsed (the delay is the
+        // security, execution is mechanical); admin = address(0) so the timelock
+        // self-administers — it always holds DEFAULT_ADMIN_ROLE on itself, so
+        // updateDelay / role changes go through its own delayed proposals.
+        address[] memory proposers = new address[](1);
+        proposers[0] = DEFAULT_ADMIN;
+        address[] memory executors = new address[](1);
+        executors[0] = address(0);
+        d.timelock = new TimelockController(TIMELOCK_MIN_DELAY, proposers, executors, address(0));
+
         // Central access + pause registry. Deployer is timelock AND initial admin
         // for setup; roles are handed to governance on the Registry in
         // _handOffRoles. Every contract below takes this as an immutable.
@@ -235,20 +259,29 @@ contract DeployScript is Script {
 
     function _handOffRoles(Deployed memory d, address deployer, address admin) internal {
         // The pool beacon is Ownable (holds upgrade authority for every pool) —
-        // transfer it to governance before dropping deployer roles.
-        UpgradeableBeacon(d.poolBeacon).transferOwnership(admin);
+        // it belongs to the TIMELOCK (all upgrades are delayed), transferred
+        // before dropping deployer roles.
+        UpgradeableBeacon(d.poolBeacon).transferOwnership(address(d.timelock));
 
         // All access roles live on the single Registry. Hand off there once: grant
         // the governance admin, drop the deployer's bootstrap admin, then transfer
         // the timelock LAST (after which the deployer can no longer touch it). Skip
-        // the drop when deployer == admin (the documented single-EOA config) — else
-        // the two calls cancel out and the system launches with an EMPTY admin set.
+        // the drop when deployer == admin — else the two calls cancel out and the
+        // system launches with an EMPTY admin set. setTimelock is IRREVERSIBLE
+        // (HARD RULE 5): d.timelock is a contract this script just constructed
+        // with known-good roles, which is exactly the verification that rule asks for.
         d.registry.setAdmin(admin, true);
         if (deployer != admin) d.registry.setAdmin(deployer, false);
-        d.registry.setTimelock(admin);
+        d.registry.setTimelock(address(d.timelock));
     }
 
     function _logResults(Deployed memory d, address admin) internal pure {
+        console2.log("=== TimelockController ===");
+        console2.log("Address:           ", address(d.timelock));
+        console2.log("minDelay:          ", TIMELOCK_MIN_DELAY);
+        console2.log("Proposer/canceller:", admin);
+        console2.log("Executor:           open (anyone after delay)");
+        console2.log("");
         console2.log("=== Registry ===");
         console2.log("Address:           ", address(d.registry));
         console2.log("");
@@ -275,7 +308,7 @@ contract DeployScript is Script {
         console2.log("=== DefiInsurance ===");
         console2.log("Address:           ", address(d.defiInsurance));
         console2.log("");
-        console2.log("=== Admin (all roles) ===");
+        console2.log("=== Admin (fast deny-only levers) ===");
         console2.log("Address:           ", admin);
     }
 }
