@@ -1,7 +1,7 @@
 // All chain reads. Plain read-only RPC calls against a public archive node.
 
 import { createPublicClient, http, parseAbi, parseAbiItem, type PublicClient } from "viem";
-import { CONFIG } from "./config.js";
+import { CONFIG, MAX_ORACLE_STALENESS } from "./config.js";
 
 export const WAD = 10n ** 18n;
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
@@ -10,7 +10,7 @@ export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as cons
 // The per-incident config is NOT snapshot on-chain — it is reconstructed by
 // reading these at the incident's openBlock (see {incidentConfigOf}).
 export const DEFI_ABI = parseAbi([
-  "function incidents(uint256) view returns (address insuredToken, uint64 claimWindowEndTime, bytes32 root, uint256 unresolved, uint64 rootSubmittedAt, uint64 referenceBlock, uint64 openBlock, uint8 status, uint64 disputedAt)",
+  "function incidents(uint256) view returns (address insuredToken, uint64 claimWindowEndTime, bytes32 root, uint256 unresolved, uint64 rootSubmittedAt, uint64 referenceBlock, uint64 openBlock, uint8 status, uint64 disputedAt, bytes32 claimSetHash)",
   "function getInsuredToken(address) view returns ((uint256 maxCoverageBps, address underlyingPriceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData))",
   "function settlementParams() view returns (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks)",
 ]);
@@ -22,6 +22,7 @@ export const REGISTRY_ABI = parseAbi([
   "function getScoredTokens() view returns ((address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[])",
   "function boosterNFT() view returns (address)",
   "function maxCoverPoolPayoutBps() view returns (uint256)",
+  "function scoreSpent(address) view returns (uint256)",
 ]);
 
 // SingleAssetCoverPool surface: per-pool asset + valuation.
@@ -34,15 +35,6 @@ export const CLAIM_REGISTERED = parseAbiItem(
   "event ClaimRegistered(uint256 indexed claimId, uint256 indexed incidentId, address indexed user, uint128 insuredTokenAmount, uint256 scoreToSpend, uint256 boosterAmount)"
 );
 export const CLAIM_CANCELLED = parseAbiItem("event ClaimCancelled(uint256 indexed claimId, address indexed user)");
-// The spent-score ledger is this event, summed per user (no on-chain state).
-export const SCORE_SPENT = parseAbiItem(
-  "event ScoreSpent(address indexed user, uint256 amount, uint256 indexed incidentId)"
-);
-// Payout-module history: enumerates every module ever registered so ScoreSpent
-// logs can be summed across all of them.
-export const DEFI_INSURANCE_SET = parseAbiItem(
-  "event DefiInsuranceSet(address indexed oldModule, address indexed newModule)"
-);
 export const ERC20_TRANSFER = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 export const ERC1155_TRANSFER_SINGLE = parseAbiItem(
   "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
@@ -192,7 +184,7 @@ export async function incidentConfigOf(
   // the others when they're added together.
   const scoredTokens: ScoredToken[] = [];
   for (const st of rawScored) {
-    scoredTokens.push({ ...st, decimals: await decimalsOf(client, st.token) });
+    scoredTokens.push({ ...st, decimals: await decimalsOf(client, st.token, openBlock) });
   }
 
   return {
@@ -251,57 +243,52 @@ export async function maxCoverPoolPayoutBpsAt(client: PublicClient, blockNumber:
 }
 
 /**
- * Insurance score already spent per user, from the ScoreSpent event ledger.
- * Sums ScoreSpent logs across EVERY payout module ever registered (enumerated
- * from the Registry's DefiInsuranceSet events), pinned to blocks strictly before
- * `openBlock`.
+ * Insurance score already spent by `user` as of `blockNumber` — one archive read
+ * of {Registry.scoreSpent}, the durable cumulative total every payout module
+ * mirrors at finalize ({DefiInsurance.finalizeClaim} → recordScoreSpent). It
+ * survives module swaps by design, so a single view replaces the old
+ * genesis-wide ScoreSpent/DefiInsuranceSet log scans (simpler, cheaper, immune
+ * to RPC getLogs range caps).
  *
- * INTENTIONAL asymmetry with earnedScoreOf, which anchors at the earlier
- * `referenceBlock` (do not "align" them): earned is capped pre-incident so score
- * can't be farmed during the claim window, but spent must subtract EVERY prior
- * commitment up to the open. Anchoring spent at referenceBlock instead would miss
- * score a user burned in (referenceBlock, openBlock] — e.g. on a prior incident
- * that finalized in that gap — and let them re-claim it (double-spend). All prior
- * incidents resolve before openBlock (one-at-a-time), so openBlock−1 captures them.
+ * Callers anchor at openBlock−1 — an INTENTIONAL asymmetry with earnedScoreOf,
+ * which anchors at the earlier `referenceBlock` (do not "align" them): earned is
+ * capped pre-incident so score can't be farmed during the claim window, but
+ * spent must subtract EVERY prior commitment up to the open. Anchoring spent at
+ * referenceBlock instead would miss score a user burned in (referenceBlock,
+ * openBlock] — e.g. on a prior incident that finalized in that gap — and let
+ * them re-claim it (double-spend). All prior incidents resolve before openBlock
+ * (one-at-a-time), so openBlock−1 captures them.
  */
-export async function spentScoreByUser(client: PublicClient, openBlock: bigint): Promise<Map<string, bigint>> {
-  const spent = new Map<string, bigint>();
-  if (openBlock === 0n) return spent;
-  const toBlock = openBlock - 1n;
-
-  const sets = await client.getLogs({ address: CONFIG.registry, event: DEFI_INSURANCE_SET, fromBlock: 0n, toBlock });
-  const modules = new Map<string, `0x${string}`>();
-  for (const s of sets) {
-    const m = s.args.newModule as `0x${string}`;
-    if (m && m !== ZERO_ADDRESS) modules.set(m.toLowerCase(), m);
-  }
-
-  for (const mod of modules.values()) {
-    const logs = await client.getLogs({ address: mod, event: SCORE_SPENT, fromBlock: 0n, toBlock });
-    for (const l of logs) {
-      const u = (l.args.user as string).toLowerCase();
-      spent.set(u, (spent.get(u) ?? 0n) + (l.args.amount as bigint));
-    }
-  }
-  return spent;
+export async function spentScoreOf(client: PublicClient, user: `0x${string}`, blockNumber: bigint): Promise<bigint> {
+  return (await client.readContract({
+    address: CONFIG.registry,
+    abi: REGISTRY_ABI,
+    functionName: "scoreSpent",
+    args: [user],
+    blockNumber,
+  })) as bigint;
 }
 
 /**
- * First block whose timestamp is ≥ `ts` (binary search). All settlement reads
- * anchor on deterministic blocks (openBlock, window-end) so the computation is
- * reproducible by anyone at any later time.
+ * Highest block whose timestamp is ≤ `ts` (binary search) — the LAST block still
+ * inside a `block.timestamp <= ts` window. The contract accepts claims while
+ * `block.timestamp <= claimWindowEndTime`, so the window-end reads must anchor on
+ * this block, not the first post-deadline one (H-02): otherwise a transfer or
+ * oracle update in the first block after the deadline could alter settlement.
+ * All settlement reads anchor on deterministic blocks (openBlock, window-end) so
+ * the computation is reproducible by anyone at any later time.
  */
-export async function blockAtTimestamp(client: PublicClient, ts: bigint): Promise<bigint> {
+export async function blockAtOrBeforeTimestamp(client: PublicClient, ts: bigint): Promise<bigint> {
   let lo = 1n;
   let hi = await client.getBlockNumber();
   if ((await client.getBlock({ blockNumber: hi })).timestamp < ts) {
     throw new Error(`timestamp ${ts} is in the future`);
   }
   while (lo < hi) {
-    const mid = (lo + hi) / 2n;
+    const mid = (lo + hi + 1n) / 2n; // upper mid: converge toward the MAX in-window block
     const t = (await client.getBlock({ blockNumber: mid })).timestamp;
-    if (t < ts) lo = mid + 1n;
-    else hi = mid;
+    if (t <= ts) lo = mid;
+    else hi = mid - 1n;
   }
   return lo;
 }
@@ -321,14 +308,6 @@ export async function ratioAt(
   const res = await client.call({ to: conversionAddress, data: conversionCallData, blockNumber });
   return BigInt(res.data ?? "0x0");
 }
-
-// Max age (seconds) a Chainlink feed's answer may have, measured at the pinned
-// block, before settlement treats it as stale and refuses to value against it
-// (audit C5). Conservative default (24h) covering long-heartbeat USD feeds; tune
-// down per-feed if all configured oracles have tighter heartbeats. A stale feed
-// throws here → no root is produced → the incident voids (escrow recoverable)
-// rather than settling on a frozen price the dispute window can't self-correct.
-const MAX_ORACLE_STALENESS = 86_400n;
 
 /**
  * USD price from a Chainlink-style oracle at `blockNumber`, normalized to 1e18.
@@ -361,8 +340,15 @@ export async function priceUsd1e18(client: PublicClient, oracle: `0x${string}`, 
   return dec <= 18n ? answer * 10n ** (18n - dec) : answer / 10n ** (dec - 18n);
 }
 
-export async function decimalsOf(client: PublicClient, token: `0x${string}`): Promise<number> {
-  return (await client.readContract({ address: token, abi: ERC20_ABI, functionName: "decimals" })) as number;
+/** Token decimals pinned to `blockNumber` (M-05): an upgradeable token changing
+ *  decimals must never alter the recomputation of an old incident. */
+export async function decimalsOf(client: PublicClient, token: `0x${string}`, blockNumber: bigint): Promise<number> {
+  return (await client.readContract({
+    address: token,
+    abi: ERC20_ABI,
+    functionName: "decimals",
+    blockNumber,
+  })) as number;
 }
 
 export async function balanceOfAt(

@@ -129,7 +129,7 @@ contract SingleAssetCoverPoolTest is Test {
     function _hasJoinableIncident(address token) internal view returns (bool) {
         uint256 active = defi.activeIncidentId();
         if (active == 0) return false;
-        (IERC20 tok, uint64 wEnd,,,,,,,) = defi.incidents(active);
+        (IERC20 tok, uint64 wEnd,,,,,,,,) = defi.incidents(active);
         return address(tok) == token && block.timestamp <= wEnd;
     }
 
@@ -164,7 +164,7 @@ contract SingleAssetCoverPoolTest is Test {
     /// @dev Relay a TEE-signed settlement root for incidentId.
     function _settle(uint256 incidentId, bytes32 root) internal {
         uint256[] memory pp = _pp();
-        defi.settleIncident(incidentId, root, pp, _teeSign(incidentId, root, pp));
+        defi.settleIncident(incidentId, root, pp, TEST_CONFIG_HASH, _teeSign(incidentId, root, pp));
     }
 
     /// @dev Payout row for the single-pool [usdc] setup.
@@ -362,7 +362,7 @@ contract SingleAssetCoverPoolTest is Test {
         uint64 refBlock = uint64(block.number - 1);
         _openSigned(address(usd8), refBlock);
         uint256 id = defi.activeIncidentId();
-        (,,,,, uint64 stored,,,) = defi.incidents(id);
+        (,,,,, uint64 stored,,,,) = defi.incidents(id);
         assertEq(stored, refBlock);
 
         vm.prank(alice);
@@ -491,7 +491,7 @@ contract SingleAssetCoverPoolTest is Test {
 
         // The incident records only its open block; off-chain reconstructs the
         // full config (recipe, params, scored-token set) from state as of it.
-        (,,,,,, uint64 openBlock,,) = defi.incidents(1);
+        (,,,,,, uint64 openBlock,,,) = defi.incidents(1);
         assertEq(openBlock, expectedOpen);
 
         // M-01: config is frozen while the incident is live, so the openBlock read
@@ -718,7 +718,7 @@ contract SingleAssetCoverPoolTest is Test {
     function test_RegisterClaimOpensIncident() public {
         uint256 cid = _registerClaim(bob, lp1, 50e18);
         assertEq(cid, 1);
-        (IERC20 tok, uint64 wEnd, bytes32 root, uint256 unresolved,,,,,) = defi.incidents(1);
+        (IERC20 tok, uint64 wEnd, bytes32 root, uint256 unresolved,,,,,,) = defi.incidents(1);
         assertEq(address(tok), address(lp1));
         assertEq(wEnd, uint64(block.timestamp) + defi.CLAIM_WINDOW());
         assertEq(root, bytes32(0));
@@ -743,7 +743,7 @@ contract SingleAssetCoverPoolTest is Test {
     function test_SecondClaimSameTokenJoinsIncident() public {
         _registerClaim(bob, lp1, 50e18);
         _registerClaim(carol, lp1, 30e18);
-        (,,, uint256 unresolved,,,,,) = defi.incidents(1);
+        (,,, uint256 unresolved,,,,,,) = defi.incidents(1);
         assertEq(unresolved, 2);
         assertEq(defi.nextIncidentId(), 2);
     }
@@ -822,7 +822,7 @@ contract SingleAssetCoverPoolTest is Test {
 
         uint256 id = defi.activeIncidentId();
         assertTrue(id != 0);
-        (IERC20 tok,,,,, uint64 stored,,,) = defi.incidents(id);
+        (IERC20 tok,,,,, uint64 stored,,,,) = defi.incidents(id);
         assertEq(address(tok), address(lp1));
         assertEq(stored, refBlock);
         assertEq(defi.activeClaimId(id, bob), cid);
@@ -892,7 +892,7 @@ contract SingleAssetCoverPoolTest is Test {
 
     function test_ClaimAfterWindowReverts() public {
         _registerClaim(bob, lp1, 50e18);
-        (, uint64 wEnd,,,,,,,) = defi.incidents(1);
+        (, uint64 wEnd,,,,,,,,) = defi.incidents(1);
         vm.warp(wEnd + 1);
 
         lp1.mint(carol, 30e18);
@@ -928,13 +928,13 @@ contract SingleAssetCoverPoolTest is Test {
         vm.prank(bob);
         defi.cancelClaim();
         assertEq(lp1.balanceOf(bob), 50e18);
-        (,,, uint256 unresolved,,,,,) = defi.incidents(1);
+        (,,, uint256 unresolved,,,,,,) = defi.incidents(1);
         assertEq(unresolved, 0); // join ++ then cancel -- back to zero
     }
 
     function test_CancelAfterWindowReverts() public {
         _registerClaim(bob, lp1, 50e18);
-        (, uint64 wEnd,,,,,,,) = defi.incidents(1);
+        (, uint64 wEnd,,,,,,,,) = defi.incidents(1);
         vm.warp(wEnd + 1);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.ClaimWindowClosed.selector, IERC20(address(lp1)), wEnd));
@@ -993,7 +993,7 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32 root = _leaf(1, cid, bob, _amounts(40e6));
         _settle(1, root);
 
-        (,, bytes32 storedRoot,,,,,,) = defi.incidents(1);
+        (,, bytes32 storedRoot,,,,,,,) = defi.incidents(1);
         assertEq(storedRoot, root);
         // amounts[] align to the (incident-stable) pool asset list.
         (IERC20[] memory list,) = registry.coverPools();
@@ -1007,7 +1007,7 @@ contract SingleAssetCoverPoolTest is Test {
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, root, pp); // precompute: expectRevert binds to the next call
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.OutsideSettlementPhase.selector, uint256(1)));
-        defi.settleIncident(1, root, pp, sig);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
     }
 
     function test_SettleAfterCutoffReverts() public {
@@ -1020,7 +1020,7 @@ contract SingleAssetCoverPoolTest is Test {
         // NotActiveIncident (before the settle-phase check) — settling too EARLY still
         // reverts OutsideSettlementPhase.
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.NotActiveIncident.selector, uint256(1)));
-        defi.settleIncident(1, root, pp, sig);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
     }
 
     /// @dev Settlement is single-shot: once a root is set, any resubmit reverts
@@ -1036,14 +1036,14 @@ contract SingleAssetCoverPoolTest is Test {
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, bytes32(uint256(2)), pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.AlreadySettled.selector, uint256(1)));
-        defi.settleIncident(1, bytes32(uint256(2)), pp, sig);
+        defi.settleIncident(1, bytes32(uint256(2)), pp, TEST_CONFIG_HASH, sig);
 
         // Nor after the dispute period elapses (finalize open) while the settle window
         // is still open — the overlap that would have reset the budget mid-payout.
         vm.warp(block.timestamp + 2 days + 1);
         sig = _teeSign(1, bytes32(uint256(2)), pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.AlreadySettled.selector, uint256(1)));
-        defi.settleIncident(1, bytes32(uint256(2)), pp, sig);
+        defi.settleIncident(1, bytes32(uint256(2)), pp, TEST_CONFIG_HASH, sig);
     }
 
     function test_SettleZeroRootReverts() public {
@@ -1052,7 +1052,7 @@ contract SingleAssetCoverPoolTest is Test {
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, bytes32(0), pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.NoStandingRoot.selector, uint256(1)));
-        defi.settleIncident(1, bytes32(0), pp, sig);
+        defi.settleIncident(1, bytes32(0), pp, TEST_CONFIG_HASH, sig);
     }
 
     function test_CloseIncidentByAdmin() public {
@@ -1136,7 +1136,7 @@ contract SingleAssetCoverPoolTest is Test {
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, root9, pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.AlreadySettled.selector, uint256(1)));
-        defi.settleIncident(1, root9, pp, sig);
+        defi.settleIncident(1, root9, pp, TEST_CONFIG_HASH, sig);
 
         // The admin brake still works during the dispute window.
         vm.prank(admin);
@@ -1170,13 +1170,13 @@ contract SingleAssetCoverPoolTest is Test {
         defi.disputeIncident();
 
         assertEq(defi.activeIncidentId(), 1); // still active ⇒ pool frozen
-        (,, bytes32 root,,,,,,) = defi.incidents(1);
+        (,, bytes32 root,,,,,,,) = defi.incidents(1);
         assertEq(root, bytes32(0)); // bad root cleared
         // A TEE re-settle is now rejected — only the timelock may re-root.
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, bytes32(uint256(9)), pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.AlreadyDisputed.selector, uint256(1)));
-        defi.settleIncident(1, bytes32(uint256(9)), pp, sig);
+        defi.settleIncident(1, bytes32(uint256(9)), pp, TEST_CONFIG_HASH, sig);
         // The pool stays frozen (redemptions gated) through the halt.
         assertTrue(registry.payoutIncidentActive());
     }
@@ -1280,6 +1280,10 @@ contract SingleAssetCoverPoolTest is Test {
 
     uint256 constant TEE_PK = 0x7EE;
 
+    /// @dev Stand-in for the settler's config commitment (M-04) — any value works
+    ///      for tests; it just has to match between the signature and the call.
+    bytes32 constant TEST_CONFIG_HASH = keccak256("test-config");
+
     /// @dev Per-pool payout caps aligned to the current pool set — the max each pool
     ///      may commit, which always satisfies settleIncident's per-pool cap check.
     function _pp() internal view returns (uint256[] memory pp) {
@@ -1293,7 +1297,7 @@ contract SingleAssetCoverPoolTest is Test {
     /// @dev EIP-712 digest for Settlement over the incident's CURRENT on-chain
     ///      unresolved count and committed per-pool payouts — mirrors settleIncident.
     function _settlementDigest(uint256 incidentId, bytes32 root, uint256[] memory pp) internal view returns (bytes32) {
-        (,,, uint256 unresolved,,,,,) = defi.incidents(incidentId);
+        (,,, uint256 unresolved,,,,,, bytes32 claimSetHash) = defi.incidents(incidentId);
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -1307,13 +1311,15 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools)"
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash)"
                 ),
                 incidentId,
                 root,
                 unresolved,
                 keccak256(abi.encodePacked(pp)),
-                keccak256(abi.encodePacked(poolAddrs))
+                keccak256(abi.encodePacked(poolAddrs)),
+                claimSetHash,
+                TEST_CONFIG_HASH
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", domain, structHash));
@@ -1396,8 +1402,8 @@ contract SingleAssetCoverPoolTest is Test {
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, root, pp);
         vm.prank(carol); // permissionless relay
-        defi.settleIncident(1, root, pp, sig);
-        (,, bytes32 stored,,,,,,) = defi.incidents(1);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
+        (,, bytes32 stored,,,,,,,) = defi.incidents(1);
         assertEq(stored, root);
     }
 
@@ -1410,7 +1416,7 @@ contract SingleAssetCoverPoolTest is Test {
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, root, pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.UnauthorizedSettlementSigner.selector, vm.addr(TEE_PK)));
-        defi.settleIncident(1, root, pp, sig);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
     }
 
     function test_SettleSignedDisabledWhenSignerUnset() public {
@@ -1422,7 +1428,7 @@ contract SingleAssetCoverPoolTest is Test {
         uint256[] memory pp = _pp();
         bytes memory sig = _teeSign(1, root, pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.UnauthorizedSettlementSigner.selector, vm.addr(TEE_PK)));
-        defi.settleIncident(1, root, pp, sig);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
     }
 
     /// @dev The signature binds the exact claim set: a root signed before a
@@ -1438,7 +1444,7 @@ contract SingleAssetCoverPoolTest is Test {
         _registerClaim(carol, lp1, 10e18); // claim set grows
         vm.warp(block.timestamp + 5 days + 1);
         vm.expectPartialRevert(DefiInsurance.UnauthorizedSettlementSigner.selector);
-        defi.settleIncident(1, root, pp, staleSig);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, staleSig);
     }
 
     // ════════════════════ Finalize ════════════════════
@@ -1511,7 +1517,7 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32 root = _hashPair(lB, lC);
         uint256[] memory pp = new uint256[](1);
         pp[0] = 80e6; // == 40 + 40, the exact leaf sum
-        defi.settleIncident(1, root, pp, _teeSign(1, root, pp));
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, _teeSign(1, root, pp));
         vm.warp(block.timestamp + 4 days + 1);
 
         bytes32[] memory pB = new bytes32[](1);
@@ -1544,7 +1550,7 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32 root = _hashPair(lB, lC);
         uint256[] memory pp = new uint256[](1);
         pp[0] = 50e6; // committed BELOW the 80e6 leaf sum — a bad root
-        defi.settleIncident(1, root, pp, _teeSign(1, root, pp));
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, _teeSign(1, root, pp));
         vm.warp(block.timestamp + 4 days + 1);
 
         bytes32[] memory pB = new bytes32[](1);
@@ -1809,12 +1815,12 @@ contract SingleAssetCoverPoolTest is Test {
         pp[0] = 80e6 + 1;
         bytes memory sig = _teeSign(1, root, pp);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.PayoutCapExceeded.selector, 0, 80e6 + 1, 80e6));
-        defi.settleIncident(1, root, pp, sig);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
 
         pp[0] = 80e6;
         sig = _teeSign(1, root, pp);
-        defi.settleIncident(1, root, pp, sig);
-        (,, bytes32 stored,,,,,,) = defi.incidents(1);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
+        (,, bytes32 stored,,,,,,,) = defi.incidents(1);
         assertEq(stored, root);
     }
 

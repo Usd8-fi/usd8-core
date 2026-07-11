@@ -68,6 +68,10 @@ contract ERC4626Strategy is IStrategy {
     /// @notice Thrown when the vault returns fewer USDC than requested.
     error WithdrawShort(uint256 requested, uint256 received);
 
+    /// @notice Thrown when a deposit mints zero shares — the funds would be
+    ///         committed with nothing tracking them (M-02).
+    error ZeroSharesMinted();
+
     /// @notice Emitted when Treasury deploys USDC into the vault.
     event Deployed(uint256 amount);
 
@@ -99,9 +103,13 @@ contract ERC4626Strategy is IStrategy {
     /// @inheritdoc IStrategy
     /// @dev Caller (Treasury) is expected to have pushed amount USDC to this
     ///      contract immediately before this call. The vault mints shares to
-    ///      this contract (receiver = address(this)).
+    ///      this contract (receiver = address(this)). Zero minted shares means
+    ///      the vault banked the USDC with nothing tracking it (fee-on-deposit,
+    ///      donation-inflated share price, or nonconforming vault) — revert so
+    ///      the reserve loss never commits (M-02).
     function deploy(uint256 amount) external onlyTreasury {
-        vault.deposit(amount, address(this));
+        uint256 shares = vault.deposit(amount, address(this));
+        if (shares == 0) revert ZeroSharesMinted();
         emit Deployed(amount);
     }
 

@@ -5,7 +5,19 @@
 // lives on-chain and is read as of each incident's openBlock, so the settlement
 // is reproducible from chain state alone. Version it.
 
-export const CONFIG_VERSION = "3.0.0";
+import { keccak256, stringToHex } from "viem";
+
+export const CONFIG_VERSION = "3.1.0";
+
+// Max age (seconds) a Chainlink feed's answer may have, measured at the pinned
+// block, before settlement treats it as stale and refuses to value against it
+// (audit C5). Conservative default (24h) covering long-heartbeat USD feeds; tune
+// down per-feed if all configured oracles have tighter heartbeats. A stale feed
+// throws → no root is produced → the incident voids (escrow recoverable) rather
+// than settling on a frozen price the dispute window can't self-correct.
+// Lives here (not chain.ts) because it is settlement POLICY — part of what
+// {configHash} commits the signer to (M-04).
+export const MAX_ORACLE_STALENESS = 86_400n;
 
 // USD8 deploys to Ethereum mainnet only. Locked here (not configurable) so the
 // tool can never be pointed at a fork/testnet with colliding addresses; the
@@ -42,4 +54,32 @@ export function assetUsdFeedOf(asset: `0x${string}`): `0x${string}` {
   const feed = CONFIG.assetUsdFeed[asset.toLowerCase()];
   if (!feed) throw new Error(`no assetUsdFeed configured for pool asset ${asset} — add it to config.ts`);
   return feed;
+}
+
+/**
+ * Commitment to every off-chain settlement input that isn't read from chain
+ * state: the software/config version, chain, contract addresses, the pool-asset
+ * feed map, and the staleness policy. Bound into the settlement signature
+ * (M-04) and emitted by settleIncident, so which config produced a root is a
+ * public, disputable fact — a root computed under a different feed map or
+ * policy provably carries a different hash. Deterministic: keys sorted,
+ * addresses lowercased.
+ */
+export function configHash(): `0x${string}` {
+  const feeds = Object.keys(CONFIG.assetUsdFeed)
+    .map((k) => k.toLowerCase())
+    .sort()
+    .map((k) => [k, CONFIG.assetUsdFeed[k].toLowerCase()]);
+  return keccak256(
+    stringToHex(
+      JSON.stringify({
+        version: CONFIG_VERSION,
+        chainId: CHAIN_ID,
+        registry: CONFIG.registry.toLowerCase(),
+        defiInsurance: CONFIG.defiInsurance.toLowerCase(),
+        assetUsdFeed: feeds,
+        maxOracleStaleness: MAX_ORACLE_STALENESS.toString(),
+      })
+    )
+  );
 }

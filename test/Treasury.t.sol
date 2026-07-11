@@ -21,6 +21,9 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {LossyWithdrawStrategy} from "./mocks/LossyWithdrawStrategy.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
+import {ERC4626Strategy} from "../src/strategies/ERC4626Strategy.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 
 contract TreasuryTest is Test {
     Registry registry;
@@ -1221,6 +1224,37 @@ contract TreasuryTest is Test {
         assertLt(endUsdc, startUsdc, "attacker strictly loses USDC on the round-trip");
     }
 
+    // -- Post-allocation reserve invariant (audit test gap 7) --------------
+
+    /// @dev Allocating reserve through the REAL ERC4626Strategy into an honest
+    ///      vault is reserve-neutral: getReserveBalance() is identical before and
+    ///      after deposit, and again after a full withdrawal — USDC only changes
+    ///      classification (idle ↔ strategy-held), never total.
+    function test_Audit_StrategyAllocationIsReserveNeutral() public {
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(treasury), 100e6);
+        treasury.mintUSD8(100e6);
+        vm.stopPrank();
+
+        HonestVault vault = new HonestVault(IERC20(USDC_ADDR));
+        ERC4626Strategy strat = new ERC4626Strategy(address(treasury), vault);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, 0);
+
+        uint256 reserveBefore = treasury.getReserveBalance();
+        vm.prank(admin);
+        treasury.depositToStrategy(strat, 100e6);
+        assertGt(vault.balanceOf(address(strat)), 0, "shares actually minted");
+        assertEq(strat.totalAssets(), 100e6, "strategy reports the full allocation");
+        assertEq(treasury.getReserveBalance(), reserveBefore, "deposit is reserve-neutral");
+
+        vm.prank(admin);
+        treasury.withdrawFromStrategy(strat, 100e6);
+        assertEq(treasury.getReserveBalance(), reserveBefore, "withdrawal is reserve-neutral");
+        assertEq(usdc.balanceOf(address(treasury)), 100e6, "USDC back to idle");
+    }
+
     // -- Rescue -----------------------------------------------------------
 
     function test_RescueTokenSendsToRecipient() public {
@@ -1264,6 +1298,16 @@ contract TreasuryTest is Test {
         treasury.sweepETH(payable(recipient));
 
         assertEq(recipient.balance, 1 ether);
+    }
+}
+
+/// @dev Spec-conforming ERC-4626 vault (stock OZ behavior) for the reserve-
+///      neutrality test of the real ERC4626Strategy.
+contract HonestVault is ERC20, ERC4626 {
+    constructor(IERC20 asset_) ERC20("Honest Vault", "HON") ERC4626(asset_) {}
+
+    function decimals() public view override(ERC20, ERC4626) returns (uint8) {
+        return super.decimals();
     }
 }
 

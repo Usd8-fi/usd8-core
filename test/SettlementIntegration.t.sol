@@ -99,10 +99,15 @@ contract SettlementIntegrationTest is Test {
         }
     }
 
+    /// @dev Stand-in for the settler's config commitment (M-04); any value works —
+    ///      it just has to match between the signature and the call.
+    bytes32 constant CONFIG_HASH = keccak256("integration-config");
+
     /// @dev Sign a settlement root as the TEE, binding the incident's current
-    ///      on-chain unresolved count and committed per-pool payouts (mirrors settleIncident).
+    ///      on-chain unresolved count, claim-set hash, and committed per-pool
+    ///      payouts (mirrors settleIncident).
     function _teeSign(uint256 incidentId, bytes32 root, uint256[] memory pp) internal view returns (bytes memory) {
-        (,,, uint256 unresolved,,,,,) = defi.incidents(incidentId);
+        (,,, uint256 unresolved,,,,,, bytes32 claimSetHash) = defi.incidents(incidentId);
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -116,13 +121,15 @@ contract SettlementIntegrationTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools)"
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash)"
                 ),
                 incidentId,
                 root,
                 unresolved,
                 keccak256(abi.encodePacked(pp)),
-                keccak256(abi.encodePacked(poolAddrs))
+                keccak256(abi.encodePacked(poolAddrs)),
+                claimSetHash,
+                CONFIG_HASH
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEE_PK, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
@@ -132,7 +139,7 @@ contract SettlementIntegrationTest is Test {
     /// @dev Relay a TEE-signed root (keeps the caller's stack shallow).
     function _settle(uint256 incidentId, bytes32 root) internal {
         uint256[] memory pp = _pp();
-        defi.settleIncident(incidentId, root, pp, _teeSign(incidentId, root, pp));
+        defi.settleIncident(incidentId, root, pp, CONFIG_HASH, _teeSign(incidentId, root, pp));
     }
 
     function test_OffchainRootAndProofsDriveCorrectPayout() public {
@@ -163,7 +170,7 @@ contract SettlementIntegrationTest is Test {
         bytes32[] memory proofCarol = abi.decode(_ffi("proof", rootPayload, vm.toString(cc)), (bytes32[]));
 
         // ── 3) Settle with the off-chain root, finalize each claim with its proof. ──
-        (, uint64 wEnd,,,,,,,) = defi.incidents(incidentId);
+        (, uint64 wEnd,,,,,,,,) = defi.incidents(incidentId);
         vm.warp(wEnd + 1);
         _settle(incidentId, root);
         vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1); // past DISPUTE_PERIOD
@@ -177,6 +184,109 @@ contract SettlementIntegrationTest is Test {
         //    event (ScoreSpent), not on-chain state, so it isn't asserted here. ──
         assertEq(usdc.balanceOf(bob), bobPay, "bob payout != off-chain amount");
         assertEq(usdc.balanceOf(carol), carolPay, "carol payout != off-chain amount");
+    }
+
+    /// @dev Golden-vector check: the off-chain viem EIP-712 settlement digest must
+    ///      equal the contract's _hashTypedDataV4 digest byte-for-byte, over 0/1/N
+    ///      pools (H-01). Covers the whole digest — domain separator, typehash,
+    ///      poolPayouts array encoding, and the `pools` packed-address hash — not
+    ///      just the Merkle root. `solc` is the authority; viem must reproduce it.
+    function test_OffchainDigestMatchesOnchain() public {
+        if (!vm.envOr("RUN_INTEGRATION", false)) {
+            vm.skip(true);
+            return;
+        }
+
+        for (uint256 n = 0; n <= 3; n++) {
+            address[] memory poolAddrs = new address[](n);
+            uint256[] memory pp = new uint256[](n);
+            for (uint256 i = 0; i < n; i++) {
+                poolAddrs[i] = address(uint160(0xC0FFEE + i));
+                pp[i] = (i + 1) * 1e6;
+            }
+            uint256 incidentId = 7;
+            bytes32 root = keccak256(abi.encodePacked("root", n));
+            uint256 unresolved = 3;
+            bytes32 claimSet = keccak256(abi.encodePacked("claims", n));
+
+            bytes memory payload = abi.encode(
+                block.chainid, address(defi), incidentId, root, unresolved, pp, poolAddrs, claimSet, CONFIG_HASH
+            );
+            bytes32 offchain = abi.decode(_ffi("digest", payload, ""), (bytes32));
+            bytes32 onchain = _settlementDigest(incidentId, root, unresolved, pp, poolAddrs, claimSet);
+            assertEq(offchain, onchain, "EIP-712 settlement digest mismatch (viem != solc)");
+        }
+    }
+
+    /// @dev Cross-language check of the claim-set accumulator (M-06): replay the
+    ///      same join/cancel sequence off-chain and require it to reproduce the
+    ///      contract's {Incident.claimSetHash} exactly.
+    function test_OffchainClaimSetReplayMatchesOnchain() public {
+        if (!vm.envOr("RUN_INTEGRATION", false)) {
+            vm.skip(true);
+            return;
+        }
+
+        vm.prank(admin);
+        uint256 incidentId = defi.openClaimIncident(IERC20(address(lp)), uint64(block.number - 1));
+        uint256 cb = _join(bob, 100e18, 60);
+        uint256 cc = _join(carol, 50e18, 40);
+        vm.prank(carol);
+        defi.cancelClaim(); // exercise the cancel path of the accumulator
+
+        uint8[] memory kinds = new uint8[](3); // 0 = register, 1 = cancel
+        kinds[2] = 1;
+        uint256[] memory ids = new uint256[](3);
+        (ids[0], ids[1], ids[2]) = (cb, cc, cc);
+        address[] memory users = _addr(bob, carol);
+        address[] memory users3 = new address[](3);
+        (users3[0], users3[1], users3[2]) = (users[0], users[1], users[1]);
+        uint256[] memory escrows = new uint256[](3);
+        (escrows[0], escrows[1]) = (100e18, 50e18);
+        uint256[] memory scores = new uint256[](3);
+        (scores[0], scores[1]) = (60, 40);
+        uint256[] memory boosters = new uint256[](3);
+
+        bytes memory payload = abi.encode(kinds, ids, users3, escrows, scores, boosters);
+        bytes32 offchain = abi.decode(_ffi("claimset", payload, ""), (bytes32));
+        (,,,,,,,,, bytes32 onchain) = defi.incidents(incidentId);
+        assertEq(offchain, onchain, "claim-set accumulator mismatch (offchain replay != contract)");
+    }
+
+    /// @dev Reconstruct the contract's EIP-712 settlement digest (mirrors
+    ///      {DefiInsurance.settleIncident} / _hashTypedDataV4) for arbitrary inputs.
+    function _settlementDigest(
+        uint256 incidentId,
+        bytes32 root,
+        uint256 unresolved,
+        uint256[] memory pp,
+        address[] memory poolAddrs,
+        bytes32 claimSet
+    ) internal view returns (bytes32) {
+        bytes32 domain = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("DefiInsurance")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(defi)
+            )
+        );
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256(
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash)"
+                ),
+                incidentId,
+                root,
+                unresolved,
+                keccak256(abi.encodePacked(pp)),
+                keccak256(abi.encodePacked(poolAddrs)),
+                claimSet,
+                CONFIG_HASH
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domain, structHash));
     }
 
     // ── helpers ──

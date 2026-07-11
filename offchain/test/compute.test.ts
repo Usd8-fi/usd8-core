@@ -239,6 +239,70 @@ describe("settlementTree / proofs", () => {
   });
 });
 
+describe("blockAtOrBeforeTimestamp — window-end boundary (H-02)", () => {
+  // Blocks 1..10 at 12s spacing: block n → timestamp 12·n (block5 = 60, block6 = 72).
+  const N = 10n;
+  const tsOf = (n: bigint) => 12n * n;
+  const client = {
+    getBlockNumber: async () => N,
+    getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ timestamp: tsOf(blockNumber) }),
+  } as any;
+
+  it("deadline exactly on a block → that block", async () => {
+    expect(await chain.blockAtOrBeforeTimestamp(client, 60n)).toBe(5n);
+  });
+
+  it("no block equals the deadline → the LAST in-window block, not the first post-window one", async () => {
+    // 65 sits between block5 (60) and block6 (72). Must pick 5, never 6.
+    expect(await chain.blockAtOrBeforeTimestamp(client, 65n)).toBe(5n);
+    expect(await chain.blockAtOrBeforeTimestamp(client, 71n)).toBe(5n);
+    expect(await chain.blockAtOrBeforeTimestamp(client, 59n)).toBe(4n);
+  });
+
+  it("deadline on the head block → the head", async () => {
+    expect(await chain.blockAtOrBeforeTimestamp(client, tsOf(N))).toBe(N);
+  });
+
+  it("deadline beyond the head → throws (window not closed on-chain yet)", async () => {
+    await expect(chain.blockAtOrBeforeTimestamp(client, 121n)).rejects.toThrow(/in the future/);
+  });
+});
+
+describe("configHash — settlement config commitment (M-04)", () => {
+  it("is deterministic and insensitive to feed-map key order", async () => {
+    const { CONFIG, configHash } = await import("../src/config.js");
+    const original = { ...CONFIG.assetUsdFeed };
+    try {
+      CONFIG.assetUsdFeed["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] = "0x1111111111111111111111111111111111111111";
+      CONFIG.assetUsdFeed["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] = "0x2222222222222222222222222222222222222222";
+      const h1 = configHash();
+      // Rebuild the map in reverse insertion order — hash must not care.
+      for (const k of Object.keys(CONFIG.assetUsdFeed)) delete CONFIG.assetUsdFeed[k];
+      CONFIG.assetUsdFeed["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] = "0x2222222222222222222222222222222222222222";
+      CONFIG.assetUsdFeed["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] = "0x1111111111111111111111111111111111111111";
+      expect(configHash()).toBe(h1);
+    } finally {
+      for (const k of Object.keys(CONFIG.assetUsdFeed)) delete CONFIG.assetUsdFeed[k];
+      Object.assign(CONFIG.assetUsdFeed, original);
+    }
+  });
+
+  it("changes when a feed mapping changes", async () => {
+    const { CONFIG, configHash } = await import("../src/config.js");
+    const original = { ...CONFIG.assetUsdFeed };
+    try {
+      const base = configHash();
+      CONFIG.assetUsdFeed["0xcccccccccccccccccccccccccccccccccccccccc"] = "0x3333333333333333333333333333333333333333";
+      expect(configHash()).not.toBe(base);
+      CONFIG.assetUsdFeed["0xcccccccccccccccccccccccccccccccccccccccc"] = "0x4444444444444444444444444444444444444444";
+      expect(configHash()).not.toBe(base);
+    } finally {
+      for (const k of Object.keys(CONFIG.assetUsdFeed)) delete CONFIG.assetUsdFeed[k];
+      Object.assign(CONFIG.assetUsdFeed, original);
+    }
+  });
+});
+
 describe("earnedScoreOf — decimal normalization (F6)", () => {
   it("normalizes each scored token's integral to an 18-dec basis before summing", async () => {
     h.integrals.clear();

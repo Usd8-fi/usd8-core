@@ -286,7 +286,9 @@ contract Treasury is ReentrancyGuardTransient, RegistryManaged {
         // Effective collateral is capped at peg: surplus is reserved for
         // the harvested-revenue pool and never paid to redeemers.
         uint256 eff = reserveInUsd8 < supply ? reserveInUsd8 : supply;
-        uint256 usdcAmount = (usd8Amount * eff) / supply / USDC_TO_USD8_SCALE;
+        // mulDiv: usd8Amount * eff may exceed 2^256 at extreme supplies even though
+        // the quotient always fits (usd8Amount ≤ supply ⇒ quotient ≤ eff).
+        uint256 usdcAmount = Math.mulDiv(usd8Amount, eff, supply) / USDC_TO_USD8_SCALE;
         if (usdcAmount < minUsdcOut) revert InsufficientUsdcOut(usdcAmount, minUsdcOut);
 
         usd8.burn(msg.sender, usd8Amount);

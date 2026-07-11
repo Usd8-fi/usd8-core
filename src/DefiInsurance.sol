@@ -127,10 +127,15 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
 
     /// @notice Per-insured-token config. maxCoverageBps == 0 means not listed.
     /// @param maxCoverageBps  Coverage factor κ, in (0, 100%] (bps) while listed: the
-    ///                      fraction of a claimant's loss this product covers. The
-    ///                      off-chain settler caps each payout at κ × loss,
+    ///                      fraction of a claimant's FULL pre-incident eligible value
+    ///                      this product covers — a BUYOUT, not loss indemnity (audit
+    ///                      D-01): the claimant forfeits the eligible tokens at
+    ///                      {finalizeClaim}, so the payout is priced off what they
+    ///                      were worth before the incident, and the protocol keeps
+    ///                      their residual value. The off-chain settler caps each
+    ///                      payout at κ × that value,
     ///                      payoutUsd = min(spentShare × poolUsd, κ × lossUsd). Only
-    ///                      stored/validated on-chain; the κ × loss cap is applied
+    ///                      stored/validated on-chain; the κ cap is applied
     ///                      off-chain at settlement, so κ appears in no on-chain formula.
     /// @param underlyingPriceOracle  underlying→USD oracle (Chainlink AggregatorV3
     ///                      interface; for non-USD/comparative/LP underlyings,
@@ -236,6 +241,14 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///                        a dispute moved it to Disputed (halted, still frozen, awaiting a
     ///                        timelock correction) or Closed (killed; pool unlocks and
     ///                        claimants recover escrow).
+    /// @param claimSetHash    Rolling commitment to the EXACT claim set: chained
+    ///                        keccak over every {joinClaim} (claimId, user, escrow,
+    ///                        scoreToSpend, boosterAmount) and {cancelClaim} (claimId),
+    ///                        in call order. Bound into the settlement signature so a
+    ///                        root signed for a different claim set — even one with
+    ///                        the same {unresolved} count — can never settle (M-06).
+    ///                        The settler reproduces it by replaying {ClaimRegistered}
+    ///                        / {ClaimCancelled} events in (block, logIndex) order.
     struct Incident {
         IERC20 insuredToken;
         uint64 claimWindowEndTime;
@@ -246,6 +259,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         uint64 openBlock;
         Status status;
         uint64 disputedAt;
+        bytes32 claimSetHash;
     }
 
     /// @notice Governance lifecycle state of an incident. Mutually exclusive by
@@ -399,24 +413,19 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         loss per pool is hard-capped at the committed total (see
     ///         {incidentPoolBudget}).
     ///
-    ///         DELIBERATE (audit M-04): the struct binds the claim COUNT
-    ///         ({unresolved}), not a hash of the exact claim set (ids / users /
-    ///         escrows / score requests / cancels). So a compromised or buggy signer
-    ///         could sign a root that omits or misallocates claims while keeping the
-    ///         same count. This is the accepted optimistic-settlement / TEE trust
-    ///         boundary, NOT an on-chain forgery: the root is public, anyone
-    ///         recomputes the correct claim table from on-chain {ClaimRegistered} /
-    ///         cancel events, and a wrong set is disputed via {disputeIncident} within
-    ///         the DISPUTE phase (omitted claimants recover escrow). We considered
-    ///         binding an on-chain cumulative claims/input hash (updated on
-    ///         join/cancel, signed here) and chose not to: it would move claim-set
-    ///         integrity from dispute-caught to settle-enforced, but a compromised
-    ///         signer already has other levers (wrong per-leaf amounts, bounded only
-    ///         by {poolPayouts}/the cap), so the DISPUTE phase remains the backstop
-    ///         regardless. Revisit if the trust model tightens (e.g. multi-signer /
-    ///         non-optimistic settlement).
-    bytes32 internal constant SETTLEMENT_TYPEHASH =
-        keccak256("Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools)");
+    ///         `claimSet` is the incident's {Incident.claimSetHash} — the on-chain
+    ///         rolling commitment to the exact claim set (ids / users / escrows /
+    ///         score requests / cancels), so a root signed for a different set —
+    ///         even one with the same count — can never settle (M-06). `configHash`
+    ///         commits the signer to the exact off-chain configuration (feed map,
+    ///         staleness policy, software version) the root was computed under
+    ///         (M-04): the contract can't validate it, but it makes the config
+    ///         commitment public — a root produced under a wrong/stale config is
+    ///         provably disputable instead of deniable. The DISPUTE phase remains
+    ///         the backstop for per-leaf amounts either way.
+    bytes32 internal constant SETTLEMENT_TYPEHASH = keccak256(
+        "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash)"
+    );
 
     /// @notice EIP-712 struct the TEE signs to open an incident. The enclave —
     ///         running the published depeg-detection code — attests that
@@ -445,6 +454,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     error IncidentFinalizing(uint256 incidentId);
     error OutsideSettlementPhase(uint256 incidentId);
     error NoStandingRoot(uint256 incidentId);
+    error ClaimWindowStillOpen(uint256 incidentId);
     error AlreadySettled(uint256 incidentId);
     error AlreadyDisputed(uint256 incidentId);
     error NotDisputed(uint256 incidentId);
@@ -471,7 +481,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     event InsuredTokenRemoved(IERC20 indexed insuredToken);
     event SettlementParamsSet(SettlementParams params);
     event IncidentOpened(uint256 indexed incidentId, IERC20 indexed insuredToken, uint64 claimWindowEndTime);
-    event IncidentSettled(uint256 indexed incidentId, bytes32 root);
+    event IncidentSettled(uint256 indexed incidentId, bytes32 root, bytes32 configHash);
     event IncidentClosed(uint256 indexed incidentId, address indexed closer);
     event IncidentDisputed(uint256 indexed incidentId, address indexed disputer);
     event IncidentCorrected(uint256 indexed incidentId, bytes32 root);
@@ -730,7 +740,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
             referenceBlock: referenceBlock,
             openBlock: uint64(block.number),
             status: Status.Open,
-            disputedAt: 0
+            disputedAt: 0,
+            claimSetHash: bytes32(0)
         });
 
         // Snapshot the pool set at open. finalizeClaim pays each claim's amounts[]
@@ -844,7 +855,13 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
             claims[claimId].boosterCollection = booster; // snapshot the collection to burn from
         }
 
-        incidents[incidentId].unresolved += 1;
+        Incident storage reg = incidents[incidentId];
+        reg.unresolved += 1;
+        // Chain this join into the claim-set commitment the settlement signature
+        // binds (M-06). Exactly the fields {ClaimRegistered} emits, so the settler
+        // reproduces the hash by replaying events in order.
+        reg.claimSetHash =
+            keccak256(abi.encode(reg.claimSetHash, claimId, msg.sender, escrow, scoreToSpend, boosterAmount));
 
         emit ClaimRegistered(claimId, incidentId, msg.sender, escrow, scoreToSpend, boosterAmount);
     }
@@ -876,6 +893,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         Claim storage c = claims[claimId];
         c.resolved = true;
         inc.unresolved -= 1;
+        // Chain the cancel into the claim-set commitment (M-06). Two words vs the
+        // join's six, so a cancel entry can never collide with a join entry.
+        inc.claimSetHash = keccak256(abi.encode(inc.claimSetHash, claimId));
         activeClaimId[incidentId][msg.sender] = 0; // may re-file within the window
         escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
@@ -888,10 +908,11 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     /// @notice Submit the settlement root permissionlessly, carrying the TEE's
     ///         EIP-712 signature. The enclave — running the open sourced settlement
     ///         code — reconstructs the claimant table from on-chain claims and signs
-    ///         Settlement(incidentId, root, unresolved, poolPayouts, pools); binding
-    ///         unresolved means the signature is only valid for the exact (frozen) live
-    ///         claim set it scored, and binding `pools` pins the same ordered pool set the
-    ///         contract snapshotted (positional row alignment). Anyone may relay the signed
+    ///         Settlement(incidentId, root, unresolved, poolPayouts, pools, claimSet,
+    ///         configHash); binding unresolved + claimSet means the signature is only
+    ///         valid for the exact (frozen) live claim set it scored, and binding
+    ///         `pools` pins the same ordered pool set the contract snapshotted
+    ///         (positional row alignment). Anyone may relay the signed
     ///         root; the optimistic DISPUTE
     ///         phase and governance intervention ({disputeIncident} / {closeIncident}) still apply. ONE TEE settlement per incident — no
     ///         resubmit ({AlreadySettled}); a bad root is disputed via {disputeIncident} and
@@ -902,13 +923,22 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     /// @param poolPayouts  Enclave-committed total payout per pool, aligned to the
     ///                     incident's {incidentPools} snapshot. Each is checked
     ///                     against that pool's {SingleAssetCoverPool.maxPayoutPerIncident}.
+    /// @param configHash   Enclave's commitment to the exact off-chain settlement
+    ///                     configuration (feed map, staleness policy, software
+    ///                     version) the root was computed under (M-04). Not
+    ///                     validated on-chain — bound into the signature and
+    ///                     emitted so a root produced under a wrong or stale
+    ///                     config is provably disputable.
     /// @param signature    {teeSigner}'s EIP-712 signature over the Settlement
     ///                     struct (domain: name "DefiInsurance", version "1",
     ///                     this chain id, this contract).
-    function settleIncident(uint256 incidentId, bytes32 root, uint256[] calldata poolPayouts, bytes calldata signature)
-        external
-        whenNotPaused
-    {
+    function settleIncident(
+        uint256 incidentId,
+        bytes32 root,
+        uint256[] calldata poolPayouts,
+        bytes32 configHash,
+        bytes calldata signature
+    ) external whenNotPaused {
         Incident storage inc = incidents[incidentId];
 
         // Cheap phase + root checks first — fail fast before the ECDSA recover.
@@ -938,6 +968,26 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         // the SAME ordered pool list the contract snapshotted at open ({incidentPools}),
         // so an enumeration-order divergence (an honest settler bug) fails here at settle
         // — before any payout — rather than silently misallocating loss across pools.
+        _verifySettlementSig(incidentId, root, inc, poolPayouts, configHash, signature);
+
+        _commitRoot(incidentId, inc, root, poolPayouts);
+        emit IncidentSettled(incidentId, root, configHash);
+    }
+
+    /// @dev EIP-712 digest + recover for {settleIncident}, own frame to keep its
+    ///      caller's stack shallow. Reverts unless the signature is {teeSigner}'s
+    ///      over the full Settlement struct (incl. {Incident.claimSetHash} and the
+    ///      settler's config commitment).
+    function _verifySettlementSig(
+        uint256 incidentId,
+        bytes32 root,
+        Incident storage inc,
+        uint256[] calldata poolPayouts,
+        bytes32 configHash,
+        bytes calldata signature
+    ) private view {
+        bytes32 payoutsHash = keccak256(abi.encodePacked(poolPayouts));
+        bytes32 poolsHash = keccak256(abi.encodePacked(incidentPools[incidentId]));
         bytes32 digest = _hashTypedDataV4(
             keccak256(
                 abi.encode(
@@ -945,16 +995,15 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
                     incidentId,
                     root,
                     inc.unresolved,
-                    keccak256(abi.encodePacked(poolPayouts)),
-                    keccak256(abi.encodePacked(incidentPools[incidentId]))
+                    payoutsHash,
+                    poolsHash,
+                    inc.claimSetHash,
+                    configHash
                 )
             )
         );
         address recovered = ECDSA.recover(digest, signature);
         if (recovered != teeSigner || teeSigner == address(0)) revert UnauthorizedSettlementSigner(recovered);
-
-        _commitRoot(incidentId, inc, root, poolPayouts);
-        emit IncidentSettled(incidentId, root);
     }
 
     /// @notice Formally dispute the standing (or pending) settlement — the fast, non-
@@ -1031,6 +1080,11 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         if (root == bytes32(0)) revert NoStandingRoot(incidentId);
         Incident storage inc = incidents[incidentId];
         if (inc.status != Status.Disputed) revert NotDisputed(incidentId);
+        // No payable root may be committed until the claim set is frozen (CLAIM window
+        // closed) — otherwise a correction installed mid-claim could finalize while
+        // claims are still joining/cancelling (H-03). settleIncident enforces the same
+        // window; correction is the timelock's parallel path and must match it.
+        if (block.timestamp <= inc.claimWindowEndTime) revert ClaimWindowStillOpen(incidentId);
 
         _commitRoot(incidentId, inc, root, poolPayouts);
         inc.status = Status.Open;
@@ -1049,7 +1103,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     function _commitRoot(uint256 incidentId, Incident storage inc, bytes32 root, uint256[] calldata poolPayouts)
         private
     {
-        address[] memory poolAddrs = incidentPools[incidentId];
+        address[] storage poolAddrs = incidentPools[incidentId];
         if (poolPayouts.length != poolAddrs.length) {
             revert SettlementPoolMismatch(poolPayouts.length, poolAddrs.length);
         }
@@ -1100,13 +1154,18 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         // root regardless of timing. A correction lands the incident back in Open.
         if (
             inc.status != Status.Open || inc.root == bytes32(0)
+                || block.timestamp <= inc.claimWindowEndTime
                 || block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD
                 || block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW
         ) {
+            // Independent backstop (H-03): a payout can NEVER land before the claim
+            // window closes, regardless of how/when the root was committed. Today this
+            // is implied by settle/correct both stamping rootSubmittedAt post-window,
+            // but guarding the payout directly keeps that guarantee if either path changes.
             revert FinalizeNotOpen(incidentId);
         }
 
-        address[] memory poolAddrs = incidentPools[incidentId];
+        address[] storage poolAddrs = incidentPools[incidentId];
         {
             // Row aligns to the pool list snapshotted at open — the exact order the
             // settler built it over — so alignment holds regardless of any later

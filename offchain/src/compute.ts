@@ -2,7 +2,7 @@
 // recomputable by anyone from on-chain state at the incident's openBlock, which
 // is what the dispute window verifies.
 
-import { type PublicClient, keccak256, encodePacked } from "viem";
+import { type PublicClient, keccak256, encodePacked, encodeAbiParameters } from "viem";
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
 import {
   WAD,
@@ -48,6 +48,7 @@ export interface Settlement {
   // incidentPools snapshot; amounts[i] pays poolAddrs[i]. Signed via the `pools` hash so the
   // signature commits to the exact ordered list the payout row was computed against.
   poolPayouts: bigint[]; // total payout committed per pool (Σ amounts[i]); signed + checked ≤ cap at settle
+  claimSetHash: `0x${string}`; // replayed Incident.claimSetHash — bound into the settlement signature (M-06)
   rows: SettledRow[];
 }
 
@@ -154,7 +155,14 @@ export async function settle(
     // after the incident) is never over-charged.
     const minHeld = await minBalanceOver(client, opts.insuredToken, e.user, holdFrom, refBlock);
     const eligible = minHeld < e.amount ? minHeld : e.amount;
-    // lossUsd = eligible × TWAP ratio × underlying USD price (1e18).
+    // lossUsd = eligible × TWAP ratio × underlying USD price (1e18) — the FULL
+    // pre-incident value of the eligible tokens, NOT the pre/post price decrease.
+    // DELIBERATE (audit D-01): payouts are a BUYOUT, not loss indemnity. The
+    // claimant forfeits the eligible tokens at finalizeClaim (escrowed at join),
+    // so the protocol pays up to κ (coverageBps) of what the surrendered tokens
+    // were worth BEFORE the incident and keeps their residual value. Valuing
+    // pre-incident also removes any dependence on a manipulable mid-crash
+    // "after" price.
     const lossUsd = (((eligible * twap) / WAD) * underlyingUsd) / 10n ** BigInt(opts.insuredDecimals);
 
     // Booster boost is capped at the claimant's MIN booster balance over
@@ -242,6 +250,7 @@ export async function settle(
     poolOrder: opts.poolOrder,
     poolAddrs: opts.poolAddrs,
     poolPayouts,
+    claimSetHash: claimSetHashOf(events),
     rows,
   };
 }
@@ -274,16 +283,43 @@ export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
   throw new Error(`claim ${claimId} not in settlement`);
 }
 
+/**
+ * Replay the incident's register/cancel events (chain order) into the same
+ * rolling claim-set commitment the contract maintains in Incident.claimSetHash
+ * (M-06): join chains keccak(abi.encode(prev, claimId, user, escrow,
+ * scoreToSpend, boosterAmount)); cancel chains keccak(abi.encode(prev, claimId)).
+ * Must equal the on-chain value at settle or the signature won't verify.
+ */
+export function claimSetHashOf(events: InputEvent[]): `0x${string}` {
+  let h: `0x${string}` = `0x${"0".repeat(64)}`;
+  for (const e of events) {
+    h =
+      e.kind === "register"
+        ? keccak256(
+            encodeAbiParameters(
+              [{ type: "bytes32" }, { type: "uint256" }, { type: "address" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }],
+              [h, e.claimId, e.user, e.amount, e.scoreToSpend, e.boosterAmount]
+            )
+          )
+        : keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "uint256" }], [h, e.claimId]));
+  }
+  return h;
+}
+
 // EIP-712 payload the TEE signs for DefiInsurance.settleIncident — SINGLE source
 // of truth mirroring SETTLEMENT_TYPEHASH on-chain. `unresolved` (the live-claim
-// counter, Incident.unresolved) binds the signature to the exact claimant table
-// that was scored — frozen across the whole submit window.
+// counter, Incident.unresolved) and `claimSet` (the Incident.claimSetHash rolling
+// commitment, reproduced by {claimSetHashOf}) bind the signature to the exact
+// claimant table that was scored; `configHash` ({configHash} from config.ts)
+// commits the signer to the off-chain configuration the root was computed under.
 // Sign with viem: walletClient.signTypedData(settlementTypedData(...)).
 export function settlementTypedData(
   chainId: number,
   defiInsurance: `0x${string}`,
   s: Pick<Settlement, "incidentId" | "root" | "poolPayouts" | "poolAddrs">,
-  unresolved: bigint
+  unresolved: bigint,
+  claimSet: `0x${string}`,
+  configHash: `0x${string}`
 ) {
   // The `pools` hash is taken from s.poolAddrs — the SAME ordered pool list the payout row
   // was computed against (parallel to poolOrder) — NOT a fresh chain read. That's what makes
@@ -291,7 +327,10 @@ export function settlementTypedData(
   // a reordered compute-list can't silently pass. It must equal the contract's incidentPools
   // (registry.coverPools().poolAddrs at openBlock). Hashed as solidityPacked (20-byte-per-
   // address) to match the on-chain keccak256(abi.encodePacked(incidentPools[id])).
-  const poolsHash = keccak256(encodePacked(s.poolAddrs.map(() => "address" as const), s.poolAddrs));
+  // Encode as a single "address[]" so each element is word-padded to 32 bytes,
+  // exactly as Solidity's abi.encodePacked(address[]) does (per-element "address"
+  // packs 20 bytes and does NOT match the contract — see H-01).
+  const poolsHash = keccak256(encodePacked(["address[]"], [s.poolAddrs]));
   return {
     domain: { name: "DefiInsurance", version: "1", chainId, verifyingContract: defiInsurance },
     types: {
@@ -301,9 +340,19 @@ export function settlementTypedData(
         { name: "unresolved", type: "uint256" },
         { name: "poolPayouts", type: "uint256[]" },
         { name: "pools", type: "bytes32" },
+        { name: "claimSet", type: "bytes32" },
+        { name: "configHash", type: "bytes32" },
       ],
     },
     primaryType: "Settlement",
-    message: { incidentId: s.incidentId, root: s.root, unresolved, poolPayouts: s.poolPayouts, pools: poolsHash },
+    message: {
+      incidentId: s.incidentId,
+      root: s.root,
+      unresolved,
+      poolPayouts: s.poolPayouts,
+      pools: poolsHash,
+      claimSet,
+      configHash,
+    },
   } as const;
 }

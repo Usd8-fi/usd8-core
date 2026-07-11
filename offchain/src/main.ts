@@ -16,17 +16,17 @@ import {
   makeClient,
   DEFI_ABI,
   readInputEvents,
-  blockAtTimestamp,
+  blockAtOrBeforeTimestamp,
   incidentConfigOf,
   poolsAt,
   poolTotalAssetsAt,
   boosterNftAt,
   maxCoverPoolPayoutBpsAt,
-  spentScoreByUser,
+  spentScoreOf,
   priceUsd1e18,
   decimalsOf,
 } from "./chain.js";
-import { CONFIG, CONFIG_VERSION, CHAIN_ID, assetUsdFeedOf } from "./config.js";
+import { CONFIG, CONFIG_VERSION, CHAIN_ID, assetUsdFeedOf, configHash } from "./config.js";
 import { settle, proofFor, type Settlement } from "./compute.js";
 
 // The only booster token id in use (USD8Booster tier: id 1 = the 1% booster);
@@ -56,7 +56,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
     abi: DEFI_ABI,
     functionName: "incidents",
     args: [incidentId],
-  })) as readonly [`0x${string}`, bigint, `0x${string}`, bigint, bigint, bigint, bigint, number, bigint];
+  })) as readonly [`0x${string}`, bigint, `0x${string}`, bigint, bigint, bigint, bigint, number, bigint, `0x${string}`];
 
   const insuredToken = inc[0];
   const windowEnd = inc[1];
@@ -66,17 +66,19 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
 
   // Deterministic block anchors: openBlock (config + topology + spent-score
   // cutoff), referenceBlock (earned score — the pre-incident point), and the
-  // window-end block (found from its timestamp; pool balances + prices + booster
-  // holdings). Every read pins one of these, so the settlement is identical no
-  // matter when it is (re)computed.
-  const windowEndBlock = await blockAtTimestamp(client, windowEnd);
+  // window-end block (LAST block with timestamp <= claimWindowEndTime — the last
+  // in-window block; pool balances + prices + booster holdings). Every read pins
+  // one of these, so the settlement is identical no matter when it is (re)computed.
+  const windowEndBlock = await blockAtOrBeforeTimestamp(client, windowEnd);
 
   // Register/cancel event stream in true chain order → the live claimant table.
   const events = await readInputEvents(client, incidentId, openBlock, windowEndBlock);
 
   // Per-incident settlement config, reconstructed from contract state at openBlock.
   const cfg = await incidentConfigOf(client, insuredToken, openBlock);
-  const insuredDecimals = await decimalsOf(client, insuredToken);
+  // Decimals pinned to the incident's snapshot blocks (M-05): an upgradeable
+  // token changing decimals must never alter an old incident's recomputation.
+  const insuredDecimals = await decimalsOf(client, insuredToken, openBlock);
 
   // Registered pool set at openBlock (frozen for the incident's life, so it equals
   // the live list) → per-pool balances + prices at window-end. INVARIANT: this exact
@@ -90,7 +92,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   for (let i = 0; i < poolAddrs.length; i++) {
     poolBalances.push(await poolTotalAssetsAt(client, poolAddrs[i], windowEndBlock));
     poolAssetUsd1e18.push(await priceUsd1e18(client, assetUsdFeedOf(assets[i]), windowEndBlock));
-    poolAssetDecimals.push(await decimalsOf(client, assets[i]));
+    poolAssetDecimals.push(await decimalsOf(client, assets[i], windowEndBlock));
   }
 
   const boosterCollection = await boosterNftAt(client, openBlock);
@@ -99,13 +101,19 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   // value settleIncident checks the committed poolPayouts against.
   const maxCoverPoolPayoutBps = await maxCoverPoolPayoutBpsAt(client, openBlock);
 
-  // Insurance score already spent per user, summed from ScoreSpent logs across
-  // every payout module ever registered, pinned to blocks before openBlock.
-  // Intentionally a LATER cutoff than earned (referenceBlock): earned is capped
-  // pre-incident to stop farming; spent must catch every prior commitment, else a
-  // score burned between referenceBlock and open could be re-claimed. See
-  // spentScoreByUser.
-  const spentMap = await spentScoreByUser(client, openBlock);
+  // Insurance score already spent per claimant: one Registry.scoreSpent archive
+  // read each at openBlock−1 (claimant addresses are known from the event replay
+  // above). Intentionally a LATER cutoff than earned (referenceBlock): earned is
+  // capped pre-incident to stop farming; spent must catch every prior commitment,
+  // else a score burned between referenceBlock and open could be re-claimed. See
+  // spentScoreOf.
+  const spentMap = new Map<string, bigint>();
+  const claimants = [...new Set(events.filter((e) => e.kind === "register").map((e) => e.user.toLowerCase()))];
+  await Promise.all(
+    claimants.map(async (u) => {
+      spentMap.set(u, await spentScoreOf(client, u as `0x${string}`, openBlock - 1n));
+    })
+  );
   const spentOf = (user: `0x${string}`) => spentMap.get(user.toLowerCase()) ?? 0n;
 
   const s = await settle(client, incidentId, cfg, events, {
@@ -129,6 +137,10 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
 function printSettlement(s: Settlement, withProofs: boolean) {
   const out = {
     configVersion: CONFIG_VERSION,
+    // The commitments the settlement signature binds (M-04 / M-06): what the TEE
+    // signs alongside the root, and what a disputer checks a standing root against.
+    configHash: configHash(),
+    claimSetHash: s.claimSetHash,
     chainId: CHAIN_ID,
     registry: CONFIG.registry,
     defiInsurance: CONFIG.defiInsurance,

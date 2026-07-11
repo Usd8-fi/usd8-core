@@ -142,6 +142,8 @@ contract SingleAssetCoverPool is
     error InvalidRecipient();
     error PartialRedeemNotSupported(uint256 requested, uint256 requestShares);
     error FeeOnTransferUnsupported();
+    error SharesLockedByRequest(uint256 locked);
+    error RewardRateZero(uint256 total, uint256 duration);
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -202,9 +204,25 @@ contract SingleAssetCoverPool is
 
     /// @dev Rewards survive transfers: checkpoint the accumulator, then both parties'
     ///      earned, BEFORE any balance (and totalSupply) changes.
+    ///
+    ///      Shares backing a live redeem request are locked in place (M-03): still
+    ///      owned, still earning, still payout-exposed — but non-transferable, so the
+    ///      cooldown seasons THESE shares. Otherwise a requester could transfer them
+    ///      away for the cooldown and re-acquire fresh ones just before maturity,
+    ///      trading "seasoned exit capacity" without ever locking capital. Only the
+    ///      excess above the requested amount stays transferable; cancel/expiry
+    ///      unlocks. The redeem burn itself passes — {_withdraw} deletes the request
+    ///      before burning.
     function _update(address from, address to, uint256 value) internal override {
         _checkpointReward();
-        if (from != address(0)) _checkpointUser(from);
+        if (from != address(0)) {
+            _checkpointUser(from);
+            UnstakeRequest memory r = unstakeRequests[from];
+            if (
+                r.shares != 0 && block.timestamp <= uint256(r.requestedAt) + UNSTAKE_COOLDOWN + UNSTAKE_WINDOW
+                    && balanceOf(from) < value + r.shares
+            ) revert SharesLockedByRequest(r.shares);
+        }
         if (to != address(0)) _checkpointUser(to);
         super._update(from, to, value);
     }
@@ -245,8 +263,9 @@ contract SingleAssetCoverPool is
     // ─────────────────────────── Redeem (async) ───────────────────────────
 
     /// @notice File an intent to redeem `shares`. Starts the cooldown; the shares
-    ///         stay staked (exposed to payouts AND still earning) until redeemed. One
-    ///         live request per user; an expired one may be overwritten.
+    ///         stay staked (exposed to payouts AND still earning) until redeemed, but
+    ///         are locked non-transferable while the request is live (see {_update}).
+    ///         One live request per user; an expired one may be overwritten.
     function requestRedeem(uint256 shares) external {
         if (shares == 0) revert ZeroAmount();
         uint256 bal = balanceOf(msg.sender);
@@ -355,7 +374,10 @@ contract SingleAssetCoverPool is
     }
 
     /// @notice Receive a reward-token profit distribution and stream it to stakers.
-    ///         Pulls amount from msg.sender. Reverts {NoEligibleStakers} with no shares.
+    ///         Pulls amount from msg.sender. Reverts {NoEligibleStakers} with no shares,
+    ///         {RewardRateZero} when total/duration floors to zero (L-01: the amount
+    ///         would be reserved but never stream — batch it with the next distribution
+    ///         instead). Per-notification flooring dust (≤ duration wei) stays accepted.
     /// @dev    Weighted-average schedule; floored remainder dust accepted (audit L-01/C6).
     function receiveProfitDistribution(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) revert ZeroAmount();
@@ -372,6 +394,7 @@ contract SingleAssetCoverPool is
         uint256 newDuration = (leftover * remaining + amount * rewardsDuration) / total;
         if (newDuration == 0) newDuration = rewardsDuration; // defensive (remaining==0 path)
         uint256 newRate = total / newDuration;
+        if (newRate == 0) revert RewardRateZero(total, newDuration);
         if (newRate > type(uint128).max) revert RewardRateTooHigh();
 
         rewardRate = uint128(newRate);
@@ -450,17 +473,24 @@ contract SingleAssetCoverPool is
         return rewardPerShareStored + ((t - lastUpdateTime) * uint256(rewardRate) * REWARD_SCALE) / earningShares;
     }
 
-    /// @dev Roll rewardPerShareStored forward to now. With no shares, defer the elapsed
-    ///      emission by pushing periodFinish out (Synthetix carry-forward).
+    /// @dev Roll rewardPerShareStored forward to now. With no shares, nothing streams:
+    ///      rebase the UNSTREAMED remainder to start now (periodFinish = now +
+    ///      remaining, lastUpdateTime = now), so the next staker earns it over the
+    ///      full remaining duration. Capping the elapsed time at the (possibly long-
+    ///      expired) periodFinish instead would leave the deferred window in the past,
+    ///      letting the first staker after a long empty gap claim it all instantly (M-01).
     function _checkpointReward() internal {
         uint256 earningShares = totalSupply();
+        if (earningShares == 0) {
+            if (rewardRate != 0 && periodFinish > lastUpdateTime) {
+                periodFinish = uint64(block.timestamp) + (periodFinish - lastUpdateTime);
+            }
+            lastUpdateTime = uint64(block.timestamp);
+            return;
+        }
         uint256 t = block.timestamp < periodFinish ? block.timestamp : periodFinish;
         if (t > lastUpdateTime) {
-            if (earningShares == 0) {
-                if (rewardRate != 0) periodFinish += uint64(t - lastUpdateTime);
-            } else {
-                rewardPerShareStored += ((t - lastUpdateTime) * uint256(rewardRate) * REWARD_SCALE) / earningShares;
-            }
+            rewardPerShareStored += ((t - lastUpdateTime) * uint256(rewardRate) * REWARD_SCALE) / earningShares;
         }
         lastUpdateTime = uint64(t);
     }
