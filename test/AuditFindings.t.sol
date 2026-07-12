@@ -27,6 +27,24 @@ contract ZeroShareVault is ERC20, ERC4626 {
     }
 }
 
+/// @dev Vault that skims a 10% deposit fee OUT of the vault: the depositor's
+///      position is worth materially less than the assets put in — nonzero
+///      shares, short value (M-02).
+contract FeeSkimVault is ERC20, ERC4626 {
+    using SafeERC20 for IERC20;
+
+    constructor(IERC20 asset_) ERC20("Fee Vault", "FEE") ERC4626(asset_) {}
+
+    function decimals() public view override(ERC20, ERC4626) returns (uint8) {
+        return super.decimals();
+    }
+
+    function deposit(uint256 assets, address receiver) public override returns (uint256 shares) {
+        shares = super.deposit(assets, receiver);
+        IERC20(asset()).safeTransfer(address(0xFEE), assets / 10); // fee leaves the vault
+    }
+}
+
 contract AuditFindingsTest is SingleAssetCoverPoolTest {
     function test_Audit_SubDurationRewardRejectedInsteadOfStranding() public {
         _stake(alice, 100e6);
@@ -117,22 +135,28 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         assertEq(defi.activeIncidentId(), 0);
     }
 
-    /// @dev Async ERC-4626 conformance (audit test gap 4): maxRedeem/maxWithdraw
-    ///      advertise 0 outside the window, and redeem(maxRedeem) — the supported
-    ///      exit — succeeds exactly, after transfers of the excess and after a
-    ///      payout loss. (withdraw(maxWithdraw) may revert on ceil rounding after a
-    ///      loss — accepted M-07 residual; redeem is the conformant path.)
+    /// @dev Async ERC-4626 conformance (audit test gap 4 / M-07): redeem is the
+    ///      single exit door — redeem(maxRedeem) succeeds exactly, after transfers
+    ///      of the excess and after a payout loss. The asset door is disabled
+    ///      outright: withdraw() always reverts and maxWithdraw() is always 0, so
+    ///      no advertised amount can ever revert.
     function test_Audit_RedeemMaxRedeemConformsAfterTransferAndLoss() public {
         uint256 shares = _stake(alice, 100e6);
         vm.prank(alice);
         pool.requestRedeem(shares / 2);
 
-        // Not matured: both views advertise 0 (and redeem(0)>0 impossible).
-        assertEq(pool.maxRedeem(alice), 0);
+        // Asset-denominated exit is unsupported, in every state.
         assertEq(pool.maxWithdraw(alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(SingleAssetCoverPool.WithdrawNotSupported.selector);
+        pool.withdraw(1e6, alice, alice);
 
-        // Transfer the unlocked excess away, mature the request: views advertise
-        // exactly the request, never more than the remaining balance (M-03 lock).
+        // Not matured: the share door advertises 0 too.
+        assertEq(pool.maxRedeem(alice), 0);
+
+        // Transfer the unlocked excess away, mature the request: maxRedeem
+        // advertises exactly the request, never more than the remaining balance
+        // (M-03 lock).
         vm.startPrank(alice);
         pool.transfer(bob, shares - shares / 2);
         vm.warp(block.timestamp + pool.UNSTAKE_COOLDOWN());
@@ -144,25 +168,23 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         vm.prank(address(defi));
         pool.payClaim(carol, 30e6);
 
-        // redeem(maxRedeem) completes exactly at the advertised preview.
+        // redeem(maxRedeem) completes exactly at the advertised preview even at a
+        // fractional share price.
         uint256 redeemable = pool.maxRedeem(alice); // before prank: view call would consume it
         uint256 expectedAssets = pool.previewRedeem(redeemable);
-        assertEq(pool.maxWithdraw(alice), expectedAssets);
         vm.prank(alice);
         uint256 got = pool.redeem(redeemable, alice, alice);
         assertEq(got, expectedAssets);
         assertEq(usdc.balanceOf(alice), expectedAssets);
 
-        // Consumed request: views return to 0.
+        // Consumed request: the share door returns to 0.
         assertEq(pool.maxRedeem(alice), 0);
-        assertEq(pool.maxWithdraw(alice), 0);
 
         // An expired request advertises 0 again (bob never completes his).
         vm.prank(bob);
         pool.requestRedeem(shares - shares / 2);
         vm.warp(block.timestamp + pool.UNSTAKE_COOLDOWN() + pool.UNSTAKE_WINDOW() + 1);
         assertEq(pool.maxRedeem(bob), 0);
-        assertEq(pool.maxWithdraw(bob), 0);
     }
 
     function test_Audit_RequestedSharesAreLockedDuringCooldown() public {
@@ -255,6 +277,23 @@ contract AuditStrategyTest is Test {
         usdc.mint(address(strategy), 100e6);
         vm.prank(treasury);
         vm.expectRevert(ERC4626Strategy.ZeroSharesMinted.selector);
+        strategy.deploy(100e6);
+    }
+
+    function test_Audit_ValueShortDepositReverts() public {
+        MockERC20 template = new MockERC20("USDC", "USDC", 6);
+        vm.etch(MAINNET_USDC, address(template).code);
+        MockERC20 usdc = MockERC20(MAINNET_USDC);
+
+        address treasury = address(0xBEEF);
+        FeeSkimVault vault = new FeeSkimVault(IERC20(MAINNET_USDC));
+        ERC4626Strategy strategy = new ERC4626Strategy(treasury, vault);
+
+        // M-02: nonzero shares whose value is materially short of the deposit
+        // (fee-skimming / donation-manipulated vault) must also revert.
+        usdc.mint(address(strategy), 100e6);
+        vm.prank(treasury);
+        vm.expectRevert(abi.encodeWithSelector(ERC4626Strategy.DepositValueShort.selector, 100e6, 90e6));
         strategy.deploy(100e6);
     }
 }

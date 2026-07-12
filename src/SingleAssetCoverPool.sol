@@ -144,6 +144,7 @@ contract SingleAssetCoverPool is
     error FeeOnTransferUnsupported();
     error SharesLockedByRequest(uint256 locked);
     error RewardRateZero(uint256 total, uint256 duration);
+    error WithdrawNotSupported();
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -313,14 +314,21 @@ contract SingleAssetCoverPool is
         return super.redeem(shares, receiver, owner);
     }
 
-    function withdraw(uint256 assets, address receiver, address owner)
-        public
-        override
-        nonReentrant
-        whenNotPaused
-        returns (uint256)
-    {
-        return super.withdraw(assets, receiver, owner);
+    /// @notice Asset-denominated exits are NOT supported — exit via {redeem} (or
+    ///         {completeRedeem}) with the requested share count (audit M-07).
+    ///
+    ///         The unstake flow is share-denominated end-to-end: {requestRedeem}
+    ///         files an exact share count and completion burns exactly that count.
+    ///         withdraw() would have to ceil-convert an asset amount back to
+    ///         shares, and once a payout loss makes the share price fractional
+    ///         that conversion needn't land on the requested count — even
+    ///         withdraw(maxWithdraw(owner)) could revert. Rather than advertise an
+    ///         asset door that fails exactly in post-loss states, it is disabled:
+    ///         withdraw() always reverts and {maxWithdraw} is 0 (EIP-4626 requires
+    ///         advertised amounts to actually work). The assets for a request are
+    ///         previewRedeem(requestShares).
+    function withdraw(uint256, address, address) public pure override returns (uint256) {
+        revert WithdrawNotSupported();
     }
 
     /// @notice Matured redeem amount for `owner`: the full requested shares once the
@@ -330,8 +338,9 @@ contract SingleAssetCoverPool is
         return _maturedRequestShares(owner);
     }
 
-    function maxWithdraw(address owner) public view override returns (uint256) {
-        return previewRedeem(_maturedRequestShares(owner));
+    /// @notice Always 0 — asset-denominated exit is unsupported (see {withdraw}).
+    function maxWithdraw(address) public pure override returns (uint256) {
+        return 0;
     }
 
     function _maturedRequestShares(address owner) internal view returns (uint256) {

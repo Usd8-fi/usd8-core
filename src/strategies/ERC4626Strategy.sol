@@ -72,6 +72,12 @@ contract ERC4626Strategy is IStrategy {
     ///         committed with nothing tracking them (M-02).
     error ZeroSharesMinted();
 
+    /// @notice Thrown when the value of the shares minted by a deposit falls
+    ///         materially short of the USDC put in (M-02): a donation-manipulated
+    ///         share price, a deposit fee, or a nonconforming vault would
+    ///         otherwise silently commit the reserve loss.
+    error DepositValueShort(uint256 deposited, uint256 received);
+
     /// @notice Emitted when Treasury deploys USDC into the vault.
     event Deployed(uint256 amount);
 
@@ -103,13 +109,20 @@ contract ERC4626Strategy is IStrategy {
     /// @inheritdoc IStrategy
     /// @dev Caller (Treasury) is expected to have pushed amount USDC to this
     ///      contract immediately before this call. The vault mints shares to
-    ///      this contract (receiver = address(this)). Zero minted shares means
-    ///      the vault banked the USDC with nothing tracking it (fee-on-deposit,
-    ///      donation-inflated share price, or nonconforming vault) — revert so
-    ///      the reserve loss never commits (M-02).
+    ///      this contract (receiver = address(this)).
+    ///
+    ///      M-02 guards — the deposit must be value-neutral or revert, so a
+    ///      reserve loss never commits: zero minted shares (vault banked the
+    ///      USDC with nothing tracking it), or a position-value delta short of
+    ///      `amount` (donation-inflated share price, deposit fee, nonconforming
+    ///      vault). Honest conforming vaults lose at most wei-level rounding on
+    ///      the round trip, so the tolerance is 2 wei — no bps knob to tune.
     function deploy(uint256 amount) external onlyTreasury {
+        uint256 valueBefore = totalAssets();
         uint256 shares = vault.deposit(amount, address(this));
         if (shares == 0) revert ZeroSharesMinted();
+        uint256 received = totalAssets() - valueBefore;
+        if (received + 2 < amount) revert DepositValueShort(amount, received);
         emit Deployed(amount);
     }
 
@@ -128,7 +141,7 @@ contract ERC4626Strategy is IStrategy {
     /// @inheritdoc IStrategy
     /// @dev convertToAssets(balanceOf(this)) reflects principal, accrued yield,
     ///      and any fee-share dilution at the current vault share price.
-    function totalAssets() external view returns (uint256) {
+    function totalAssets() public view returns (uint256) {
         return vault.convertToAssets(vault.balanceOf(address(this)));
     }
 }
