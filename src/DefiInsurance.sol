@@ -452,6 +452,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     error NoActiveClaim();
     error NotActiveIncident(uint256 incidentId);
     error IncidentFinalizing(uint256 incidentId);
+    error IncidentNotOpen(uint256 incidentId);
     error OutsideSettlementPhase(uint256 incidentId);
     error NoStandingRoot(uint256 incidentId);
     error ClaimWindowStillOpen(uint256 incidentId);
@@ -807,6 +808,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
             // A claim is already live — just join it; no open attestation expected.
             if (referenceBlock != 0 || signature.length != 0) revert UnexpectedOpenAttestation();
             Incident storage cur = incidents[incidentId];
+            // Defense-in-depth (audit L-A): only an Open incident accepts joins.
+            // Given {disputeIncident} now requires a settled (post-window) root, a
+            // Disputed incident always has a closed claim window, so the window
+            // check below already blocks it — this makes the intent explicit and
+            // holds even if the dispute/settle timing is ever changed.
+            if (cur.status != Status.Open) revert IncidentNotOpen(incidentId);
             // A different token holding the system means one-at-a-time blocks us.
             if (cur.insuredToken != insuredToken) revert IncidentsActive();
             if (block.timestamp > cur.claimWindowEndTime) {
@@ -1027,9 +1034,18 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         uint256 incidentId = _requireActiveIncident();
         Incident storage inc = incidents[incidentId];
         if (inc.status != Status.Open) revert AlreadyDisputed(incidentId);
-        if (inc.root != bytes32(0) && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) {
-            revert IncidentFinalizing(incidentId);
-        }
+        // Dispute only ever targets a STANDING SETTLED root (audit L-A): a root
+        // exists only after {settleIncident}, which requires the claim window
+        // closed. This blocks a pre-settlement dispute — which would stamp
+        // {disputedAt} before the claim window ends and let the CORRECTION_WINDOW
+        // auto-void a valid incident before {correctSettlement} is even legal — and
+        // makes a Disputed incident unreachable while its claim window is open (so
+        // no one can escrow into a disputed incident). The pre-settlement emergency
+        // stop is {closeIncident}, which voids and returns escrow.
+        if (inc.root == bytes32(0)) revert NoStandingRoot(incidentId);
+        // ...and only within its DISPUTE window: once FINALIZE opens the root is
+        // final and claims may already be paying out.
+        if (block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) revert IncidentFinalizing(incidentId);
         inc.root = bytes32(0);
         inc.rootSubmittedAt = 0;
         inc.disputedAt = uint64(block.timestamp);
@@ -1088,6 +1104,43 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
 
         _commitRoot(incidentId, inc, root, poolPayouts);
         inc.status = Status.Open;
+        emit IncidentCorrected(incidentId, root);
+    }
+
+    /// @notice BETA-ONLY one-step correction: a trusted admin replaces a standing
+    ///         settled root with a corrected one directly, skipping the
+    ///         {disputeIncident} → timelock {correctSettlement} dance. Gated by
+    ///         {RegistryManaged.onlyBetaMode}, so it stops working the moment the
+    ///         timelock calls {Registry.endBetaMode} — after which correction is
+    ///         timelock-only via {correctSettlement}. This is the deliberate
+    ///         launch-phase centralization: it lets governance fix a bad TEE root
+    ///         without a 24h delay while TVL is small, and is one-way removable.
+    ///
+    ///         Allowed exactly where a {disputeIncident} would be — a standing
+    ///         (post-window) settled root still inside its DISPUTE window — so it
+    ///         can never touch a claim set that isn't frozen (root != 0 ⇒ the claim
+    ///         window is closed) nor a root that FINALIZE has already opened on.
+    ///         Shares {_commitRoot}: the corrected per-pool totals are capped
+    ///         identically (admin can't over-drain), and rootSubmittedAt resets so
+    ///         the corrected root runs its OWN fresh DISPUTE window — even this
+    ///         admin correction can be disputed by the timelock before it pays.
+    /// @param root         The corrected settlement root (non-zero).
+    /// @param poolPayouts  Corrected per-pool payout totals, aligned to {incidentPools}.
+    function adminCorrectSettlement(bytes32 root, uint256[] calldata poolPayouts)
+        external
+        onlyAdminOrTimelock
+        onlyBetaMode
+    {
+        uint256 incidentId = _requireActiveIncident();
+        if (root == bytes32(0)) revert NoStandingRoot(incidentId);
+        Incident storage inc = incidents[incidentId];
+        // Same eligibility as disputeIncident: a standing settled root, still
+        // within its DISPUTE window (FINALIZE not yet open, so no payout occurred).
+        if (inc.status != Status.Open) revert AlreadyDisputed(incidentId);
+        if (inc.root == bytes32(0)) revert NoStandingRoot(incidentId);
+        if (block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) revert IncidentFinalizing(incidentId);
+
+        _commitRoot(incidentId, inc, root, poolPayouts);
         emit IncidentCorrected(incidentId, root);
     }
 

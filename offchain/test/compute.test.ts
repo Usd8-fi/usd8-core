@@ -153,6 +153,20 @@ describe("settle — payout math", () => {
     for (const c of score) expect(c[4]).toBe(opts.referenceBlock);
   });
 
+  it("no live claims → zero root, empty rows (L-D, no crash)", async () => {
+    setEarned();
+    // Every registered claim cancelled → rows empty. Must NOT throw in
+    // StandardMerkleTree.of([]); returns the zero root instead.
+    const allCancelled: InputEvent[] = [
+      reg(1n, BOB, 100n * WAD, 60n),
+      { kind: "cancel", claimId: 1n, user: BOB, amount: 0n, scoreToSpend: 0n, boosterAmount: 0n, blockNumber: 5n, logIndex: 0 },
+    ];
+    const s = await settle({} as any, 1n, cfg, allCancelled, baseOpts(100n * WAD));
+    expect(s.rows).toEqual([]);
+    expect(s.root).toBe(`0x${"0".repeat(64)}`);
+    expect(s.poolPayouts).toEqual([0n]);
+  });
+
   it("cancelled claims are excluded", async () => {
     setEarned();
     const withCancel: InputEvent[] = [
@@ -164,15 +178,10 @@ describe("settle — payout math", () => {
   });
 });
 
-describe("earnedScoreOf — booster multiplier", () => {
-  it("no boosters → integral × rate", async () => {
+describe("earnedScoreOf — raw lifetime score", () => {
+  it("is the un-boosted integral × rate (booster applied later, on the unspent remainder)", async () => {
     h.integrals.set(BOB.toLowerCase(), 60n);
-    expect(await earnedScoreOf({} as any, cfg, BOB, 0n, 110n)).toEqual(60n);
-  });
-  it("each booster unit adds +100bps", async () => {
-    h.integrals.set(BOB.toLowerCase(), 60n);
-    // 2 units ⇒ +200bps ⇒ 60 × 10200/10000 = 61 (floored)
-    expect(await earnedScoreOf({} as any, cfg, BOB, 2n, 110n)).toEqual(61n);
+    expect(await earnedScoreOf({} as any, cfg, BOB, 110n)).toEqual(60n);
   });
 });
 
@@ -213,6 +222,20 @@ describe("settle — booster cap", () => {
     h.integrals.set(BOB.toLowerCase(), 100n);
     await settle({} as any, 1n, cfg, [boostReg(BOB, 0n)], baseOpts(10_000n * WAD));
     expect((chain.minErc1155BalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls.length).toBe(0);
+  });
+
+  it("I-2: booster boosts ONLY the unspent remainder, not already-spent score", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.boosterBalances.clear();
+    h.integrals.set(BOB.toLowerCase(), 100n); // raw lifetime earned = 100
+    h.boosterBalances.set(BOB.toLowerCase(), 2n); // holds the 2 committed
+    // 40 already spent on prior incidents. Correct: (100 − 40) × 10200/10000 = 61.
+    // The old bug gave 100 × 10200/10000 − 40 = 62 (booster boosting spent score).
+    const opts = { ...baseOpts(10_000n * WAD), spentOf: (_u: `0x${string}`) => 40n };
+    const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], opts);
+    expect(s.rows[0].earnedScore).toEqual(61n);
+    expect(s.rows[0].scoreSpent).toEqual(61n);
   });
 });
 
@@ -309,7 +332,7 @@ describe("earnedScoreOf — decimal normalization (F6)", () => {
     h.integrals.set(BOB.toLowerCase(), 1_000_000n); // same RAW balance·block integral
 
     const at = (dec: number) =>
-      earnedScoreOf({} as any, { ...cfg, scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n, decimals: dec }] }, BOB, 0n, 100n);
+      earnedScoreOf({} as any, { ...cfg, scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n, decimals: dec }] }, BOB, 100n);
 
     // A 6-dec token's raw integral must scale up by 1e12 vs an 18-dec token's, so
     // the same *whole-token* holding scores the same regardless of token decimals.

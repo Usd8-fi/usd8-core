@@ -69,6 +69,12 @@ contract SingleAssetCoverPool is
     ///         [requestedAt + COOLDOWN, requestedAt + COOLDOWN + WINDOW].
     uint64 public constant UNSTAKE_WINDOW = 2 days;
 
+    /// @notice Upper bound on {rewardsDuration} (L-F). A duration so long that
+    ///         total/duration floors the rate to 0 would brick funding
+    ///         ({RewardRateZero}) and risks overflow in the weighted-duration math;
+    ///         a year is far beyond any real emission schedule.
+    uint64 public constant MAX_REWARDS_DURATION = 365 days;
+
     /// @notice Fixed-point scaling for the {rewardPerShareStored} accumulator
     ///         (Synthetix pattern): the per-share increment floors to 0 without it.
     ///         See earlier revisions for the full precision/overflow rationale.
@@ -442,7 +448,7 @@ contract SingleAssetCoverPool is
 
     /// @notice Set the emission window for future distributions. Admin or timelock.
     function setRewardsDuration(uint64 newDuration) external onlyAdminOrTimelock {
-        if (newDuration == 0) revert InvalidRewardsDuration();
+        if (newDuration == 0 || newDuration > MAX_REWARDS_DURATION) revert InvalidRewardsDuration();
         emit RewardsDurationSet(rewardsDuration, newDuration);
         rewardsDuration = newDuration;
     }

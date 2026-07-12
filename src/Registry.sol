@@ -126,6 +126,18 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         per-incident budgeting; this mirror is the convenience total.
     mapping(address account => uint256) public scoreSpent;
 
+    /// @notice Beta launch mode. While true, functions gated by
+    ///         {RegistryManaged.onlyBetaMode} let a trusted admin stand in for the
+    ///         timelock on specific operational shortcuts (currently only
+    ///         {DefiInsurance.adminCorrectSettlement} — direct admin root
+    ///         correction without the two-step timelock dance). ONE-WAY: starts
+    ///         true at {initialize}, the timelock flips it off permanently via
+    ///         {endBetaMode}, and there is deliberately no re-enable — so the
+    ///         centralization can be removed before real volume but never secretly
+    ///         restored. It never relaxes the master powers (upgrades, role
+    ///         changes, strategy approval), which stay timelock-only always.
+    bool public betaMode;
+
     // ─────────────────────────── Errors / events ───────────────────────────
 
     error UnauthorizedTimelock(address caller);
@@ -150,6 +162,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     event ScoredTokenRemoved(IERC20 indexed token);
     event BoosterNFTSet(address indexed oldBooster, address indexed newBooster);
     event ScoreSpentRecorded(address indexed account, uint256 amount, uint256 newTotal);
+    event BetaModeEnded();
 
     modifier onlyTimelock() {
         _requireTimelock(msg.sender);
@@ -187,6 +200,15 @@ contract Registry is Initializable, UUPSUpgradeable {
         emit AdminSet(_admin, true);
         maxCoverPoolPayoutBps = 5000; // 50% default; timelock-tunable
         emit MaxCoverPoolPayoutBpsSet(0, 5000);
+        betaMode = true; // launch in beta; timelock ends it via {endBetaMode}
+    }
+
+    /// @notice Permanently leave beta: admin shortcuts gated by
+    ///         {RegistryManaged.onlyBetaMode} stop working and those operations
+    ///         become timelock-only. Timelock only, ONE-WAY (no re-enable).
+    function endBetaMode() external onlyTimelock {
+        betaMode = false;
+        emit BetaModeEnded();
     }
 
     /// @dev Only the timelock can upgrade the Registry — the same authority that

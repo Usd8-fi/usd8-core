@@ -65,6 +65,8 @@ abstract contract RegistryManaged {
     error EthTransferFailed();
     /// @notice Nothing sweepable for this token (address(0) = ETH).
     error NothingToSweep(address token);
+    /// @notice A beta-only operation was called after {Registry.endBetaMode}.
+    error NotBetaMode();
 
     event RegistryChanged(address indexed oldRegistry, address indexed newRegistry);
     event ETHSwept(address indexed to, uint256 amount);
@@ -101,6 +103,16 @@ abstract contract RegistryManaged {
     /// @dev Reverts while THIS contract is paused in the registry.
     modifier whenNotPaused() {
         _registryManagedStorage().registry.requireNotPaused(address(this));
+        _;
+    }
+
+    /// @dev Reverts once beta has ended ({Registry.endBetaMode}). Gates the
+    ///      trusted-admin operational shortcuts that are only acceptable at launch;
+    ///      pair it with {onlyAdminOrTimelock} on the guarded function. Does NOT by
+    ///      itself grant any authority — it only widens WHEN an already-authorized
+    ///      shortcut is allowed. Never applied to master powers.
+    modifier onlyBetaMode() {
+        if (!_registryManagedStorage().registry.betaMode()) revert NotBetaMode();
         _;
     }
 

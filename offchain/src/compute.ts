@@ -32,7 +32,7 @@ export interface SettledRow {
   escrowAmount: bigint;
   eligibleAmount: bigint;
   lossUsd: bigint; // 1e18
-  earnedScore: bigint; // total available-to-spend before this claim
+  earnedScore: bigint; // score available to spend this claim = (raw lifetime − spent) × booster multiplier
   scoreSpent: bigint; // min(requested, available) — the payout weight, recorded via ScoreSpent
   payoutUsd: bigint; // 1e18, post-κ, post-share
   amounts: bigint[]; // aligned to the registered pool list (one scalar per pool)
@@ -87,7 +87,6 @@ export async function earnedScoreOf(
   client: PublicClient,
   cfg: IncidentConfig,
   user: `0x${string}`,
-  boosterAmount: bigint,
   asOfBlock: bigint
 ): Promise<bigint> {
   let score = 0n;
@@ -102,10 +101,10 @@ export async function earnedScoreOf(
       st.decimals <= 18 ? integral * 10n ** BigInt(18 - st.decimals) : integral / 10n ** BigInt(st.decimals - 18);
     score += norm18 * st.scorePerTokenPerBlock;
   }
-  // Booster multiplier: each committed unit adds BOOSTER_BOOST_BPS.
-  // multiplier = (BPS + amount × bps) / BPS. Divide by SCORE_SCALE here so the
-  // rate's hundredths convention applies once, at full precision.
-  return (score * (BPS + boosterAmount * BOOSTER_BOOST_BPS)) / (BPS * SCORE_SCALE);
+  // RAW lifetime score in WAD (SCORE_SCALE cancels the rate's 1e18). The booster
+  // multiplier is NOT applied here — the caller applies it to the UNSPENT remainder
+  // only (see {settle} / I-2), so a booster can't retroactively boost spent score.
+  return score / SCORE_SCALE;
 }
 
 /**
@@ -181,12 +180,17 @@ export async function settle(
       boost = e.boosterAmount < held ? e.boosterAmount : held;
     }
 
-    // Earned score as of referenceBlock, minus what's already been spent on
-    // prior claims. Pinned pre-incident (like eligibility) so the claim window
-    // can't be used to farm fresh score.
-    const earned = await earnedScoreOf(client, cfg, e.user, boost, opts.referenceBlock);
+    // Raw lifetime earned score as of referenceBlock, minus what's already been
+    // spent on prior claims → the UNSPENT remainder. Pinned pre-incident (like
+    // eligibility) so the claim window can't be used to farm fresh score.
+    const earned = await earnedScoreOf(client, cfg, e.user, opts.referenceBlock);
     const spent = opts.spentOf(e.user);
-    const available = earned > spent ? earned - spent : 0n;
+    const unspent = earned > spent ? earned - spent : 0n;
+    // The booster boosts ONLY the unspent remainder (I-2): committing a booster now
+    // must not retroactively multiply score already consumed on prior incidents.
+    // multiplier = (BPS + boost × BOOSTER_BOOST_BPS) / BPS, applied here (not in
+    // earnedScoreOf) so the +1%/unit lands on what's actually claimable.
+    const available = (unspent * (BPS + boost * BOOSTER_BOOST_BPS)) / BPS;
     // The claimant spends what they requested, capped to availability.
     const scoreSpent = e.scoreToSpend < available ? e.scoreToSpend : available;
     rows.push({
@@ -195,7 +199,7 @@ export async function settle(
       escrowAmount: e.amount,
       eligibleAmount: eligible,
       lossUsd,
-      earnedScore: earned,
+      earnedScore: available,
       scoreSpent,
       payoutUsd: 0n,
       amounts: [],
@@ -240,13 +244,17 @@ export async function settle(
     for (let i = 0; i < poolPayouts.length; i++) poolPayouts[i] += r.amounts[i];
   }
 
-  const tree = settlementTree(incidentId, rows);
+  // No live claims (claimless open, or all cancelled) → no leaves. OZ
+  // StandardMerkleTree.of([]) throws, so return the zero root explicitly (L-D):
+  // such an incident is non-settleable on-chain (unresolved == 0), so this is a
+  // clean "nothing to settle" result, not a crash.
+  const root = rows.length === 0 ? (`0x${"0".repeat(64)}` as `0x${string}`) : (settlementTree(incidentId, rows).root as `0x${string}`);
 
   return {
     incidentId,
     referenceBlock: refBlock,
     twapRatio: twap,
-    root: tree.root as `0x${string}`,
+    root,
     poolOrder: opts.poolOrder,
     poolAddrs: opts.poolAddrs,
     poolPayouts,

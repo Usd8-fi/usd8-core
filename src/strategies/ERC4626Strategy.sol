@@ -122,7 +122,15 @@ contract ERC4626Strategy is IStrategy {
         uint256 shares = vault.deposit(amount, address(this));
         if (shares == 0) revert ZeroSharesMinted();
         uint256 received = totalAssets() - valueBefore;
-        if (received + 2 < amount) revert DepositValueShort(amount, received);
+        // Tolerance = the value of ONE share base-unit (+1 for the convertToAssets
+        // floor). A deposit mints floor(amount / sharePrice) shares, so it rounds
+        // down by at most one share's worth of assets — which, for an appreciated
+        // vault (e.g. Aave stataUSDC once its rate climbs), exceeds a fixed 2-wei
+        // slack and would wrongly revert every honest deposit (L-B). Scaling to the
+        // vault's own share granularity tolerates exactly that rounding and no more,
+        // so a fee/donation-manipulated short mint still reverts.
+        uint256 tolerance = vault.convertToAssets(1) + 1;
+        if (received + tolerance < amount) revert DepositValueShort(amount, received);
         emit Deployed(amount);
     }
 

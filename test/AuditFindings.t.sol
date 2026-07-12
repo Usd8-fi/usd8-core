@@ -8,6 +8,8 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SingleAssetCoverPoolTest} from "./SingleAssetCoverPool.t.sol";
 import {DefiInsurance} from "../src/DefiInsurance.sol";
+import {RegistryManaged} from "../src/RegistryManaged.sol";
+import {Registry} from "../src/Registry.sol";
 import {SingleAssetCoverPool} from "../src/SingleAssetCoverPool.sol";
 import {ERC4626Strategy} from "../src/strategies/ERC4626Strategy.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -24,6 +26,32 @@ contract ZeroShareVault is ERC20, ERC4626 {
     function deposit(uint256 assets, address) public override returns (uint256 shares) {
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), assets);
         return 0;
+    }
+}
+
+/// @dev Vault whose share price is a fixed, high rate (1 share = RATE asset
+///      base-units), like an Aave stataUSDC wrapper after years of accrual. A
+///      deposit rounds down by up to RATE base-units — far more than a fixed
+///      2-wei slack — so it exercises the L-B granularity-scaled tolerance.
+contract AppreciatedVault is ERC20, ERC4626 {
+    using SafeERC20 for IERC20;
+
+    uint256 public constant RATE = 1000; // asset base-units per share base-unit
+
+    constructor(IERC20 asset_) ERC20("Appreciated", "APR") ERC4626(asset_) {}
+
+    function decimals() public view override(ERC20, ERC4626) returns (uint8) {
+        return super.decimals();
+    }
+
+    function deposit(uint256 assets, address receiver) public override returns (uint256 shares) {
+        shares = assets / RATE; // floor: a non-multiple deposit loses up to RATE-1 of value
+        IERC20(asset()).safeTransferFrom(msg.sender, address(this), assets);
+        _mint(receiver, shares);
+    }
+
+    function convertToAssets(uint256 shares) public pure override returns (uint256) {
+        return shares * RATE;
     }
 }
 
@@ -62,24 +90,80 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         assertEq(pool.rewardReserve(), 0, "nothing reserved");
     }
 
-    function test_Audit_CorrectionCannotCommitRootBeforeClaimWindowEnds() public {
-        uint256 claimId = _registerClaim(bob, lp1, 50e18);
-        uint256[] memory amounts = _amounts(0);
-        bytes32 root = _leaf(1, claimId, bob, amounts);
+    /// @dev L-A: dispute may only target a STANDING SETTLED root. A pre-settlement
+    ///      dispute reverts NoStandingRoot, so it can't stamp disputedAt early (which
+    ///      would let CORRECTION_WINDOW auto-void a valid incident) or move the
+    ///      incident to Disputed while its claim window is still open. The
+    ///      pre-settlement emergency stop is closeIncident.
+    function test_Audit_DisputeRequiresStandingRoot() public {
+        _registerClaim(bob, lp1, 50e18);
+        (, uint64 wEnd,,,,,,,,) = defi.incidents(1);
+        assertLe(block.timestamp, wEnd, "still inside the claim window, no root settled");
 
-        // Disputing mid-claim-window is still allowed (a pure defensive halt), but…
+        // No standing root → dispute rejected.
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.NoStandingRoot.selector, uint256(1)));
+        defi.disputeIncident();
+
+        // closeIncident IS the pre-settlement stop: it voids and unfreezes.
+        vm.prank(admin);
+        defi.closeIncident();
+        assertEq(defi.activeIncidentId(), 0, "closed incident is no longer active");
+    }
+
+    /// @dev L-A: once settled, dispute works normally (root standing, within the
+    ///      DISPUTE window) — the standing-root gate doesn't break the real flow.
+    function test_Audit_DisputeWorksOnceSettled() public {
+        uint256 claimId = _registerClaim(bob, lp1, 50e18);
+        vm.warp(block.timestamp + 5 days + 1); // claim window closed
+        _settle(1, _leaf(1, claimId, bob, _amounts(0)));
+
         vm.prank(admin);
         defi.disputeIncident();
-        uint256[] memory poolPayouts = _pp();
+        (,, bytes32 root,,,,, DefiInsurance.Status status,,) = defi.incidents(1);
+        assertEq(root, bytes32(0), "bad root cleared");
+        assertTrue(status == DefiInsurance.Status.Disputed, "status Disputed");
+    }
 
-        // …the corrected (payable) root cannot be committed until the claim set is
-        // frozen (H-03). Without this guard the root could finalize while claims are
-        // still joining/cancelling.
-        (, uint64 wEnd,,,,,,,,) = defi.incidents(1);
-        assertLe(block.timestamp, wEnd, "still inside the claim window");
+    /// @dev Beta mode: admin corrects a bad TEE root in ONE call (no separate
+    ///      dispute, no timelock); the corrected root runs its own fresh DISPUTE
+    ///      window, then finalizes and pays the corrected amount.
+    function test_Audit_AdminCorrectSettlementInBeta() public {
+        assertTrue(registry.betaMode(), "launches in beta");
+        _stake(alice, 100e6); // underwrite so payouts have capital
+        uint256 claimId = _registerClaim(bob, lp1, 50e18);
+        vm.warp(block.timestamp + 5 days + 1);
+        _settle(1, _leaf(1, claimId, bob, _amounts(50e6))); // bad root (overpays)
+
+        // Admin fixes it directly, in beta — one call. Precompute leaf/pp (their
+        // external reads would otherwise consume the prank).
+        uint256[] memory good = _amounts(20e6);
+        bytes32 corrRoot = _leaf(1, claimId, bob, good);
+        uint256[] memory pp = _pp();
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.ClaimWindowStillOpen.selector, uint256(1)));
-        defi.correctSettlement(root, poolPayouts);
+        defi.adminCorrectSettlement(corrRoot, pp);
+
+        // Fresh DISPUTE window on the corrected root, then pay the corrected amount.
+        vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1);
+        _finalize(claimId, good, 0);
+        assertEq(usdc.balanceOf(bob), 20e6, "paid the admin-corrected amount");
+    }
+
+    /// @dev Once the timelock ends beta, the admin shortcut is gone — one-way.
+    function test_Audit_AdminCorrectSettlementRejectedAfterBeta() public {
+        uint256 claimId = _registerClaim(bob, lp1, 50e18);
+        vm.warp(block.timestamp + 5 days + 1);
+        _settle(1, _leaf(1, claimId, bob, _amounts(0)));
+
+        vm.prank(admin); // admin == timelock in this harness
+        registry.endBetaMode();
+        assertFalse(registry.betaMode());
+
+        bytes32 corrRoot = _leaf(1, claimId, bob, _amounts(0));
+        uint256[] memory pp = _pp();
+        vm.prank(admin);
+        vm.expectRevert(RegistryManaged.NotBetaMode.selector);
+        defi.adminCorrectSettlement(corrRoot, pp);
     }
 
     /// @dev Full claim/settle/dispute/correct/finalize state machine in phase order
@@ -187,6 +271,19 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         assertEq(pool.maxRedeem(bob), 0);
     }
 
+    function test_Audit_RewardsDurationBounded() public {
+        // L-F: 0 and anything past the 1-year cap are rejected; the cap itself is ok.
+        uint64 maxDur = pool.MAX_REWARDS_DURATION(); // read before prank/expectRevert
+        vm.startPrank(admin);
+        vm.expectRevert(SingleAssetCoverPool.InvalidRewardsDuration.selector);
+        pool.setRewardsDuration(0);
+        vm.expectRevert(SingleAssetCoverPool.InvalidRewardsDuration.selector);
+        pool.setRewardsDuration(maxDur + 1);
+        pool.setRewardsDuration(maxDur); // exactly the cap is fine
+        vm.stopPrank();
+        assertEq(pool.rewardsDuration(), maxDur);
+    }
+
     function test_Audit_RequestedSharesAreLockedDuringCooldown() public {
         uint256 shares = _stake(alice, 100e6);
         vm.prank(alice);
@@ -278,6 +375,25 @@ contract AuditStrategyTest is Test {
         vm.prank(treasury);
         vm.expectRevert(ERC4626Strategy.ZeroSharesMinted.selector);
         strategy.deploy(100e6);
+    }
+
+    function test_Audit_AppreciatedVaultDepositDoesNotFalselyRevert() public {
+        MockERC20 template = new MockERC20("USDC", "USDC", 6);
+        vm.etch(MAINNET_USDC, address(template).code);
+        MockERC20 usdc = MockERC20(MAINNET_USDC);
+
+        address treasury = address(0xBEEF);
+        AppreciatedVault vault = new AppreciatedVault(IERC20(MAINNET_USDC));
+        ERC4626Strategy strategy = new ERC4626Strategy(treasury, vault);
+
+        // Deposit a non-multiple of RATE (1000): shares floor loses 7 base-units of
+        // value — more than the old fixed 2-wei tolerance would allow, so this would
+        // have wrongly reverted. The L-B granularity-scaled tolerance accepts it.
+        uint256 amount = 100_000_000 + 7;
+        usdc.mint(address(strategy), amount);
+        vm.prank(treasury);
+        strategy.deploy(amount); // must NOT revert
+        assertEq(strategy.totalAssets(), 100_000_000, "position value = floor(amount/RATE)*RATE");
     }
 
     function test_Audit_ValueShortDepositReverts() public {

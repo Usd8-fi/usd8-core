@@ -94,6 +94,47 @@ function orderLogs<T extends { blockNumber: bigint; logIndex: number }>(a: T, b:
   return a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : Number(a.blockNumber - b.blockNumber);
 }
 
+// eth_getLogs safety (audit H-A). A single unbounded getLogs over a multi-million-
+// block span — e.g. a scored token's integral from its startBlock, or a claimant's
+// full transfer history — is either REJECTED by a rate-limited provider (throws →
+// no root → the incident voids → coverage denied) or, worse, SILENTLY TRUNCATED,
+// dropping Transfer logs so a claimant's held balance is overstated (overpay) and
+// two honest recomputes disagree. Every historical read goes through this instead:
+// it walks the range in bounded chunks AND, if any chunk returns a full page
+// (≥ LOG_RESULT_CAP), bisects it — so truncation can never pass unnoticed and the
+// merged result is identical regardless of provider. An inverted range (to < from)
+// yields [] deterministically (guards the degenerate window, audit L-C).
+const MAX_LOG_RANGE = 10_000n; // blocks per request — under common provider caps; tunable
+const LOG_RESULT_CAP = 10_000; // a chunk returning ≥ this may be capped → bisect and retry
+
+type LogQuery = { address: `0x${string}`; event: unknown; args?: Record<string, unknown> };
+
+export async function getLogsChunked(
+  client: PublicClient,
+  q: LogQuery,
+  fromBlock: bigint,
+  toBlock: bigint
+): Promise<any[]> {
+  const out: any[] = [];
+  for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
+    const end = start + MAX_LOG_RANGE - 1n < toBlock ? start + MAX_LOG_RANGE - 1n : toBlock;
+    out.push(...(await getLogsBisect(client, q, start, end)));
+  }
+  return out;
+}
+
+async function getLogsBisect(client: PublicClient, q: LogQuery, fromBlock: bigint, toBlock: bigint): Promise<any[]> {
+  const logs = (await client.getLogs({ ...q, fromBlock, toBlock } as any)) as any[];
+  // A full page might have been silently capped. If we can still split the range,
+  // bisect and retry; a single block truly holding that many matching logs is
+  // accepted (nothing left to split, and infeasible for a per-account filter).
+  if (logs.length < LOG_RESULT_CAP || fromBlock >= toBlock) return logs;
+  const mid = fromBlock + (toBlock - fromBlock) / 2n;
+  const lo = await getLogsBisect(client, q, fromBlock, mid);
+  const hi = await getLogsBisect(client, q, mid + 1n, toBlock);
+  return [...lo, ...hi];
+}
+
 /**
  * The incident's register/cancel events in chronological (block, logIndex)
  * order. Note ClaimCancelled is not indexed by incidentId, so cancels are
@@ -105,20 +146,19 @@ export async function readInputEvents(
   fromBlock: bigint,
   toBlock: bigint
 ): Promise<InputEvent[]> {
-  const regs = await client.getLogs({
-    address: CONFIG.defiInsurance,
-    event: CLAIM_REGISTERED,
-    args: { incidentId },
+  const regs = await getLogsChunked(
+    client,
+    { address: CONFIG.defiInsurance, event: CLAIM_REGISTERED, args: { incidentId } },
     fromBlock,
-    toBlock,
-  });
+    toBlock
+  );
   const claimIds = new Set(regs.map((r) => r.args.claimId!));
-  const cancels = await client.getLogs({
-    address: CONFIG.defiInsurance,
-    event: CLAIM_CANCELLED,
+  const cancels = await getLogsChunked(
+    client,
+    { address: CONFIG.defiInsurance, event: CLAIM_CANCELLED },
     fromBlock,
-    toBlock,
-  });
+    toBlock
+  );
 
   const events: InputEvent[] = [
     ...regs.map((r) => ({
@@ -406,8 +446,9 @@ export async function minBalanceOver(
 ): Promise<bigint> {
   let bal = await balanceOfAt(client, token, who, fromBlock);
   let min = bal;
-  const outs = await client.getLogs({ address: token, event: ERC20_TRANSFER, args: { from: who }, fromBlock: fromBlock + 1n, toBlock });
-  const ins = await client.getLogs({ address: token, event: ERC20_TRANSFER, args: { to: who }, fromBlock: fromBlock + 1n, toBlock });
+  if (toBlock <= fromBlock) return min; // degenerate window (audit L-C)
+  const outs = await getLogsChunked(client, { address: token, event: ERC20_TRANSFER, args: { from: who } }, fromBlock + 1n, toBlock);
+  const ins = await getLogsChunked(client, { address: token, event: ERC20_TRANSFER, args: { to: who } }, fromBlock + 1n, toBlock);
   for (const e of netByLog(outs, ins)) {
     bal += e.delta;
     if (bal < min) min = bal;
@@ -452,13 +493,13 @@ export async function minErc1155BalanceOver(
     else byKey.set(key, { blockNumber: l.blockNumber as bigint, logIndex: l.logIndex as number, delta });
   };
 
-  const outSingle = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_SINGLE, args: { from: who }, fromBlock: from, toBlock });
-  const inSingle = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_SINGLE, args: { to: who }, fromBlock: from, toBlock });
+  const outSingle = await getLogsChunked(client, { address: collection, event: ERC1155_TRANSFER_SINGLE, args: { from: who } }, from, toBlock);
+  const inSingle = await getLogsChunked(client, { address: collection, event: ERC1155_TRANSFER_SINGLE, args: { to: who } }, from, toBlock);
   for (const l of outSingle) if ((l.args.id as bigint) === id) push(l, -(l.args.value as bigint));
   for (const l of inSingle) if ((l.args.id as bigint) === id) push(l, l.args.value as bigint);
 
-  const outBatch = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_BATCH, args: { from: who }, fromBlock: from, toBlock });
-  const inBatch = await client.getLogs({ address: collection, event: ERC1155_TRANSFER_BATCH, args: { to: who }, fromBlock: from, toBlock });
+  const outBatch = await getLogsChunked(client, { address: collection, event: ERC1155_TRANSFER_BATCH, args: { from: who } }, from, toBlock);
+  const inBatch = await getLogsChunked(client, { address: collection, event: ERC1155_TRANSFER_BATCH, args: { to: who } }, from, toBlock);
   const batchDelta = (l: any): bigint => {
     const ids = l.args.ids as bigint[];
     const vals = l.args.values as bigint[];
@@ -493,8 +534,8 @@ export async function tokenBlockIntegral(
 ): Promise<bigint> {
   if (toBlock <= fromBlock) return 0n;
   let bal = await balanceOfAt(client, token, who, fromBlock);
-  const outs = await client.getLogs({ address: token, event: ERC20_TRANSFER, args: { from: who }, fromBlock: fromBlock + 1n, toBlock });
-  const ins = await client.getLogs({ address: token, event: ERC20_TRANSFER, args: { to: who }, fromBlock: fromBlock + 1n, toBlock });
+  const outs = await getLogsChunked(client, { address: token, event: ERC20_TRANSFER, args: { from: who } }, fromBlock + 1n, toBlock);
+  const ins = await getLogsChunked(client, { address: token, event: ERC20_TRANSFER, args: { to: who } }, fromBlock + 1n, toBlock);
   let acc = 0n;
   let cursor = fromBlock;
   for (const e of netByLog(outs, ins)) {
