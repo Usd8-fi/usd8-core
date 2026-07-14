@@ -281,7 +281,9 @@ contract StatelessFuzzTest is Test {
         usd8 = USD8(
             address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, address(this)))))
         );
-        treasury = new Treasury(usd8, registry);
+        treasury = Treasury(
+            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (usd8, registry))))
+        );
         usd8.setTreasury(address(treasury));
     }
 

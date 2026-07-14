@@ -25,8 +25,8 @@ import {ERC4626Strategy} from "../src/strategies/ERC4626Strategy.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 /// @title  Deploy
-/// @notice Deployer: Registry, USD8 (proxy + impl), Treasury (with two USDC yield
-///         strategies — Aave + Morpho), SavingsUSD8, a wstETH SingleAssetCoverPool
+/// @notice Deployer: Registry, USD8 (proxy + impl), Treasury (UUPS proxy + impl,
+///         with two USDC yield strategies — Aave + Morpho), SavingsUSD8, a wstETH SingleAssetCoverPool
 ///         behind an UpgradeableBeacon (the capital base), and DefiInsurance (the
 ///         single payout module). Scored tokens (USD8, sUSD8) and the booster are
 ///         set on the Registry. Insured tokens and extra pools are left for
@@ -68,8 +68,9 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///     for / paid out of a single incident at once).
 ///
 ///  5. setTimelock IS IRREVERSIBLE — TRIPLE-CHECK THE ADDRESS. setTimelock is
-///     single-step, and the timelock holds upgrade authority for USD8 + SavingsUSD8
-///     (UUPS) and owns the pool beacon (all pools upgrade through it). A wrong or
+///     single-step, and the timelock holds upgrade authority for Registry, USD8,
+///     Treasury, and SavingsUSD8 (UUPS), and owns the pool beacon (all pools
+///     upgrade through it). A wrong or
 ///     typo'd address permanently and unrecoverably loses governance AND
 ///     upgradeability. NOTE: the pool beacon is Ownable and its ownership is
 ///     transferred to the timelock in _handOffRoles — a separate handle from the
@@ -131,6 +132,7 @@ contract DeployScript is Script {
         Registry registry;
         address usd8Impl;
         USD8 usd8;
+        address treasuryImpl;
         Treasury treasury;
         address savingsImpl;
         SavingsUSD8 savings;
@@ -166,7 +168,8 @@ contract DeployScript is Script {
 
         // Central access + pause registry. Deployer is timelock AND initial admin
         // for setup; roles are handed to governance on the Registry in
-        // _handOffRoles. Every contract below takes this as an immutable.
+        // _handOffRoles. Every contract below keeps this as its fixed registry
+        // pointer.
         // Registry is UUPS-upgradeable (impl + ERC-1967 proxy), timelock-gated upgrades.
         // maxCoverPoolPayoutBps defaults to 50% in initialize.
         d.registry = Registry(
@@ -175,14 +178,24 @@ contract DeployScript is Script {
             )
         );
 
-        // USD8 impl + ERC-1967 proxy. Deployer is placeholder treasury so we can
-        // wire the real Treasury below.
+        // USD8 impl + ERC-1967 proxy. The locked implementation is the inert
+        // placeholder treasury while we wire the real Treasury below — never the
+        // broadcaster EOA, so a partial multi-transaction broadcast cannot leave
+        // an externally controlled account with mint/burn authority.
         USD8 impl = new USD8();
         d.usd8Impl = address(impl);
-        d.usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (d.registry, deployer)))));
+        d.usd8 = USD8(
+            address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (d.registry, address(impl)))))
+        );
 
-        // Treasury.
-        d.treasury = new Treasury(d.usd8, d.registry);
+        // Treasury impl + ERC-1967 proxy (UUPS, timelock-upgraded in place, M-06).
+        // Fresh-deployment path only: this does not migrate a funded legacy
+        // constructor Treasury's reserve, strategies, or receiver configuration.
+        Treasury treasuryImpl = new Treasury();
+        d.treasuryImpl = address(treasuryImpl);
+        d.treasury = Treasury(
+            address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (d.usd8, d.registry))))
+        );
 
         // Flip USD8's mint/burn permission to Treasury so the seed mint goes
         // through the normal USDC-backed mint path (no unbacked supply).
@@ -198,6 +211,7 @@ contract DeployScript is Script {
         SavingsSeeder savingsSeeder = new SavingsSeeder();
         d.treasury.USDC().transfer(address(savingsSeeder), SEED_USDC);
         d.savings = savingsSeeder.run(address(savingsImpl), d.registry, d.usd8, d.treasury, SEED_USDC, SEED_SINK);
+        assert(d.usd8.treasuryLocked());
 
         // SingleAssetCoverPool implementation behind a shared UpgradeableBeacon (owner
         // = deployer, handed to the timelock in _handOffRoles). One beacon upgrade
@@ -289,7 +303,8 @@ contract DeployScript is Script {
         console2.log("Proxy:             ", address(d.usd8));
         console2.log("");
         console2.log("=== Treasury ===");
-        console2.log("Address:           ", address(d.treasury));
+        console2.log("Implementation:    ", d.treasuryImpl);
+        console2.log("Proxy:             ", address(d.treasury));
         console2.log("");
         console2.log("=== SavingsUSD8 ===");
         console2.log("Implementation:    ", d.savingsImpl);

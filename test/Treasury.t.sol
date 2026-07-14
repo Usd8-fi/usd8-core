@@ -16,6 +16,8 @@ import {Treasury} from "../src/Treasury.sol";
 import {Registry} from "../src/Registry.sol";
 import {RegistryManaged} from "../src/RegistryManaged.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
@@ -28,6 +30,7 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 contract TreasuryTest is Test {
     Registry registry;
     USD8 usd8;
+    Treasury treasuryImpl;
     Treasury treasury;
     MockERC20 usdc;
 
@@ -72,7 +75,10 @@ contract TreasuryTest is Test {
         bytes memory init = abi.encodeCall(USD8.initialize, (registry, address(this)));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         usd8 = USD8(address(proxy));
-        treasury = new Treasury(usd8, registry);
+        treasuryImpl = new Treasury();
+        treasury = Treasury(
+            address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (usd8, registry))))
+        );
         vm.prank(timelock);
         usd8.setTreasury(address(treasury));
 
@@ -85,6 +91,32 @@ contract TreasuryTest is Test {
         assertEq(address(treasury.USDC()), USDC_ADDR);
         assertEq(treasury.USDC_TO_USD8_SCALE(), 1e12);
         assertEq(address(treasury.usd8()), address(usd8));
+    }
+
+    function test_ImplementationDisabled() public {
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        treasuryImpl.initialize(usd8, registry);
+    }
+
+    function test_InitializeOnlyOnce() public {
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        treasury.initialize(usd8, registry);
+    }
+
+    function test_InitializeRejectsNonContractUsd8() public {
+        vm.expectRevert(abi.encodeWithSelector(Treasury.InvalidContract.selector, alice));
+        new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (USD8(alice), registry)));
+    }
+
+    function test_InitializeRejectsMismatchedRegistry() public {
+        Registry otherRegistry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, admin))))
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Treasury.RegistryMismatch.selector, address(otherRegistry), address(registry))
+        );
+        new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (usd8, otherRegistry)));
     }
 
     // -- Pause system (single strict pause) -------------------------------
@@ -221,36 +253,108 @@ contract TreasuryTest is Test {
         assertEq(treasury.strategiesLength(), 0);
     }
 
-    function test_Usd8TreasuryMigratesToNewTreasury() public {
+    function _newTreasury() internal returns (Treasury) {
+        return Treasury(
+            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (usd8, registry))))
+        );
+    }
+
+    /// @dev M-06: the Treasury may be re-pointed only before first issuance
+    ///      (initial wiring). Once USD8 is live, setTreasury stays LOCKED even
+    ///      after supply returns to zero, so the reserve anchor cannot move.
+    function test_SetTreasuryLockedOnceSupplyExists() public {
+        // Supply is still 0 here (setUp minted nothing) — a re-point is allowed.
+        Treasury treasuryB = _newTreasury();
+        vm.prank(timelock);
+        usd8.setTreasury(address(treasuryB));
+        assertEq(usd8.treasury(), address(treasuryB));
+
+        // Mint so supply > 0.
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(treasuryB), 100e6);
+        treasuryB.mintUSD8(100e6);
+        vm.stopPrank();
+        assertEq(usd8.totalSupply(), 100e18);
+
+        // Now rotation is barred — no fragmenting backing from liabilities.
+        Treasury treasuryC = _newTreasury();
+        vm.prank(timelock);
+        vm.expectRevert(USD8.TreasuryLocked.selector);
+        usd8.setTreasury(address(treasuryC));
+        assertEq(usd8.treasury(), address(treasuryB)); // unchanged
+
+        // The lock is historical, not merely `totalSupply != 0`: even after all
+        // liabilities are redeemed, residual reserve/strategy value cannot be
+        // abandoned by rotating away from the stable Treasury proxy.
+        usdc.mint(address(treasuryB), 50e6);
+        vm.prank(alice);
+        treasuryB.redeemUSD8(100e18, 0);
+        assertEq(usd8.totalSupply(), 0);
+        assertEq(treasuryB.getReserveBalance(), 50e6);
+
+        vm.prank(timelock);
+        vm.expectRevert(USD8.TreasuryLocked.selector);
+        usd8.setTreasury(address(treasuryC));
+        assertEq(usd8.treasury(), address(treasuryB));
+    }
+
+    /// @dev M-06: evolve the Treasury by UUPS-upgrading its proxy IN PLACE —
+    ///      same address, reserve/strategies/authority all preserved, timelock-gated.
+    function test_TreasuryUpgradeInPlacePreservesStateAndAuthority() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, 0);
+        treasury.setProfitReceiver(recipient, 7, Treasury.RevenueDistributionMode.DirectTransfer);
+        vm.stopPrank();
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
         usdc.approve(address(treasury), 100e6);
         treasury.mintUSD8(100e6);
         vm.stopPrank();
-        assertEq(usd8.balanceOf(alice), 100e18);
-        assertEq(usd8.treasury(), address(treasury));
+        vm.prank(admin);
+        treasury.depositToStrategy(strat, 40e6);
 
-        Treasury treasuryB = new Treasury(usd8, registry);
+        assertEq(usdc.balanceOf(address(treasury)), 60e6);
+        assertEq(strat.totalAssets(), 40e6);
+        assertEq(treasury.getReserveBalance(), 100e6);
 
+        address v2 = address(new TreasuryV2());
+
+        // Only the timelock can upgrade.
+        vm.expectRevert(_unauthorizedTimelock(alice));
+        vm.prank(alice);
+        UUPSUpgradeable(address(treasury)).upgradeToAndCall(v2, "");
+
+        // In-place upgrade: same proxy address, state + authority intact.
         vm.prank(timelock);
-        usd8.setTreasury(address(treasuryB));
+        UUPSUpgradeable(address(treasury)).upgradeToAndCall(v2, "");
+        assertEq(TreasuryV2(address(treasury)).version(), 2);
+        assertEq(address(treasury.usd8()), address(usd8));
+        assertEq(address(treasury.registry()), address(registry));
+        assertEq(treasury.strategiesLength(), 1);
+        assertEq(address(treasury.strategies(0)), address(strat));
+        assertEq(usdc.balanceOf(address(treasury)), 60e6);
+        assertEq(strat.totalAssets(), 40e6);
+        assertEq(treasury.getReserveBalance(), 100e6);
+        assertEq(treasury.profitReceiversLength(), 1);
+        (address savedReceiver, uint256 savedWeight, Treasury.RevenueDistributionMode savedMode) =
+            treasury.profitReceivers(0);
+        assertEq(savedReceiver, recipient);
+        assertEq(savedWeight, 7);
+        assertEq(uint256(savedMode), uint256(Treasury.RevenueDistributionMode.DirectTransfer));
+        assertEq(usd8.totalSupply(), 100e18);
+        assertEq(usd8.treasury(), address(treasury)); // never re-pointed
 
-        address bob = address(0xB0B);
-        usdc.mint(bob, 10e6);
-        vm.startPrank(bob);
+        // The upgraded proxy still owns mint/burn authority and the reserve.
+        usdc.mint(alice, 10e6);
+        vm.startPrank(alice);
         usdc.approve(address(treasury), 10e6);
-        vm.expectRevert(abi.encodeWithSelector(USD8.UnauthorizedTreasury.selector, address(treasury)));
         treasury.mintUSD8(10e6);
+        treasury.redeemUSD8(10e18, 10e6);
         vm.stopPrank();
-
-        usdc.mint(bob, 10e6);
-        vm.startPrank(bob);
-        usdc.approve(address(treasuryB), 10e6);
-        treasuryB.mintUSD8(10e6);
-        vm.stopPrank();
-        assertEq(usd8.balanceOf(bob), 10e18);
-
-        assertEq(usd8.balanceOf(alice), 100e18);
+        assertEq(usd8.totalSupply(), 100e18);
+        assertEq(treasury.getReserveBalance(), 100e6);
     }
 
     // -- Revenue harvesting & routing -------------------------------------
@@ -1323,5 +1427,13 @@ contract WrongUsdcStrategy is IStrategy {
 
     function totalAssets() external pure override returns (uint256) {
         return 0;
+    }
+}
+
+/// @dev Trivial upgrade target: same storage layout as Treasury plus a version()
+///      probe, to prove in-place UUPS upgrades preserve state (M-06).
+contract TreasuryV2 is Treasury {
+    function version() external pure returns (uint256) {
+        return 2;
     }
 }

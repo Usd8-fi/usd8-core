@@ -19,6 +19,15 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Registry} from "./Registry.sol";
 import {RegistryManaged} from "./RegistryManaged.sol";
 
+/// @notice Minimal reciprocal-binding view required of the final Treasury.
+///         Return types are addresses so this interface stays independent of
+///         Treasury.sol while remaining ABI-compatible with its typed getters.
+interface ITreasuryBinding {
+    function usd8() external view returns (address);
+    function registry() external view returns (address);
+    function treasuryProxyMarker() external view returns (bytes32);
+}
+
 /// @title  USD8
 /// @notice UUPS-upgradeable ERC20 stablecoin. The configured Treasury can mint
 ///         and burn USD8; transfers and approvals follow the standard ERC20
@@ -44,13 +53,36 @@ import {RegistryManaged} from "./RegistryManaged.sol";
 contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUpgradeable, RegistryManaged {
     // ─────────────────────────── State ───────────────────────────
 
+    /// @dev Must match Treasury's marker, whose getter is protected by UUPS
+    ///      {onlyProxy}. Constants consume no proxy storage.
+    bytes32 private constant EXPECTED_TREASURY_PROXY_MARKER = keccak256("usd8.treasury.uups");
+
     /// @notice Account allowed to mint and burn USD8. Intended holder: Treasury.
     address public treasury;
+
+    /// @notice One-way issuance latch. Set on the first nonzero mint/burn and
+    ///         never cleared, so the Treasury cannot be rotated after USD8 has
+    ///         ever gone live — even if all supply is later redeemed to zero.
+    bool public treasuryLocked;
 
     // ─────────────────────────── Errors / events ───────────────────────────
 
     /// @notice Thrown when a non-Treasury account tries to mint or burn.
     error UnauthorizedTreasury(address caller);
+
+    /// @notice Thrown when {setTreasury} is called after USD8 has ever been
+    ///         issued (M-06). The Treasury address stays fixed even if supply
+    ///         later returns to zero, so residual reserve/strategy positions
+    ///         cannot be abandoned. Evolve it by UUPS-upgrading in place.
+    error TreasuryLocked();
+
+    /// @notice Thrown when final Treasury wiring does not target an active UUPS
+    ///         Treasury proxy exposing the required reciprocal-binding getters.
+    error InvalidTreasury(address candidate);
+
+    /// @notice Thrown when a candidate Treasury is bound to a different USD8
+    ///         or Registry than this token.
+    error InvalidTreasuryBinding(address candidate, address boundUsd8, address boundRegistry);
 
     /// @notice Emitted when the timelock changes the Treasury address.
     event TreasuryChanged(address indexed oldTreasury, address indexed newTreasury);
@@ -77,9 +109,16 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
 
     // ─────────────────────────── Governance (timelock) ───────────────────────────
 
-    /// @notice Set the account allowed to mint and burn USD8.
+    /// @notice Set the account allowed to mint and burn USD8. Timelock only, and
+    ///         only before the first issuance — the initial wiring at deploy. Once
+    ///         USD8 has ever been live, the Treasury is permanently LOCKED (M-06),
+    ///         even if supply later returns to zero: rotating it could strand the
+    ///         old Treasury's reserve and strategy positions. Change Treasury logic
+    ///         by UUPS-upgrading its proxy in place instead.
     function setTreasury(address newTreasury) external onlyTimelock {
         if (newTreasury == address(0)) revert ZeroAddress();
+        if (treasuryLocked || totalSupply() != 0) revert TreasuryLocked();
+        _validateTreasuryBinding(newTreasury);
         _setTreasury(newTreasury);
     }
 
@@ -92,11 +131,13 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
 
     /// @notice Mint amount USD8 to to. Callable only by {treasury}.
     function mint(address to, uint256 amount) external onlyTreasury {
+        if (amount != 0) treasuryLocked = true;
         _mint(to, amount);
     }
 
     /// @notice Burn amount USD8 from from. Callable only by {treasury}.
     function burn(address from, uint256 amount) external onlyTreasury {
+        if (amount != 0) treasuryLocked = true;
         _burn(from, amount);
     }
 
@@ -118,6 +159,39 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     function _setTreasury(address newTreasury) internal {
         emit TreasuryChanged(treasury, newTreasury);
         treasury = newTreasury;
+    }
+
+    /// @dev Fail closed unless the candidate is a deployed contract whose
+    ///      fixed wiring points back to this exact USD8 + Registry.
+    ///      This catches bootstrap typos before the first issuance makes the
+    ///      Treasury selection irreversible.
+    function _validateTreasuryBinding(address candidate) internal view {
+        if (candidate.code.length == 0) revert InvalidTreasury(candidate);
+
+        bytes32 proxyMarker;
+        address boundUsd8;
+        address boundRegistry;
+        try ITreasuryBinding(candidate).treasuryProxyMarker() returns (bytes32 value) {
+            proxyMarker = value;
+        } catch {
+            revert InvalidTreasury(candidate);
+        }
+        if (proxyMarker != EXPECTED_TREASURY_PROXY_MARKER) revert InvalidTreasury(candidate);
+
+        try ITreasuryBinding(candidate).usd8() returns (address value) {
+            boundUsd8 = value;
+        } catch {
+            revert InvalidTreasury(candidate);
+        }
+        try ITreasuryBinding(candidate).registry() returns (address value) {
+            boundRegistry = value;
+        } catch {
+            revert InvalidTreasury(candidate);
+        }
+
+        if (boundUsd8 != address(this) || boundRegistry != address(registry())) {
+            revert InvalidTreasuryBinding(candidate, boundUsd8, boundRegistry);
+        }
     }
 
     /// @dev USD8 custodies no accounted tokens — it is just the ERC-20. Any

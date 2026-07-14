@@ -12,7 +12,10 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {USD8} from "./USD8.sol";
 import {Registry} from "./Registry.sol";
 import {RegistryManaged} from "./RegistryManaged.sol";
@@ -38,8 +41,20 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///         Strategies: a timelock-approved list ({addStrategy}/{removeStrategy}). Mints leave USDC
 ///         idle; admin moves it via {depositToStrategy}/{withdrawFromStrategy}. Redeem spends idle
 ///         first, then walks the list in order — the array is the withdrawal-priority queue.
+///         UPGRADEABLE (audit M-06): the Treasury is a UUPS proxy, timelock-
+///         upgraded IN PLACE, so evolving its logic never moves the reserve or
+///         re-points USD8's mint/burn authority — there is no Treasury "rotation"
+///         that could split backing (reserves) from liabilities (global supply).
+///         {USD8.setTreasury} is correspondingly locked forever after first
+///         issuance, so the proxy address is the permanent, stable anchor even
+///         if all circulating supply is later redeemed.
+///
+///         DEPLOYMENT NOTE: this v1 proxy is for a fresh protocol deployment. It
+///         does not migrate reserves, strategy positions, or configuration from a
+///         previously deployed constructor-based Treasury; such a live migration
+///         would require a separate audited migration procedure.
 /// @custom:security-contact rick@usd8.fi
-contract Treasury is ReentrancyGuardTransient, RegistryManaged {
+contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, RegistryManaged {
     using SafeERC20 for IERC20;
 
     /// @notice How harvested USD8 revenue is routed to a recipient.
@@ -71,8 +86,19 @@ contract Treasury is ReentrancyGuardTransient, RegistryManaged {
     ///         the system across the distressed-redemption boundary.
     uint256 public constant HARVEST_BUFFER_DIVISOR = 1000;
 
-    /// @notice The USD8 token this Treasury mints and burns. Immutable.
-    USD8 public immutable usd8;
+    /// @dev Returned only when executed through this implementation's active
+    ///      ERC-1967 proxy. USD8 checks it before making the proxy its permanent
+    ///      mint/burn authority, preventing accidental legacy/direct wiring.
+    bytes32 private constant TREASURY_PROXY_MARKER = keccak256("usd8.treasury.uups");
+
+    /// @dev Exact runtime hash of the canonical, adminless proxy deployed by
+    ///      Deploy.s.sol. This excludes transparent/custom proxies that could
+    ///      retain an upgrade path outside {_authorizeUpgrade}.
+    bytes32 private constant TREASURY_PROXY_CODE_HASH = keccak256(type(ERC1967Proxy).runtimeCode);
+
+    /// @notice The USD8 token this Treasury mints and burns. Set once at
+    ///         {initialize}; never changes across upgrades (same proxy).
+    USD8 public usd8;
 
     /// @notice Approved strategies, in timelock-determined order. Membership
     ///         in this array IS the approval — there is no separate
@@ -137,6 +163,16 @@ contract Treasury is ReentrancyGuardTransient, RegistryManaged {
     /// @notice Thrown by {addStrategy} when the strategy is already approved.
     error StrategyAlreadyApproved(IStrategy strategy);
 
+    /// @notice Thrown when initialization receives a non-contract dependency.
+    error InvalidContract(address account);
+
+    /// @notice Thrown when the supplied USD8 belongs to a different Registry.
+    error RegistryMismatch(address expected, address actual);
+
+    /// @notice Thrown when the Treasury is not behind the canonical adminless
+    ///         ERC1967Proxy used by the deployment flow.
+    error UnexpectedProxyCodeHash(bytes32 actual);
+
     /// @notice Thrown by {addStrategy} when the strategy's reported
     ///         underlying() is not USDC. Prevents wiring a USD8-denominated
     ///         strategy into Treasury by mistake.
@@ -190,14 +226,41 @@ contract Treasury is ReentrancyGuardTransient, RegistryManaged {
 
     // ─────────────────────────── Constructor ─────────────────────
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice Initialize the Treasury proxy. Callable once.
     /// @param _usd8       The USD8 token. This Treasury must be set as
     ///                    USD8's treasury address for mint/redeem.
     /// @param _registry  Shared access + pause registry (holds timelock/admin).
-    constructor(USD8 _usd8, Registry _registry) {
-        if (address(_usd8) == address(0)) revert ZeroAddress();
+    function initialize(USD8 _usd8, Registry _registry) external initializer {
+        if (address(_usd8) == address(0) || address(_registry) == address(0)) revert ZeroAddress();
+        if (address(_usd8).code.length == 0) revert InvalidContract(address(_usd8));
+        if (address(_registry).code.length == 0) revert InvalidContract(address(_registry));
+        Registry usd8Registry = _usd8.registry();
+        if (usd8Registry != _registry) revert RegistryMismatch(address(_registry), address(usd8Registry));
         _setRegistry(_registry);
         usd8 = _usd8;
     }
+
+    /// @notice Confirms this call is executing through the active, adminless
+    ///         ERC-1967 proxy used for UUPS upgrades.
+    /// @dev The inherited {onlyProxy} check rejects direct implementation calls
+    ///      and proxies whose implementation slot no longer points to this code.
+    ///      The exact runtime-code check rejects transparent/custom proxies that
+    ///      could otherwise retain an upgrade path outside {_authorizeUpgrade}.
+    function treasuryProxyMarker() external view onlyProxy returns (bytes32) {
+        bytes32 actualCodeHash = address(this).codehash;
+        if (actualCodeHash != TREASURY_PROXY_CODE_HASH) revert UnexpectedProxyCodeHash(actualCodeHash);
+        return TREASURY_PROXY_MARKER;
+    }
+
+    /// @dev Only the timelock can upgrade the Treasury — in place, so the reserve
+    ///      and USD8 authority never move (audit M-06). Same authority that gates
+    ///      the Registry/USD8/SavingsUSD8 upgrades.
+    function _authorizeUpgrade(address) internal override onlyTimelock {}
 
     // ─────────────────────────── Modifiers ───────────────────────
 

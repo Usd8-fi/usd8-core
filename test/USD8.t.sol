@@ -11,17 +11,49 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {USD8} from "../src/USD8.sol";
+import {Treasury} from "../src/Treasury.sol";
 import {Registry} from "../src/Registry.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {
+    ITransparentUpgradeableProxy,
+    TransparentUpgradeableProxy
+} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// @dev Minimal v2 implementation used to exercise the upgrade path.
 contract USD8V2 is USD8 {
     function version() external pure returns (uint256) {
         return 2;
+    }
+}
+
+/// @dev Has the reciprocal getters but is deliberately not an active UUPS
+///      Treasury proxy, exercising the irreversible-wiring fail-closed check.
+contract NonProxyTreasuryBinding {
+    address public immutable usd8;
+    address public immutable registry;
+
+    constructor(address _usd8, address _registry) {
+        usd8 = _usd8;
+        registry = _registry;
+    }
+}
+
+/// @dev Test-only implementation used to erase the transparent proxy's ERC-1967
+///      admin mirror. Its immutable admin remains authoritative, which is why a
+///      zero admin-slot heuristic is insufficient.
+contract AdminSlotClearer {
+    bytes32 private constant ADMIN_SLOT = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+
+    function clearAdminSlot() external {
+        bytes32 slot = ADMIN_SLOT;
+        assembly {
+            sstore(slot, 0)
+        }
     }
 }
 
@@ -43,6 +75,12 @@ contract USD8Test is Test {
         bytes memory init = abi.encodeCall(USD8.initialize, (registry, _treasury));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         return USD8(address(proxy));
+    }
+
+    function _deployBoundTreasury(USD8 token) internal returns (Treasury) {
+        return Treasury(
+            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (token, registry))))
+        );
     }
 
     function _unauthorizedTimelock(address account) internal pure returns (bytes memory) {
@@ -117,24 +155,102 @@ contract USD8Test is Test {
     }
 
     function test_AdminCanSetTreasury() public {
-        vm.expectRevert(abi.encodeWithSelector(USD8.UnauthorizedTreasury.selector, newTreasury));
-        vm.prank(newTreasury);
+        Treasury candidate = _deployBoundTreasury(usd8);
+
+        vm.expectRevert(abi.encodeWithSelector(USD8.UnauthorizedTreasury.selector, address(candidate)));
+        vm.prank(address(candidate));
         usd8.mint(alice, 1e18);
 
         vm.prank(timelock);
         vm.expectEmit(true, true, false, true, address(usd8));
-        emit TreasuryChanged(treasury, newTreasury);
-        usd8.setTreasury(newTreasury);
+        emit TreasuryChanged(treasury, address(candidate));
+        usd8.setTreasury(address(candidate));
 
-        assertEq(usd8.treasury(), newTreasury);
+        assertEq(usd8.treasury(), address(candidate));
+        assertFalse(usd8.treasuryLocked());
 
-        vm.prank(newTreasury);
+        vm.prank(address(candidate));
         usd8.mint(alice, 1e18);
         assertEq(usd8.balanceOf(alice), 1e18);
+        assertTrue(usd8.treasuryLocked());
 
         vm.expectRevert(abi.encodeWithSelector(USD8.UnauthorizedTreasury.selector, treasury));
         vm.prank(treasury);
         usd8.mint(alice, 1e18);
+    }
+
+    function test_SetTreasuryRejectsNonContract() public {
+        vm.expectRevert(abi.encodeWithSelector(USD8.InvalidTreasury.selector, newTreasury));
+        vm.prank(timelock);
+        usd8.setTreasury(newTreasury);
+    }
+
+    function test_SetTreasuryRejectsMatchingNonProxyBinding() public {
+        NonProxyTreasuryBinding candidate = new NonProxyTreasuryBinding(address(usd8), address(registry));
+
+        vm.expectRevert(abi.encodeWithSelector(USD8.InvalidTreasury.selector, address(candidate)));
+        vm.prank(timelock);
+        usd8.setTreasury(address(candidate));
+    }
+
+    function test_SetTreasuryRejectsTransparentProxyAfterAdminSlotMasking() public {
+        Treasury candidateImpl = new Treasury();
+        TransparentUpgradeableProxy candidateProxy = new TransparentUpgradeableProxy(
+            address(candidateImpl), alice, abi.encodeCall(Treasury.initialize, (usd8, registry))
+        );
+        Treasury candidate = Treasury(address(candidateProxy));
+
+        bytes32 adminSlot = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+        ProxyAdmin proxyAdmin = ProxyAdmin(address(uint160(uint256(vm.load(address(candidateProxy), adminSlot)))));
+
+        // The real transparent-proxy admin is immutable. It can erase the
+        // compatibility storage slot, restore Treasury, and still retain its
+        // independent upgrade authority.
+        AdminSlotClearer clearer = new AdminSlotClearer();
+        vm.startPrank(alice);
+        proxyAdmin.upgradeAndCall(
+            ITransparentUpgradeableProxy(address(candidateProxy)),
+            address(clearer),
+            abi.encodeCall(AdminSlotClearer.clearAdminSlot, ())
+        );
+        proxyAdmin.upgradeAndCall(ITransparentUpgradeableProxy(address(candidateProxy)), address(candidateImpl), "");
+        vm.stopPrank();
+        assertEq(vm.load(address(candidateProxy), adminSlot), bytes32(0));
+
+        vm.expectRevert(abi.encodeWithSelector(USD8.InvalidTreasury.selector, address(candidate)));
+        vm.prank(timelock);
+        usd8.setTreasury(address(candidate));
+    }
+
+    function test_SetTreasuryRejectsMismatchedBinding() public {
+        USD8 otherUsd8 = _deployProxy(treasury);
+        Treasury candidate = _deployBoundTreasury(otherUsd8);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                USD8.InvalidTreasuryBinding.selector, address(candidate), address(otherUsd8), address(registry)
+            )
+        );
+        vm.prank(timelock);
+        usd8.setTreasury(address(candidate));
+    }
+
+    function test_TreasuryLockPersistsAfterSupplyReturnsToZero() public {
+        Treasury candidate = _deployBoundTreasury(usd8);
+        vm.prank(timelock);
+        usd8.setTreasury(address(candidate));
+
+        vm.startPrank(address(candidate));
+        usd8.mint(alice, 1e18);
+        usd8.burn(alice, 1e18);
+        vm.stopPrank();
+        assertEq(usd8.totalSupply(), 0);
+        assertTrue(usd8.treasuryLocked());
+
+        Treasury replacement = _deployBoundTreasury(usd8);
+        vm.expectRevert(USD8.TreasuryLocked.selector);
+        vm.prank(timelock);
+        usd8.setTreasury(address(replacement));
     }
 
     function test_SetTreasuryRejectsZero() public {
@@ -150,6 +266,7 @@ contract USD8Test is Test {
     }
 
     function test_TimelockCanBeTransferred() public {
+        Treasury candidate = _deployBoundTreasury(usd8);
         vm.prank(timelock);
         vm.expectEmit(true, true, false, true, address(registry));
         emit TimelockChanged(timelock, newTimelock);
@@ -160,11 +277,11 @@ contract USD8Test is Test {
         // Old timelock can no longer act (setTreasury is onlyTimelock).
         vm.expectRevert(_unauthorizedTimelock(timelock));
         vm.prank(timelock);
-        usd8.setTreasury(newTreasury);
+        usd8.setTreasury(address(candidate));
 
         vm.prank(newTimelock);
-        usd8.setTreasury(newTreasury);
-        assertEq(usd8.treasury(), newTreasury);
+        usd8.setTreasury(address(candidate));
+        assertEq(usd8.treasury(), address(candidate));
     }
 
     function test_SetTimelockRejectsZero() public {
@@ -209,6 +326,7 @@ contract USD8Test is Test {
         assertEq(usd8.balanceOf(alice), 500e18);
         assertEq(usd8.totalSupply(), 500e18);
         assertEq(usd8.treasury(), treasury);
+        assertTrue(usd8.treasuryLocked());
     }
 
     function test_NonAdminCannotUpgrade() public {
