@@ -71,8 +71,9 @@ interface ISingleAssetCoverPool {
 ///
 ///           SETTLE ({SUBMIT_DEADLINE}, 0–3d after CLAIM) — anyone may {settleIncident}
 ///             with the settlement merkle root computed off-chain over the claim set,
-///             carrying an EIP-712 signature from {teeSigner} (the key held only inside
-///             the published TEE build that runs the open-source settlement code). The
+///             carrying an EIP-712 signature from any authorized {isTeeSigner}
+///             enclave key held only inside a published TEE build that runs the
+///             open-source settlement code. The
 ///             root is the dispute anchor: each per-claim payout is proven against it at
 ///             FINALIZE, so a payout can only be one that survived DISPUTE. Optimistic —
 ///             anyone reproduces the root. ONE TEE settlement per incident (no resubmit);
@@ -109,15 +110,17 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
 
     // ─────────────────────────── State ───────────────────────────
 
-    /// @notice The TEE settlement signer: the EIP-712 key generated and held
-    ///         inside the published enclave build that runs the off-chain
-    ///         settlement computation. {settleIncident} accepts a root from
-    ///         anyone carrying this key's signature — the ONLY settlement path.
-    ///         Timelock-rotated on every enclave code upgrade (per-release
-    ///         keygen), and the sole recovery lever: zero disables settlement,
-    ///         and a permanent enclave outage is handled by rotating to a
-    ///         governance key (see {setTeeSigner}).
-    address public teeSigner;
+    /// @notice Authorized TEE settlement/open signers (1-of-N): ANY one's EIP-712
+    ///         signature is accepted at {settleIncident} and the {joinClaim} open
+    ///         path. Timelock-managed via {setTeeSigner} — add the new key on each
+    ///         enclave upgrade before removing the old (gap-free rotation), run
+    ///         several for redundancy/liveness, or empty the set to disable the
+    ///         signed paths. address(0) is never authorized, so a malformed
+    ///         signature (which recovers to 0) can never pass. TRUST NOTE:
+    ///         weakest-link — a compromise of ANY authorized key can sign a root or
+    ///         a spurious open, bounded (as with one signer) by the DISPUTE window,
+    ///         the per-pool cap, and {closeIncident}.
+    mapping(address signer => bool) public isTeeSigner;
 
     // ─────────────────────────── State (insured tokens) ───────────────────────────
 
@@ -296,6 +299,10 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         against the signer's self-declared total. See {finalizeClaim}.
     mapping(uint256 incidentId => uint256[]) internal incidentPoolBudget;
 
+    /// @notice Actual timestamp for incidents that end by transaction before a
+    ///         deadline-derived auto-unfreeze, e.g. close or all claims finalized.
+    mapping(uint256 incidentId => uint64) public incidentResolvedAt;
+
     /// @notice Next incident id to assign. Starts at 1.
     uint256 public nextIncidentId;
 
@@ -405,7 +412,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         the enclave scored: it is frozen across the whole SETTLE phase (no
     ///         join/cancel after window-close, no finalize until the DISPUTE phase
     ///         passes), every claim is on-chain, and a root signed for a different
-    ///         count can never be submitted here (the digest wouldn't recover teeSigner).
+    ///         count can never be submitted here (the recovered signer would not
+    ///         authorize that altered digest).
     ///         {poolPayouts} is the enclave-committed total payout per pool (aligned
     ///         to {incidentPools}); settleIncident checks each against the pool's
     ///         {SingleAssetCoverPool.maxPayoutPerIncident} and records it as the
@@ -421,10 +429,15 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         staleness policy, software version) the root was computed under
     ///         (M-04): the contract can't validate it, but it makes the config
     ///         commitment public — a root produced under a wrong/stale config is
-    ///         provably disputable instead of deniable. The DISPUTE phase remains
-    ///         the backstop for per-leaf amounts either way.
+    ///         provably disputable instead of deniable. `settlementInputHash` is a
+    ///         separate, per-incident commitment to the canonical input rows used to
+    ///         produce the root. Keeping it distinct from `configHash` preserves the
+    ///         latter's meaning as static policy/configuration while allowing today's
+    ///         raw-RPC score rows — and a future indexed snapshot — to use the same
+    ///         signed settlement schema. The contract cannot validate either hash;
+    ///         publishing their preimages and the DISPUTE phase remain the backstops.
     bytes32 internal constant SETTLEMENT_TYPEHASH = keccak256(
-        "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash)"
+        "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash,bytes32 settlementInputHash)"
     );
 
     /// @notice EIP-712 struct the TEE signs to open an incident. The enclave —
@@ -482,7 +495,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     event InsuredTokenRemoved(IERC20 indexed insuredToken);
     event SettlementParamsSet(SettlementParams params);
     event IncidentOpened(uint256 indexed incidentId, IERC20 indexed insuredToken, uint64 claimWindowEndTime);
-    event IncidentSettled(uint256 indexed incidentId, bytes32 root, bytes32 configHash);
+    event IncidentSettled(uint256 indexed incidentId, bytes32 root, bytes32 configHash, bytes32 settlementInputHash);
     event IncidentClosed(uint256 indexed incidentId, address indexed closer);
     event IncidentDisputed(uint256 indexed incidentId, address indexed disputer);
     event IncidentCorrected(uint256 indexed incidentId, bytes32 root);
@@ -497,7 +510,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     event ClaimFinalized(uint256 indexed claimId, address indexed user);
     event ClaimCancelled(uint256 indexed claimId, address indexed user);
     event ClaimWithdrawn(uint256 indexed claimId, address indexed user);
-    event TeeSignerSet(address indexed oldSigner, address indexed newSigner);
+    event TeeSignerSet(address indexed signer, bool authorized);
 
     /// @notice Emitted on {finalizeClaim} for the insurance score a claim consumed.
     ///         The incident-tagged log the settler sums per user (pinned before an
@@ -790,8 +803,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///                            through finalize is the claimant's responsibility.
     /// @param referenceBlock      Pre-incident "before" block the TEE pinned — used
     ///                            ONLY when first claim opens; MUST be 0 when rest claims joining.
-    /// @param signature           {teeSigner}'s EIP-712 open attestation — used ONLY
-    ///                            when first claim opens; MUST be empty when rest claimsjoining.
+    /// @param signature           An authorized {isTeeSigner} enclave's EIP-712 open
+    ///                            attestation — used ONLY when the first claim opens;
+    ///                            MUST be empty when later claims join.
     /// @return claimId The newly minted claim id.
     function joinClaim(
         IERC20 insuredToken,
@@ -832,7 +846,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
                 keccak256(abi.encode(OPEN_TYPEHASH, address(insuredToken), referenceBlock, nextIncidentId))
             );
             address recovered = ECDSA.recover(digest, signature);
-            if (recovered != teeSigner || teeSigner == address(0)) revert UnauthorizedOpenSigner(recovered);
+            if (!isTeeSigner[recovered]) revert UnauthorizedOpenSigner(recovered);
             incidentId = _openIncident(insuredToken, referenceBlock);
         }
 
@@ -916,8 +930,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         EIP-712 signature. The enclave — running the open sourced settlement
     ///         code — reconstructs the claimant table from on-chain claims and signs
     ///         Settlement(incidentId, root, unresolved, poolPayouts, pools, claimSet,
-    ///         configHash); binding unresolved + claimSet means the signature is only
-    ///         valid for the exact (frozen) live claim set it scored, and binding
+    ///         configHash, settlementInputHash); binding unresolved + claimSet means
+    ///         the signature is only valid for the exact (frozen) live claim set it
+    ///         scored, and binding
     ///         `pools` pins the same ordered pool set the contract snapshotted
     ///         (positional row alignment). Anyone may relay the signed
     ///         root; the optimistic DISPUTE
@@ -936,14 +951,20 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///                     validated on-chain — bound into the signature and
     ///                     emitted so a root produced under a wrong or stale
     ///                     config is provably disputable.
-    /// @param signature    {teeSigner}'s EIP-712 signature over the Settlement
-    ///                     struct (domain: name "DefiInsurance", version "1",
-    ///                     this chain id, this contract).
+    /// @param settlementInputHash Enclave's per-incident commitment to the
+    ///                     canonical settlement input rows used to compute `root`.
+    ///                     Phase 1 commits the raw-RPC score rows; a future indexed
+    ///                     score snapshot uses the same field. The preimage is
+    ///                     published off-chain for independent reproduction.
+    /// @param signature    An authorized {isTeeSigner} enclave's EIP-712 signature
+    ///                     over the Settlement struct (domain: name
+    ///                     "DefiInsurance", version "1", this chain id, this contract).
     function settleIncident(
         uint256 incidentId,
         bytes32 root,
         uint256[] calldata poolPayouts,
         bytes32 configHash,
+        bytes32 settlementInputHash,
         bytes calldata signature
     ) external whenNotPaused {
         Incident storage inc = incidents[incidentId];
@@ -968,49 +989,67 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
             revert OutsideSettlementPhase(incidentId);
         }
 
-        // Authorize: a valid teeSigner signature bound to this incident's exact live
+        // Authorize: a valid TEE signature bound to this incident's exact live
         // claim set via unresolved (frozen across the SETTLE phase, on-chain), the
         // committed per-pool payout totals, AND the incident's pool set/order. Binding
         // `pools` pins the positional row alignment: the enclave must have scored against
         // the SAME ordered pool list the contract snapshotted at open ({incidentPools}),
         // so an enumeration-order divergence (an honest settler bug) fails here at settle
         // — before any payout — rather than silently misallocating loss across pools.
-        _verifySettlementSig(incidentId, root, inc, poolPayouts, configHash, signature);
+        _verifySettlementSig(incidentId, root, inc, poolPayouts, configHash, settlementInputHash, signature);
 
         _commitRoot(incidentId, inc, root, poolPayouts);
-        emit IncidentSettled(incidentId, root, configHash);
+        emit IncidentSettled(incidentId, root, configHash, settlementInputHash);
     }
 
     /// @dev EIP-712 digest + recover for {settleIncident}, own frame to keep its
-    ///      caller's stack shallow. Reverts unless the signature is {teeSigner}'s
-    ///      over the full Settlement struct (incl. {Incident.claimSetHash} and the
-    ///      settler's config commitment).
+    ///      caller's stack shallow. Reverts unless the signature belongs to an
+    ///      authorized {isTeeSigner} over the full Settlement struct (including
+    ///      {Incident.claimSetHash}, the config commitment, and the per-incident
+    ///      settlement-input commitment).
     function _verifySettlementSig(
         uint256 incidentId,
         bytes32 root,
         Incident storage inc,
         uint256[] calldata poolPayouts,
         bytes32 configHash,
+        bytes32 settlementInputHash,
         bytes calldata signature
     ) private view {
         bytes32 payoutsHash = keccak256(abi.encodePacked(poolPayouts));
         bytes32 poolsHash = keccak256(abi.encodePacked(incidentPools[incidentId]));
-        bytes32 digest = _hashTypedDataV4(
-            keccak256(
-                abi.encode(
-                    SETTLEMENT_TYPEHASH,
-                    incidentId,
-                    root,
-                    inc.unresolved,
-                    payoutsHash,
-                    poolsHash,
-                    inc.claimSetHash,
-                    configHash
-                )
+        bytes32 structHash = _settlementStructHash(
+            incidentId, root, inc.unresolved, payoutsHash, poolsHash, inc.claimSetHash, configHash, settlementInputHash
+        );
+        address recovered = ECDSA.recover(_hashTypedDataV4(structHash), signature);
+        if (!isTeeSigner[recovered]) revert UnauthorizedSettlementSigner(recovered);
+    }
+
+    /// @dev Builds the full Settlement struct hash in a separate frame to keep the
+    ///      signature-verification caller below Solidity's stack limit.
+    function _settlementStructHash(
+        uint256 incidentId,
+        bytes32 root,
+        uint256 unresolved,
+        bytes32 payoutsHash,
+        bytes32 poolsHash,
+        bytes32 claimSetHash,
+        bytes32 configHash,
+        bytes32 settlementInputHash
+    ) private pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                SETTLEMENT_TYPEHASH,
+                incidentId,
+                root,
+                unresolved,
+                payoutsHash,
+                poolsHash,
+                claimSetHash,
+                configHash,
+                settlementInputHash
             )
         );
-        address recovered = ECDSA.recover(digest, signature);
-        if (recovered != teeSigner || teeSigner == address(0)) revert UnauthorizedSettlementSigner(recovered);
     }
 
     /// @notice Formally dispute the standing (or pending) settlement — the fast, non-
@@ -1076,6 +1115,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         // re-added via {addInsuredToken} before it can be insured again. A close means the
         // token/event needs governance review anyway.
         inc.status = Status.Closed;
+        incidentResolvedAt[incidentId] = uint64(block.timestamp);
         emit IncidentClosed(incidentId, msg.sender);
     }
 
@@ -1189,11 +1229,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///                    forfeited; any escrow above it is refunded to the claimant,
     ///                    so over-escrowing is harmless.
     /// @param proof       Merkle proof of the claim's leaf against {Incident.root}.
-    function finalizeClaim(uint256[] calldata amounts, uint256 scoreSpent, uint256 eligibleAmount, bytes32[] calldata proof)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function finalizeClaim(
+        uint256[] calldata amounts,
+        uint256 scoreSpent,
+        uint256 eligibleAmount,
+        bytes32[] calldata proof
+    ) external nonReentrant whenNotPaused {
         uint256 incidentId = _activeIncidentId();
         uint256 claimId = activeClaimId[incidentId][msg.sender];
         if (claimId == 0) revert NoActiveClaim();
@@ -1206,8 +1247,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         // the status gate makes the intent explicit and blocks a payout on a distrusted
         // root regardless of timing. A correction lands the incident back in Open.
         if (
-            inc.status != Status.Open || inc.root == bytes32(0)
-                || block.timestamp <= inc.claimWindowEndTime
+            inc.status != Status.Open || inc.root == bytes32(0) || block.timestamp <= inc.claimWindowEndTime
                 || block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD
                 || block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW
         ) {
@@ -1228,13 +1268,23 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
             // dispute-reviewed root: a payout can only be one that survived dispute.
             // Leaf is the OZ StandardMerkleTree double-hash of the claim tuple.
             bytes32 leaf = keccak256(
-                bytes.concat(keccak256(abi.encode(incidentId, claimId, msg.sender, amounts, scoreSpent, eligibleAmount)))
+                bytes.concat(
+                    keccak256(abi.encode(incidentId, claimId, msg.sender, amounts, scoreSpent, eligibleAmount))
+                )
             );
             if (!MerkleProof.verifyCalldata(proof, inc.root, leaf)) revert InvalidProof(claimId);
         }
 
+        // Mark THIS claim resolved so it can't be re-finalized, but DON'T drop the
+        // incident's live-claim count yet (H-01). The refund/booster/payout steps
+        // below make external calls (a callback-capable insured token or booster),
+        // and if this is the last unresolved claim, decrementing here would flip
+        // {activeIncidentId} to 0 mid-payout — a callback could then re-enter a cover
+        // pool's {completeRedeem} while it reads as UNFROZEN and exit at the pre-loss
+        // share price, dumping the loss on remaining LPs. nonReentrant guards
+        // re-entry into THIS contract, not into the pool. Keep the incident active
+        // through every external interaction; decrement only at the very end.
         c.resolved = true;
-        inc.unresolved -= 1;
 
         // Escrow settles. Only the signed `eligibleAmount` is forfeited (kept here as
         // unaccounted balance, sweepable as protocol revenue); any excess the claimant
@@ -1302,6 +1352,14 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
             registry().recordScoreSpent(msg.sender, scoreSpent);
         }
 
+        // All external interactions are done — NOW retire this claim from the live
+        // count (H-01). Only here can the incident become {activeIncidentId} == 0
+        // (pool unfrozen), after the payout has fully landed.
+        inc.unresolved -= 1;
+        if (inc.unresolved == 0 && incidentResolvedAt[incidentId] == 0) {
+            incidentResolvedAt[incidentId] = uint64(block.timestamp);
+        }
+
         emit ClaimFinalized(claimId, msg.sender);
     }
 
@@ -1321,19 +1379,18 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         Incident storage inc = incidents[c.incidentId];
         // Escrow is recoverable once the incident can no longer pay this claim:
 
-        //if it was killed; 
+        //if it was killed;
         bool killed = inc.status == Status.Closed;
-       
-        //if it was halted and its correction never came (auto-voided past CORRECTION_WINDOW); 
+
+        //if it was halted and its correction never came (auto-voided past CORRECTION_WINDOW);
         bool disputeExpired = inc.status == Status.Disputed && block.timestamp > inc.disputedAt + CORRECTION_WINDOW;
-       
+
         //The Open-state gates below exclude a live Disputed
         // incident (frozen, still correctable) — its root==0 must NOT read as "void" yet.
         // it voided in SETTLE (no root by the deadline);
         bool incidentVoid = inc.status == Status.Open && inc.root == bytes32(0)
-        && block.timestamp > inc.claimWindowEndTime + SUBMIT_DEADLINE;
+            && block.timestamp > inc.claimWindowEndTime + SUBMIT_DEADLINE;
 
-  
         // its FINALIZE phase expired unused.
         bool finalizeExpired = inc.status == Status.Open && inc.root != bytes32(0)
             && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW;
@@ -1364,10 +1421,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         mid-incident can't be recovered in place — the incident voids after
     ///         SUBMIT_DEADLINE and escrow is returned; a mistaken or bad-root
     ///         incident is instead disputed ({disputeIncident}) or closed ({closeIncident}).
-    /// @param newSigner  The new enclave key's address (zero to disable).
-    function setTeeSigner(address newSigner) external onlyTimelock notDuringIncident {
-        emit TeeSignerSet(teeSigner, newSigner);
-        teeSigner = newSigner;
+    /// @param signer      Enclave key address to add or remove (non-zero).
+    /// @param authorized  true to authorize (add), false to revoke (remove).
+    function setTeeSigner(address signer, bool authorized) external onlyTimelock notDuringIncident {
+        if (signer == address(0)) revert ZeroAddress();
+        isTeeSigner[signer] = authorized;
+        emit TeeSignerSet(signer, authorized);
     }
 
     // ─────────────────────────── Views ───────────────────────────
@@ -1398,7 +1457,42 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         return claims[claimId].boosterAmount;
     }
 
+    /// @notice Open and resolved timestamps for the latest incident.
+    /// @dev resolvedAt is 0 while the latest incident is still active or not yet
+    ///      deterministically ended. Deadline-derived endings report the first
+    ///      timestamp at which {activeIncidentId} returns 0.
+    function latestIncidentTimestamps() external view returns (uint64 openedAt, uint64 resolvedAt) {
+        uint256 id = nextIncidentId - 1;
+        if (id == 0) return (0, 0);
+        Incident storage inc = incidents[id];
+        openedAt = inc.claimWindowEndTime - CLAIM_WINDOW;
+        resolvedAt = _incidentResolvedAt(id, inc);
+    }
+
     // ─────────────────────────── Internal: incident lifecycle ───────────────────────────
+
+    function _incidentResolvedAt(uint256 id, Incident storage inc) internal view returns (uint64) {
+        uint64 stamped = incidentResolvedAt[id];
+        if (stamped != 0) return stamped;
+        // A Closed incident is always stamped above (closeIncident records the time),
+        // so it never reaches the deadline-derived branches below.
+
+        if (inc.status == Status.Disputed) {
+            uint256 disputeEnd = uint256(inc.disputedAt) + CORRECTION_WINDOW;
+            return block.timestamp > disputeEnd ? uint64(disputeEnd + 1) : 0;
+        }
+
+        if (block.timestamp <= inc.claimWindowEndTime) return 0;
+        if (inc.unresolved == 0) return inc.claimWindowEndTime + 1;
+
+        if (inc.root == bytes32(0)) {
+            uint256 submitEnd = uint256(inc.claimWindowEndTime) + SUBMIT_DEADLINE;
+            return block.timestamp > submitEnd ? uint64(submitEnd + 1) : 0;
+        }
+
+        uint256 finalizeEnd = uint256(inc.rootSubmittedAt) + DISPUTE_PERIOD + FINALIZE_WINDOW;
+        return block.timestamp > finalizeEnd ? uint64(finalizeEnd + 1) : 0;
+    }
 
     /// @dev The single active incident id, or 0 if none — the ONE source of truth.
     ///      Incidents are strictly one-at-a-time, so the only candidate is always the

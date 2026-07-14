@@ -27,7 +27,8 @@ import {
   decimalsOf,
 } from "./chain.js";
 import { CONFIG, CONFIG_VERSION, CHAIN_ID, assetUsdFeedOf, configHash } from "./config.js";
-import { settle, proofFor, type Settlement } from "./compute.js";
+import { canonicalSettlementInputRows, settle, proofFor, type Settlement } from "./compute.js";
+import { RpcScoreSource } from "./score.js";
 
 // The only booster token id in use (USD8Booster tier: id 1 = the 1% booster);
 // mirrors DefiInsurance.BOOSTER_ID.
@@ -76,6 +77,10 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
 
   // Per-incident settlement config, reconstructed from contract state at openBlock.
   const cfg = await incidentConfigOf(client, insuredToken, openBlock);
+  // Phase 1 deliberately uses the exact raw-RPC score replay as the canonical
+  // source. Settlement consumes only the source interface, so a future indexed
+  // snapshot can replace this without changing payout math or signed inputs.
+  const scoreSource = new RpcScoreSource(client, cfg, referenceBlock);
   // Decimals pinned to the incident's snapshot blocks (M-05): an upgradeable
   // token changing decimals must never alter an old incident's recomputation.
   const insuredDecimals = await decimalsOf(client, insuredToken, openBlock);
@@ -102,16 +107,19 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   const maxCoverPoolPayoutBps = await maxCoverPoolPayoutBpsAt(client, openBlock);
 
   // Insurance score already spent per claimant: one Registry.scoreSpent archive
-  // read each at openBlock−1 (claimant addresses are known from the event replay
-  // above). Intentionally a LATER cutoff than earned (referenceBlock): earned is
-  // capped pre-incident to stop farming; spent must catch every prior commitment,
-  // else a score burned between referenceBlock and open could be re-claimed. See
-  // spentScoreOf.
+  // read each at the END of openBlock (claimant addresses are known from the event
+  // replay above). Reading at openBlock — not openBlock−1 (M-03) — captures score
+  // consumption recorded EARLIER IN THE SAME BLOCK, e.g. a prior incident finalizing
+  // in a separate tx before this incident opens; openBlock−1 would miss it and let
+  // that score be reused. Safe because a newly-opened incident cannot finalize in
+  // its own opening block, so this snapshot never includes the incident being
+  // settled. Intentionally a LATER cutoff than earned (referenceBlock): earned is
+  // capped pre-incident to stop farming; spent must catch every prior commitment.
   const spentMap = new Map<string, bigint>();
   const claimants = [...new Set(events.filter((e) => e.kind === "register").map((e) => e.user.toLowerCase()))];
   await Promise.all(
     claimants.map(async (u) => {
-      spentMap.set(u, await spentScoreOf(client, u as `0x${string}`, openBlock - 1n));
+      spentMap.set(u, await spentScoreOf(client, u as `0x${string}`, openBlock));
     })
   );
   const spentOf = (user: `0x${string}`) => spentMap.get(user.toLowerCase()) ?? 0n;
@@ -128,6 +136,7 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
     poolAssetDecimals,
     boosterCollection,
     boosterId: BOOSTER_ID,
+    grossScoreOf: (user) => scoreSource.grossScoreOf(user),
     spentOf,
     maxCoverPoolPayoutBps,
   });
@@ -141,6 +150,13 @@ function printSettlement(s: Settlement, withProofs: boolean) {
     // signs alongside the root, and what a disputer checks a standing root against.
     configHash: configHash(),
     claimSetHash: s.claimSetHash,
+    settlementInputHash: s.settlementInputHash,
+    // Canonical preimage of settlementInputHash: one live row per user, sorted
+    // by the address's 20-byte value. Scores are pre-spend and pre-booster.
+    settlementInputRows: canonicalSettlementInputRows(s.rows).map((r) => ({
+      user: r.user,
+      grossEarnedScore: r.grossEarnedScore.toString(),
+    })),
     chainId: CHAIN_ID,
     registry: CONFIG.registry,
     defiInsurance: CONFIG.defiInsurance,
@@ -156,6 +172,7 @@ function printSettlement(s: Settlement, withProofs: boolean) {
       escrowAmount: r.escrowAmount.toString(),
       eligibleAmount: r.eligibleAmount.toString(),
       lossUsd: r.lossUsd.toString(),
+      grossEarnedScore: r.grossEarnedScore.toString(),
       earnedScore: r.earnedScore.toString(),
       scoreSpent: r.scoreSpent.toString(),
       payoutUsd: r.payoutUsd.toString(),

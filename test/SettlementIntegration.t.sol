@@ -28,7 +28,7 @@ import {MockERC1155} from "./mocks/MockERC1155.sol";
 ///
 /// Opt-in (keeps the default forge test green and FFI-free):
 ///   cd offchain && npm run build
-///   RUN_INTEGRATION=1 forge test --ffi --match-path test/SettlementIntegration.t.sol -vv
+///   RUN_INTEGRATION=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 contract SettlementIntegrationTest is Test {
     string constant FFI = "offchain/dist/ffi.js";
 
@@ -78,7 +78,7 @@ contract SettlementIntegrationTest is Test {
         registry.addPool(address(pool));
         registry.setDefiInsurance(address(defi));
         defi.addInsuredToken(IERC20(address(lp)), 8000, FEED, address(0), "");
-        defi.setTeeSigner(vm.addr(TEE_PK));
+        defi.setTeeSigner(vm.addr(TEE_PK), true);
         vm.stopPrank();
 
         // Underwrite the pool with 1,000 USDC.
@@ -103,10 +103,18 @@ contract SettlementIntegrationTest is Test {
     ///      it just has to match between the signature and the call.
     bytes32 constant CONFIG_HASH = keccak256("integration-config");
 
+    /// @dev Stand-in for the per-incident commitment to the canonical settlement
+    ///      input rows. It is deliberately distinct from the static config hash.
+    bytes32 constant SETTLEMENT_INPUT_HASH = keccak256("integration-settlement-input");
+
     /// @dev Sign a settlement root as the TEE, binding the incident's current
     ///      on-chain unresolved count, claim-set hash, and committed per-pool
     ///      payouts (mirrors settleIncident).
-    function _teeSign(uint256 incidentId, bytes32 root, uint256[] memory pp) internal view returns (bytes memory) {
+    function _teeSign(uint256 incidentId, bytes32 root, uint256[] memory pp, bytes32 settlementInputHash)
+        internal
+        view
+        returns (bytes memory)
+    {
         (,,, uint256 unresolved,,,,,, bytes32 claimSetHash) = defi.incidents(incidentId);
         bytes32 domain = keccak256(
             abi.encode(
@@ -121,7 +129,7 @@ contract SettlementIntegrationTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash)"
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash,bytes32 settlementInputHash)"
                 ),
                 incidentId,
                 root,
@@ -129,7 +137,8 @@ contract SettlementIntegrationTest is Test {
                 keccak256(abi.encodePacked(pp)),
                 keccak256(abi.encodePacked(poolAddrs)),
                 claimSetHash,
-                CONFIG_HASH
+                CONFIG_HASH,
+                settlementInputHash
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEE_PK, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
@@ -139,7 +148,14 @@ contract SettlementIntegrationTest is Test {
     /// @dev Relay a TEE-signed root (keeps the caller's stack shallow).
     function _settle(uint256 incidentId, bytes32 root) internal {
         uint256[] memory pp = _pp();
-        defi.settleIncident(incidentId, root, pp, CONFIG_HASH, _teeSign(incidentId, root, pp));
+        defi.settleIncident(
+            incidentId,
+            root,
+            pp,
+            CONFIG_HASH,
+            SETTLEMENT_INPUT_HASH,
+            _teeSign(incidentId, root, pp, SETTLEMENT_INPUT_HASH)
+        );
     }
 
     function test_OffchainRootAndProofsDriveCorrectPayout() public {
@@ -208,12 +224,23 @@ contract SettlementIntegrationTest is Test {
             bytes32 root = keccak256(abi.encodePacked("root", n));
             uint256 unresolved = 3;
             bytes32 claimSet = keccak256(abi.encodePacked("claims", n));
+            bytes32 settlementInputHash = keccak256(abi.encodePacked("inputs", n));
 
             bytes memory payload = abi.encode(
-                block.chainid, address(defi), incidentId, root, unresolved, pp, poolAddrs, claimSet, CONFIG_HASH
+                block.chainid,
+                address(defi),
+                incidentId,
+                root,
+                unresolved,
+                pp,
+                poolAddrs,
+                claimSet,
+                CONFIG_HASH,
+                settlementInputHash
             );
             bytes32 offchain = abi.decode(_ffi("digest", payload, ""), (bytes32));
-            bytes32 onchain = _settlementDigest(incidentId, root, unresolved, pp, poolAddrs, claimSet);
+            bytes32 onchain =
+                _settlementDigest(incidentId, root, unresolved, pp, poolAddrs, claimSet, settlementInputHash);
             assertEq(offchain, onchain, "EIP-712 settlement digest mismatch (viem != solc)");
         }
     }
@@ -261,7 +288,8 @@ contract SettlementIntegrationTest is Test {
         uint256 unresolved,
         uint256[] memory pp,
         address[] memory poolAddrs,
-        bytes32 claimSet
+        bytes32 claimSet,
+        bytes32 settlementInputHash
     ) internal view returns (bytes32) {
         bytes32 domain = keccak256(
             abi.encode(
@@ -275,7 +303,7 @@ contract SettlementIntegrationTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash)"
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash,bytes32 settlementInputHash)"
                 ),
                 incidentId,
                 root,
@@ -283,7 +311,8 @@ contract SettlementIntegrationTest is Test {
                 keccak256(abi.encodePacked(pp)),
                 keccak256(abi.encodePacked(poolAddrs)),
                 claimSet,
-                CONFIG_HASH
+                CONFIG_HASH,
+                settlementInputHash
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", domain, structHash));

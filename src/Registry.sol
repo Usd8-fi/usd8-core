@@ -97,20 +97,28 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     // ─────────────────────────── Insurance-score topology ───────────────────────────
 
-    /// @notice A token whose holding accrues a non-expiring USD8 insurance score.
-    /// @param token                  Scored ERC20 (e.g. USD8, sUSD8).
-    /// @param scorePerTokenPerBlock  Score per whole token per block, 1e18-scaled.
-    /// @param startBlock             Block from which to begin counting.
-    struct ScoredToken {
-        IERC20 token;
-        uint128 scorePerTokenPerBlock;
-        uint64 startBlock;
+    /// @notice One segment of a scored token's rate timeline: `rate` (score per whole
+    ///         token per block, 1e18-scaled) applies from `fromBlock` until the next
+    ///         segment's `fromBlock` (or forever if last). `rate == 0` turns scoring
+    ///         off from that block onward. Segments are append-only and effective at
+    ///         the block they're set in, so a rate change NEVER re-prices already-
+    ///         accrued score (the settler integrates each segment at its own rate).
+    struct RatePoint {
+        uint64 fromBlock;
+        uint128 rate;
     }
 
-    /// @notice Tokens whose holding accrues a USD8 insurance score. Frozen while an
-    ///         incident is active; products snapshot this at the incident's openBlock
-    ///         (off-chain, from state at that block). Read via {getScoredTokens}.
-    ScoredToken[] internal scoredTokens;
+    /// @notice Every token that has EVER been scored — never pruned. A token whose
+    ///         rate is now 0 still earned score during its active windows, so the
+    ///         settler must still see it. Enumerable set (mappings aren't iterable);
+    ///         products snapshot it at the incident's openBlock. Read via
+    ///         {getScoredTokens}; per-token timeline via {getScoredRateHistory}.
+    IERC20[] internal scoredTokenList;
+
+    /// @notice Append-only rate timeline per token (see {RatePoint}). Frozen while
+    ///         an incident is active. A token's presence in {scoredTokenList} is
+    ///         gated on its history being non-empty.
+    mapping(IERC20 token => RatePoint[]) internal scoredRates;
 
     /// @notice Canonical ERC-1155 booster collection (USD8Booster) address.
     ///         Committing boosters on a claim boosts a claimant's insurance score.
@@ -147,7 +155,6 @@ contract Registry is Initializable, UUPSUpgradeable {
     error Frozen();
     error PoolExists(IERC20 asset);
     error PoolNotFound(IERC20 asset);
-    error ScoredTokenNotFound(IERC20 token);
     error InvalidMaxCoverPoolPayoutBps(uint256 bps);
     error UnauthorizedModule(address caller);
 
@@ -158,8 +165,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     event PoolAdded(IERC20 indexed asset, address indexed pool);
     event PoolRemoved(IERC20 indexed asset);
     event DefiInsuranceSet(address indexed oldModule, address indexed newModule);
-    event ScoredTokenSet(IERC20 indexed token, uint128 scorePerTokenPerBlock, uint64 startBlock);
-    event ScoredTokenRemoved(IERC20 indexed token);
+    event ScoredTokenSet(IERC20 indexed token, uint128 rate, uint64 fromBlock);
     event BoosterNFTSet(address indexed oldBooster, address indexed newBooster);
     event ScoreSpentRecorded(address indexed account, uint256 amount, uint256 newTotal);
     event BetaModeEnded();
@@ -286,42 +292,22 @@ contract Registry is Initializable, UUPSUpgradeable {
         defiInsurance = newModule;
     }
 
-    /// @notice Set a token in the USD8 insurance-score set. Timelock only; frozen
-    ///         while an incident is active. Upsert: updates rate/start in place if
-    ///         already scored, otherwise appends.
-    function setScoredToken(IERC20 token, uint128 scorePerTokenPerBlock, uint64 startBlock)
-        external
-        onlyTimelock
-        notFrozen
-    {
+    /// @notice Set a token's insurance-score `rate` (score per whole token per block,
+    ///         1e18-scaled), effective from THIS block onward. Timelock only; frozen
+    ///         while an incident is active. APPEND-ONLY: each call adds a segment to
+    ///         the token's rate timeline at {block.number}, so a rate change never
+    ///         rewrites already-accrued score — the settler integrates each historical
+    ///         segment at its own rate. The FIRST call for a token starts its scoring
+    ///         (and registers it in {scoredTokenList} permanently); a call with
+    ///         `rate == 0` turns scoring off from here — there is no separate remove.
+    /// @param token  Scored ERC20 (e.g. USD8, sUSD8).
+    /// @param rate   New score-per-whole-token-per-block, 1e18-scaled (0 = off).
+    function setScoredToken(IERC20 token, uint128 rate) external onlyTimelock notFrozen {
         if (address(token) == address(0)) revert ZeroAddress();
-        uint256 n = scoredTokens.length;
-        for (uint256 i = 0; i < n; i++) {
-            if (scoredTokens[i].token == token) {
-                scoredTokens[i].scorePerTokenPerBlock = scorePerTokenPerBlock;
-                scoredTokens[i].startBlock = startBlock;
-                emit ScoredTokenSet(token, scorePerTokenPerBlock, startBlock);
-                return;
-            }
-        }
-        scoredTokens.push(
-            ScoredToken({token: token, scorePerTokenPerBlock: scorePerTokenPerBlock, startBlock: startBlock})
-        );
-        emit ScoredTokenSet(token, scorePerTokenPerBlock, startBlock);
-    }
-
-    /// @notice Remove a token from the score set. Timelock only; frozen-gated. Swap-and-pop.
-    function removeScoredToken(IERC20 token) external onlyTimelock notFrozen {
-        uint256 n = scoredTokens.length;
-        for (uint256 i = 0; i < n; i++) {
-            if (scoredTokens[i].token == token) {
-                scoredTokens[i] = scoredTokens[n - 1];
-                scoredTokens.pop();
-                emit ScoredTokenRemoved(token);
-                return;
-            }
-        }
-        revert ScoredTokenNotFound(token);
+        RatePoint[] storage pts = scoredRates[token];
+        if (pts.length == 0) scoredTokenList.push(token); // first appearance → enumerable set
+        pts.push(RatePoint({fromBlock: uint64(block.number), rate: rate}));
+        emit ScoredTokenSet(token, rate, uint64(block.number));
     }
 
     /// @notice Set the canonical booster NFT collection. Timelock only; frozen-gated.
@@ -412,14 +398,21 @@ contract Registry is Initializable, UUPSUpgradeable {
         return coverPoolAssets.length;
     }
 
-    /// @notice The full USD8 insurance-score token set. See {ScoredToken}.
-    function getScoredTokens() external view returns (ScoredToken[] memory) {
-        return scoredTokens;
+    /// @notice Every token ever scored (includes now-inactive ones). The settler
+    ///         iterates this and reads each token's {getScoredRateHistory}.
+    function getScoredTokens() external view returns (IERC20[] memory) {
+        return scoredTokenList;
     }
 
-    /// @notice Number of scored tokens.
+    /// @notice A scored token's full append-only rate timeline (see {RatePoint}).
+    ///         Empty if the token was never scored.
+    function getScoredRateHistory(IERC20 token) external view returns (RatePoint[] memory) {
+        return scoredRates[token];
+    }
+
+    /// @notice Number of tokens ever scored.
     function scoredTokensLength() external view returns (uint256) {
-        return scoredTokens.length;
+        return scoredTokenList.length;
     }
 
     // ─────────────────────────── Checks (consumed by {RegistryManaged}) ───────────────────────────

@@ -73,7 +73,70 @@ contract FeeSkimVault is ERC20, ERC4626 {
     }
 }
 
+/// @dev Insured token that probes the pool-freeze state when DefiInsurance refunds
+///      it (the over-escrow transfer in finalizeClaim) — the H-01 callback surface.
+contract FreezeProbeToken is ERC20 {
+    Registry public reg;
+    address public defi;
+    bool public probed;
+    bool public frozenDuringRefund;
+
+    constructor(Registry _reg) ERC20("Probe", "PRB") {
+        reg = _reg;
+    }
+
+    function setDefi(address d) external {
+        defi = d;
+    }
+
+    function mint(address to, uint256 amt) external {
+        _mint(to, amt);
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (from == defi && defi != address(0)) {
+            frozenDuringRefund = reg.payoutIncidentActive();
+            probed = true;
+        }
+        super._update(from, to, value);
+    }
+}
+
 contract AuditFindingsTest is SingleAssetCoverPoolTest {
+    function test_Audit_LastClaimStaysFrozenThroughRefund() public {
+        // H-01: finalizing the FINAL unresolved claim must keep the incident active
+        // (pool frozen) through the over-escrow refund, so a callback in the insured
+        // token can't re-enter completeRedeem and exit at the pre-loss share price.
+        FreezeProbeToken tok = new FreezeProbeToken(registry);
+        tok.setDefi(address(defi));
+        vm.prank(admin);
+        defi.addInsuredToken(IERC20(address(tok)), 8000, FEED, address(0), "");
+
+        _stake(alice, 100e6); // pool capital to pay from
+
+        uint128 escrow = 100e18;
+        tok.mint(bob, escrow);
+        vm.prank(bob);
+        tok.approve(address(defi), escrow);
+        vm.prank(admin);
+        defi.openClaimIncident(IERC20(address(tok)), uint64(block.number - 1));
+        vm.prank(bob);
+        uint256 claimId = defi.joinClaim(IERC20(address(tok)), escrow, 0, 0, 0, "");
+
+        vm.warp(block.timestamp + 5 days + 1);
+        uint256[] memory amounts = _amounts(20e6);
+        uint256 eligible = 60e18; // < escrow → 40e18 refund fires the probe
+        _settle(1, _leafSpent(1, claimId, bob, amounts, 0, eligible));
+        vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1);
+
+        vm.prank(bob);
+        defi.finalizeClaim(amounts, 0, eligible, new bytes32[](0));
+
+        assertTrue(tok.probed(), "refund fired the probe");
+        assertTrue(tok.frozenDuringRefund(), "H-01: incident still frozen during the last claim's refund");
+        assertEq(defi.activeIncidentId(), 0, "incident retired only after finalize completes");
+    }
+
     function test_Audit_SubDurationRewardRejectedInsteadOfStranding() public {
         _stake(alice, 100e6);
 
@@ -82,9 +145,7 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         vm.startPrank(admin);
         usd8.mint(admin, 1);
         usd8.approve(address(pool), 1);
-        vm.expectRevert(
-            abi.encodeWithSelector(SingleAssetCoverPool.RewardRateZero.selector, 1, pool.rewardsDuration())
-        );
+        vm.expectRevert(abi.encodeWithSelector(SingleAssetCoverPool.RewardRateZero.selector, 1, pool.rewardsDuration()));
         pool.receiveProfitDistribution(1);
         vm.stopPrank();
         assertEq(pool.rewardReserve(), 0, "nothing reserved");
@@ -176,9 +237,9 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         uint256[] memory pp = _pp();
 
         // CLAIM phase: settle and finalize are both out of phase.
-        bytes memory sig = _teeSign(1, root, pp); // before expectRevert: helper reads defi.incidents()
+        bytes memory sig = _teeSign(1, root, pp, TEST_SETTLEMENT_INPUT_HASH); // before expectRevert: helper reads incidents
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.OutsideSettlementPhase.selector, uint256(1)));
-        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, sig);
+        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, TEST_SETTLEMENT_INPUT_HASH, sig);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
         defi.finalizeClaim(amounts, 0, 50e18, new bytes32[](0));

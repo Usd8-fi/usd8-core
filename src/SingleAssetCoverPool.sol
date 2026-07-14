@@ -22,6 +22,10 @@ import {Registry} from "./Registry.sol";
 import {RegistryManaged} from "./RegistryManaged.sol";
 import {IProfitDistributionReceiver} from "./interfaces/IProfitDistributionReceiver.sol";
 
+interface IDefiInsuranceIncidentTimestamps {
+    function latestIncidentTimestamps() external view returns (uint64 openedAt, uint64 resolvedAt);
+}
+
 /// @title  SingleAssetCoverPool
 /// @notice A single-asset ERC-4626 cover vault that underwrites the USD8 insurance
 ///         system. Stakers deposit one asset, receive TRANSFERABLE ERC-20 shares
@@ -131,6 +135,14 @@ contract SingleAssetCoverPool is
     /// @notice Pending redeem requests, one per user.
     mapping(address user => UnstakeRequest) public unstakeRequests;
 
+    /// @notice Max total staked assets ({totalAssets}) this pool will accept;
+    ///         0 = uncapped. Admin/timelock-set, sized off-chain (e.g. from a
+    ///         target staker APY given the reward budget and asset price).
+    ///         Enforced via {maxDeposit}/{maxMint}, so ERC-4626 deposit/mint revert
+    ///         once full and integrators see the gate. Soft: an existing pool over
+    ///         a newly-lowered cap isn't force-unwound, it just stops accepting more.
+    uint256 public depositCap;
+
     // ─────────────────────────── Errors ──────────────────────────
 
     error ZeroAmount();
@@ -160,6 +172,7 @@ contract SingleAssetCoverPool is
     event RewardNotified(uint256 amount, uint128 newRate, uint64 newPeriodFinish);
     event RewardsDurationSet(uint64 oldDuration, uint64 newDuration);
     event ClaimPaid(address indexed to, uint256 amount);
+    event DepositCapSet(uint256 newCap);
 
     // ─────────────────────────── Initialization ───────────────────────────
 
@@ -212,7 +225,7 @@ contract SingleAssetCoverPool is
     /// @dev Rewards survive transfers: checkpoint the accumulator, then both parties'
     ///      earned, BEFORE any balance (and totalSupply) changes.
     ///
-    ///      Shares backing a live redeem request are locked in place (M-03): still
+    ///      Shares backing a live redeem request are locked in place: still
     ///      owned, still earning, still payout-exposed — but non-transferable, so the
     ///      cooldown seasons THESE shares. Otherwise a requester could transfer them
     ///      away for the cooldown and re-acquire fresh ones just before maturity,
@@ -225,10 +238,9 @@ contract SingleAssetCoverPool is
         if (from != address(0)) {
             _checkpointUser(from);
             UnstakeRequest memory r = unstakeRequests[from];
-            if (
-                r.shares != 0 && block.timestamp <= uint256(r.requestedAt) + UNSTAKE_COOLDOWN + UNSTAKE_WINDOW
-                    && balanceOf(from) < value + r.shares
-            ) revert SharesLockedByRequest(r.shares);
+            if (r.shares != 0 && block.timestamp <= _unstakeWindowEnd(r) && balanceOf(from) < value + r.shares) {
+                revert SharesLockedByRequest(r.shares);
+            }
         }
         if (to != address(0)) _checkpointUser(to);
         super._update(from, to, value);
@@ -260,11 +272,19 @@ contract SingleAssetCoverPool is
     }
 
     function maxDeposit(address) public view override returns (uint256) {
-        return (registry().paused(address(this)) || registry().payoutIncidentActive()) ? 0 : type(uint256).max;
+        if (registry().paused(address(this)) || registry().payoutIncidentActive()) return 0;
+        uint256 cap = depositCap;
+        if (cap == 0) return type(uint256).max;
+        uint256 size = totalAssets();
+        return cap > size ? cap - size : 0;
     }
 
     function maxMint(address) public view override returns (uint256) {
-        return (registry().paused(address(this)) || registry().payoutIncidentActive()) ? 0 : type(uint256).max;
+        if (registry().paused(address(this)) || registry().payoutIncidentActive()) return 0;
+        uint256 cap = depositCap;
+        if (cap == 0) return type(uint256).max;
+        uint256 size = totalAssets();
+        return cap > size ? convertToShares(cap - size) : 0;
     }
 
     // ─────────────────────────── Redeem (async) ───────────────────────────
@@ -279,9 +299,7 @@ contract SingleAssetCoverPool is
         if (bal < shares) revert InsufficientShares(shares, bal);
 
         UnstakeRequest memory existing = unstakeRequests[msg.sender];
-        if (
-            existing.shares != 0 && block.timestamp <= uint256(existing.requestedAt) + UNSTAKE_COOLDOWN + UNSTAKE_WINDOW
-        ) {
+        if (existing.shares != 0 && block.timestamp <= _unstakeWindowEnd(existing)) {
             revert UnstakeRequestExists();
         }
 
@@ -303,9 +321,10 @@ contract SingleAssetCoverPool is
     function completeRedeem() external returns (uint256 assetsOut) {
         UnstakeRequest memory r = unstakeRequests[msg.sender];
         if (r.shares == 0) revert NoUnstakeRequest();
-        uint256 cooldownEnd = uint256(r.requestedAt) + UNSTAKE_COOLDOWN;
-        if (block.timestamp < cooldownEnd) revert CooldownNotElapsed();
-        if (block.timestamp > cooldownEnd + UNSTAKE_WINDOW) revert UnstakeWindowExpired();
+        uint256 windowStart = _unstakeWindowStart(r);
+        uint256 windowEnd = _unstakeWindowEnd(r);
+        if (block.timestamp < windowStart) revert CooldownNotElapsed();
+        if (block.timestamp > windowEnd) revert UnstakeWindowExpired();
         if (registry().payoutIncidentActive()) revert PoolFrozen();
         return redeem(r.shares, msg.sender, msg.sender);
     }
@@ -320,8 +339,7 @@ contract SingleAssetCoverPool is
         return super.redeem(shares, receiver, owner);
     }
 
-    /// @notice Asset-denominated exits are NOT supported — exit via {redeem} (or
-    ///         {completeRedeem}) with the requested share count (audit M-07).
+    /// @notice Asset-denominated exits are NOT supported — use {redeem} only.
     ///
     ///         The unstake flow is share-denominated end-to-end: {requestRedeem}
     ///         files an exact share count and completion burns exactly that count.
@@ -353,9 +371,42 @@ contract SingleAssetCoverPool is
         if (registry().paused(address(this)) || registry().payoutIncidentActive()) return 0;
         UnstakeRequest memory r = unstakeRequests[owner];
         if (r.shares == 0) return 0;
-        uint256 cooldownEnd = uint256(r.requestedAt) + UNSTAKE_COOLDOWN;
-        if (block.timestamp < cooldownEnd || block.timestamp > cooldownEnd + UNSTAKE_WINDOW) return 0;
+        uint256 windowStart = _unstakeWindowStart(r);
+        if (block.timestamp < windowStart || block.timestamp > _unstakeWindowEnd(r)) return 0;
         return r.shares;
+    }
+
+    function _unstakeWindowStart(UnstakeRequest memory r) internal view returns (uint256) {
+        uint256 cooldownEnd = uint256(r.requestedAt) + UNSTAKE_COOLDOWN;
+        uint256 windowEnd = cooldownEnd + UNSTAKE_WINDOW;
+        (uint64 incidentOpenedAt, uint64 incidentResolvedAt_) = _latestIncidentTimestamps();
+        if (incidentOpenedAt != 0 && incidentOpenedAt <= windowEnd && incidentResolvedAt_ > cooldownEnd) {
+            return incidentResolvedAt_;
+        }
+        return cooldownEnd;
+    }
+
+    function _unstakeWindowEnd(UnstakeRequest memory r) internal view returns (uint256) {
+        uint256 cooldownEnd = uint256(r.requestedAt) + UNSTAKE_COOLDOWN;
+        uint256 windowEnd = cooldownEnd + UNSTAKE_WINDOW;
+        (uint64 incidentOpenedAt, uint64 incidentResolvedAt_) = _latestIncidentTimestamps();
+        if (incidentOpenedAt != 0 && incidentOpenedAt <= windowEnd) {
+            if (incidentResolvedAt_ == 0 && registry().payoutIncidentActive()) return type(uint256).max;
+            if (incidentResolvedAt_ > cooldownEnd) return uint256(incidentResolvedAt_) + UNSTAKE_WINDOW;
+        }
+        return windowEnd;
+    }
+
+    function _latestIncidentTimestamps() internal view returns (uint64 openedAt, uint64 resolvedAt) {
+        address defiInsurance = registry().defiInsurance();
+        if (defiInsurance == address(0)) return (0, 0);
+        try IDefiInsuranceIncidentTimestamps(defiInsurance).latestIncidentTimestamps() returns (
+            uint64 openedAt_, uint64 resolvedAt_
+        ) {
+            return (openedAt_, resolvedAt_);
+        } catch {
+            return (0, 0);
+        }
     }
 
     /// @dev Redemption funnel: only completes a FULL matured request (maxRedeem gated
@@ -451,6 +502,14 @@ contract SingleAssetCoverPool is
         if (newDuration == 0 || newDuration > MAX_REWARDS_DURATION) revert InvalidRewardsDuration();
         emit RewardsDurationSet(rewardsDuration, newDuration);
         rewardsDuration = newDuration;
+    }
+
+    /// @notice Set the max total staked assets this pool accepts (0 = uncapped).
+    ///         Admin or timelock. Soft cap: lowering it below the current size
+    ///         stops new deposits but never force-unwinds existing stake.
+    function setDepositCap(uint256 newCap) external onlyAdminOrTimelock {
+        depositCap = newCap;
+        emit DepositCapSet(newCap);
     }
 
     /// @dev Rescuable via {RegistryManaged-sweepToken}: only balance above accounting.

@@ -11,27 +11,26 @@ import {
   priceUsd1e18,
   minBalanceOver,
   minErc1155BalanceOver,
-  tokenBlockIntegral,
   type IncidentConfig,
   type InputEvent,
 } from "./chain.js";
+import type { GrossScoreProvider } from "./score.js";
+
+// Backward-compatible export for callers/tests that use the raw-RPC score
+// helper directly. Settlement itself consumes an injected gross-score provider.
+export { earnedScoreOf } from "./score.js";
 
 const BPS = 10_000n;
 // Hard-coded booster policy, mirrors DefiInsurance.BOOSTER_BOOST_BPS: each
 // committed booster unit adds +1% to the insurance-score multiplier.
 const BOOSTER_BOOST_BPS = 100n;
-// scorePerTokenPerBlock is stored 1e18-scaled: 1e18 ⇒ 1.0 score/token/block.
-// Because the rate multiplies a balance normalized to an 18-decimal basis (see
-// earnedScoreOf), this /SCORE_SCALE cancels that shared 1e18 and yields score in
-// WAD (1e18 = 1.0), applied once at the end of the sum.
-const SCORE_SCALE = WAD;
-
 export interface SettledRow {
   claimId: bigint;
   user: `0x${string}`;
   escrowAmount: bigint;
   eligibleAmount: bigint;
   lossUsd: bigint; // 1e18
+  grossEarnedScore: bigint; // raw lifetime score at referenceBlock, before spent-score subtraction and booster
   earnedScore: bigint; // score available to spend this claim = (raw lifetime − spent) × booster multiplier
   scoreSpent: bigint; // min(requested, available) — the payout weight, recorded via ScoreSpent
   payoutUsd: bigint; // 1e18, post-κ, post-share
@@ -49,6 +48,7 @@ export interface Settlement {
   // signature commits to the exact ordered list the payout row was computed against.
   poolPayouts: bigint[]; // total payout committed per pool (Σ amounts[i]); signed + checked ≤ cap at settle
   claimSetHash: `0x${string}`; // replayed Incident.claimSetHash — bound into the settlement signature (M-06)
+  settlementInputHash: `0x${string}`; // canonical hash of sorted (user, grossEarnedScore) Phase-1 input rows
   rows: SettledRow[];
 }
 
@@ -72,42 +72,6 @@ export async function twapRatioBefore(client: PublicClient, cfg: IncidentConfig,
 }
 
 /**
- * USD8 insurance score EARNED by `user` as of `asOfBlock`: the cumulative
- * token·block integral of each scored token from its `startBlock`, summed and
- * weighted by its on-chain rate, then boosted. This is the gross figure;
- * already-spent score (from the ScoreSpent ledger) is subtracted by the caller.
- * Non-expiring (not a time-weighted average), so holding longer always grows
- * it. Each committed booster unit adds BOOSTER_BOOST_BPS to the multiplier.
- *
- * Anchored at the pre-incident `referenceBlock` (not window-end): otherwise a
- * claimant could pile scored tokens into their wallet DURING the claim window
- * to inflate their token·block integral and grab a larger payout share.
- */
-export async function earnedScoreOf(
-  client: PublicClient,
-  cfg: IncidentConfig,
-  user: `0x${string}`,
-  asOfBlock: bigint
-): Promise<bigint> {
-  let score = 0n;
-  for (const st of cfg.scoredTokens) {
-    if (st.startBlock >= asOfBlock) continue;
-    const integral = await tokenBlockIntegral(client, st.token, user, st.startBlock, asOfBlock);
-    // Normalize each token's raw balance·block integral to an 18-decimal basis
-    // before summing across tokens, so a non-18-dec scored token isn't mis-scaled
-    // relative to the others (F6). The final /SCORE_SCALE (=1e18) then cancels the
-    // shared 18-dec basis exactly. (Scored-token decimals are expected ≤ 18.)
-    const norm18 =
-      st.decimals <= 18 ? integral * 10n ** BigInt(18 - st.decimals) : integral / 10n ** BigInt(st.decimals - 18);
-    score += norm18 * st.scorePerTokenPerBlock;
-  }
-  // RAW lifetime score in WAD (SCORE_SCALE cancels the rate's 1e18). The booster
-  // multiplier is NOT applied here — the caller applies it to the UNSPENT remainder
-  // only (see {settle} / I-2), so a booster can't retroactively boost spent score.
-  return score / SCORE_SCALE;
-}
-
-/**
  * Full settlement for one incident: the claimant table, per-pool payout
  * amounts, and the merkle root the TEE signs (or admin submits) / anyone verifies.
  */
@@ -128,6 +92,7 @@ export async function settle(
     poolAssetDecimals: number[];
     boosterCollection: `0x${string}`; // Registry.boosterNFT() at openBlock (0 = none)
     boosterId: bigint;
+    grossScoreOf: GrossScoreProvider; // raw lifetime score at referenceBlock, before spent/booster
     spentOf: (user: `0x${string}`) => bigint; // insurance score already spent (ScoreSpent ledger)
     maxCoverPoolPayoutBps: bigint; // Registry.maxCoverPoolPayoutBps: per-incident cap, as a share of each pool's balance
   }
@@ -141,9 +106,8 @@ export async function settle(
   const holdFrom = refBlock > cfg.params.holdingMarginBlocks ? refBlock - cfg.params.holdingMarginBlocks : 1n;
 
   // Per-claim eligibility, valuation, score (live = registered, not cancelled).
-  const live = events
-    .filter((e) => e.kind === "register")
-    .filter((e) => !events.some((c) => c.kind === "cancel" && c.claimId === e.claimId));
+  const cancelledClaimIds = new Set(events.filter((e) => e.kind === "cancel").map((e) => e.claimId));
+  const live = events.filter((e) => e.kind === "register" && !cancelledClaimIds.has(e.claimId));
   const rows: SettledRow[] = [];
   for (const e of live) {
     // Eligible = min holding over [B − margin, B] (B = referenceBlock), capped at
@@ -183,9 +147,9 @@ export async function settle(
     // Raw lifetime earned score as of referenceBlock, minus what's already been
     // spent on prior claims → the UNSPENT remainder. Pinned pre-incident (like
     // eligibility) so the claim window can't be used to farm fresh score.
-    const earned = await earnedScoreOf(client, cfg, e.user, opts.referenceBlock);
+    const grossEarnedScore = await opts.grossScoreOf(e.user);
     const spent = opts.spentOf(e.user);
-    const unspent = earned > spent ? earned - spent : 0n;
+    const unspent = grossEarnedScore > spent ? grossEarnedScore - spent : 0n;
     // The booster boosts ONLY the unspent remainder (I-2): committing a booster now
     // must not retroactively multiply score already consumed on prior incidents.
     // multiplier = (BPS + boost × BOOSTER_BOOST_BPS) / BPS, applied here (not in
@@ -199,6 +163,7 @@ export async function settle(
       escrowAmount: e.amount,
       eligibleAmount: eligible,
       lossUsd,
+      grossEarnedScore,
       earnedScore: available,
       scoreSpent,
       payoutUsd: 0n,
@@ -259,6 +224,7 @@ export async function settle(
     poolAddrs: opts.poolAddrs,
     poolPayouts,
     claimSetHash: claimSetHashOf(events),
+    settlementInputHash: settlementInputHashOf(rows),
     rows,
   };
 }
@@ -314,12 +280,57 @@ export function claimSetHashOf(events: InputEvent[]): `0x${string}` {
   return h;
 }
 
+export interface SettlementInputRow {
+  user: `0x${string}`;
+  grossEarnedScore: bigint;
+}
+
+/**
+ * Canonical Phase-1 settlement-score input rows. Exactly one row is permitted
+ * per live claimant address; rows are sorted by the address's canonical 20-byte
+ * value so event order, RPC response order, and checksum casing cannot affect
+ * the signed commitment.
+ */
+export function canonicalSettlementInputRows<T extends SettlementInputRow>(rows: readonly T[]): T[] {
+  const sorted = [...rows].sort((a, b) => {
+    const aa = a.user.toLowerCase();
+    const bb = b.user.toLowerCase();
+    return aa < bb ? -1 : aa > bb ? 1 : 0;
+  });
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i - 1].user.toLowerCase() === sorted[i].user.toLowerCase()) {
+      throw new Error(`duplicate settlement input user: ${sorted[i].user}`);
+    }
+  }
+  return sorted;
+}
+
+/**
+ * Phase-1 commitment to the raw score inputs consumed by settlement:
+ *
+ *   keccak256(abi.encode(address[] users, uint256[] grossScores))
+ *
+ * `grossScores[i]` is lifetime score at referenceBlock before subtracting
+ * scoreSpent and before applying the incident booster. Empty input hashes the
+ * ABI encoding of two empty arrays (not bytes32(0)).
+ */
+export function settlementInputHashOf(rows: readonly SettlementInputRow[]): `0x${string}` {
+  const canonical = canonicalSettlementInputRows(rows);
+  return keccak256(
+    encodeAbiParameters(
+      [{ type: "address[]" }, { type: "uint256[]" }],
+      [canonical.map((r) => r.user), canonical.map((r) => r.grossEarnedScore)]
+    )
+  );
+}
+
 // EIP-712 payload the TEE signs for DefiInsurance.settleIncident — SINGLE source
 // of truth mirroring SETTLEMENT_TYPEHASH on-chain. `unresolved` (the live-claim
 // counter, Incident.unresolved) and `claimSet` (the Incident.claimSetHash rolling
 // commitment, reproduced by {claimSetHashOf}) bind the signature to the exact
 // claimant table that was scored; `configHash` ({configHash} from config.ts)
-// commits the signer to the off-chain configuration the root was computed under.
+// commits the signer to the off-chain configuration the root was computed under,
+// while `settlementInputHash` commits the canonical per-user gross-score rows.
 // Sign with viem: walletClient.signTypedData(settlementTypedData(...)).
 export function settlementTypedData(
   chainId: number,
@@ -327,7 +338,8 @@ export function settlementTypedData(
   s: Pick<Settlement, "incidentId" | "root" | "poolPayouts" | "poolAddrs">,
   unresolved: bigint,
   claimSet: `0x${string}`,
-  configHash: `0x${string}`
+  configHash: `0x${string}`,
+  settlementInputHash: `0x${string}`
 ) {
   // The `pools` hash is taken from s.poolAddrs — the SAME ordered pool list the payout row
   // was computed against (parallel to poolOrder) — NOT a fresh chain read. That's what makes
@@ -350,6 +362,7 @@ export function settlementTypedData(
         { name: "pools", type: "bytes32" },
         { name: "claimSet", type: "bytes32" },
         { name: "configHash", type: "bytes32" },
+        { name: "settlementInputHash", type: "bytes32" },
       ],
     },
     primaryType: "Settlement",
@@ -361,6 +374,7 @@ export function settlementTypedData(
       pools: poolsHash,
       claimSet,
       configHash,
+      settlementInputHash,
     },
   } as const;
 }

@@ -1,7 +1,7 @@
 // All chain reads. Plain read-only RPC calls against a public archive node.
 
 import { createPublicClient, http, parseAbi, parseAbiItem, type PublicClient } from "viem";
-import { CONFIG, MAX_ORACLE_STALENESS } from "./config.js";
+import { CONFIG, MAX_ORACLE_STALENESS, MAX_LOG_RANGE, LOG_RESULT_CAP } from "./config.js";
 
 export const WAD = 10n ** 18n;
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
@@ -19,7 +19,8 @@ export const DEFI_ABI = parseAbi([
 export const REGISTRY_ABI = parseAbi([
   "function coverPools() view returns (address[] assets, address[] poolAddrs)",
   "function coverPoolsLength() view returns (uint256)",
-  "function getScoredTokens() view returns ((address token, uint128 scorePerTokenPerBlock, uint64 startBlock)[])",
+  "function getScoredTokens() view returns (address[])",
+  "function getScoredRateHistory(address token) view returns ((uint64 fromBlock, uint128 rate)[])",
   "function boosterNFT() view returns (address)",
   "function maxCoverPoolPayoutBps() view returns (uint256)",
   "function scoreSpent(address) view returns (uint256)",
@@ -59,10 +60,15 @@ export interface SettlementParams {
   holdingMarginBlocks: bigint;
   sampleStepBlocks: bigint;
 }
+/** One rate segment of a scored token: `rate` applies from `fromBlock` until the
+ *  next segment's fromBlock (or referenceBlock). Mirrors Registry.RatePoint. */
+export interface RatePoint {
+  fromBlock: bigint;
+  rate: bigint; // score per whole token per block, 1e18-scaled; 0 = off from here
+}
 export interface ScoredToken {
   token: `0x${string}`;
-  scorePerTokenPerBlock: bigint;
-  startBlock: bigint;
+  rates: RatePoint[]; // append-only timeline, ascending by fromBlock (Registry order)
   decimals: number; // token decimals; scores are normalized to an 18-dec basis before summing (F6)
 }
 export interface IncidentConfig {
@@ -104,9 +110,12 @@ function orderLogs<T extends { blockNumber: bigint; logIndex: number }>(a: T, b:
 // (≥ LOG_RESULT_CAP), bisects it — so truncation can never pass unnoticed and the
 // merged result is identical regardless of provider. An inverted range (to < from)
 // yields [] deterministically (guards the degenerate window, audit L-C).
-const MAX_LOG_RANGE = 10_000n; // blocks per request — under common provider caps; tunable
-const LOG_RESULT_CAP = 10_000; // a chunk returning ≥ this may be capped → bisect and retry
-
+//
+// The caps live in config.ts (committed in configHash, M-01) and MUST be ≤ the
+// configured provider's documented limits — there is no universal cap (Blockscout
+// is 1,000, not 10,000). If bisection reaches a single block that STILL returns a
+// full page, we can't prove completeness, so we FAIL CLOSED (throw) rather than
+// sign a possibly-truncated result.
 type LogQuery = { address: `0x${string}`; event: unknown; args?: Record<string, unknown> };
 
 export async function getLogsChunked(
@@ -125,14 +134,21 @@ export async function getLogsChunked(
 
 async function getLogsBisect(client: PublicClient, q: LogQuery, fromBlock: bigint, toBlock: bigint): Promise<any[]> {
   const logs = (await client.getLogs({ ...q, fromBlock, toBlock } as any)) as any[];
-  // A full page might have been silently capped. If we can still split the range,
-  // bisect and retry; a single block truly holding that many matching logs is
-  // accepted (nothing left to split, and infeasible for a per-account filter).
-  if (logs.length < LOG_RESULT_CAP || fromBlock >= toBlock) return logs;
-  const mid = fromBlock + (toBlock - fromBlock) / 2n;
-  const lo = await getLogsBisect(client, q, fromBlock, mid);
-  const hi = await getLogsBisect(client, q, mid + 1n, toBlock);
-  return [...lo, ...hi];
+  // Under the cap → provably complete (cap is ≤ the provider's real limit).
+  if (logs.length < LOG_RESULT_CAP) return logs;
+  // A full page might have been silently capped. Split and retry to page it all in.
+  if (fromBlock < toBlock) {
+    const mid = fromBlock + (toBlock - fromBlock) / 2n;
+    const lo = await getLogsBisect(client, q, fromBlock, mid);
+    const hi = await getLogsBisect(client, q, mid + 1n, toBlock);
+    return [...lo, ...hi];
+  }
+  // Single block still full: nothing left to split, so completeness is
+  // unprovable. Fail closed rather than sign a possibly-truncated history (M-01).
+  throw new Error(
+    `getLogs returned ${logs.length} ≥ LOG_RESULT_CAP (${LOG_RESULT_CAP}) for single block ${fromBlock} — ` +
+      `cannot prove completeness. Lower LOG_RESULT_CAP below the provider's documented cap, or use an indexed source.`
+  );
 }
 
 /**
@@ -212,19 +228,26 @@ export async function incidentConfigOf(
     blockNumber: openBlock,
   })) as readonly [bigint, bigint, bigint];
 
-  const rawScored = (await client.readContract({
+  // Every token ever scored, then each one's append-only rate timeline — all pinned
+  // at openBlock. earnedScoreOf integrates each segment at its OWN rate, so a past
+  // rate change never re-prices already-accrued score. Decimals are also pinned so a
+  // non-18-dec token's integral normalizes to the shared 18-dec basis (F6).
+  const tokenList = (await client.readContract({
     address: CONFIG.registry,
     abi: REGISTRY_ABI,
     functionName: "getScoredTokens",
     blockNumber: openBlock,
-  })) as { token: `0x${string}`; scorePerTokenPerBlock: bigint; startBlock: bigint }[];
-  // Enrich each scored token with its decimals so earnedScoreOf can normalize
-  // every token's balance integral to a common 18-dec basis before summing (F6):
-  // otherwise a non-18-dec scored token's score would be mis-scaled relative to
-  // the others when they're added together.
+  })) as `0x${string}`[];
   const scoredTokens: ScoredToken[] = [];
-  for (const st of rawScored) {
-    scoredTokens.push({ ...st, decimals: await decimalsOf(client, st.token, openBlock) });
+  for (const token of tokenList) {
+    const rates = (await client.readContract({
+      address: CONFIG.registry,
+      abi: REGISTRY_ABI,
+      functionName: "getScoredRateHistory",
+      args: [token],
+      blockNumber: openBlock,
+    })) as { fromBlock: bigint; rate: bigint }[];
+    scoredTokens.push({ token, rates: [...rates], decimals: await decimalsOf(client, token, openBlock) });
   }
 
   return {
@@ -290,14 +313,16 @@ export async function maxCoverPoolPayoutBpsAt(client: PublicClient, blockNumber:
  * genesis-wide ScoreSpent/DefiInsuranceSet log scans (simpler, cheaper, immune
  * to RPC getLogs range caps).
  *
- * Callers anchor at openBlock−1 — an INTENTIONAL asymmetry with earnedScoreOf,
- * which anchors at the earlier `referenceBlock` (do not "align" them): earned is
- * capped pre-incident so score can't be farmed during the claim window, but
- * spent must subtract EVERY prior commitment up to the open. Anchoring spent at
- * referenceBlock instead would miss score a user burned in (referenceBlock,
- * openBlock] — e.g. on a prior incident that finalized in that gap — and let
- * them re-claim it (double-spend). All prior incidents resolve before openBlock
- * (one-at-a-time), so openBlock−1 captures them.
+ * Callers anchor at the END of openBlock (M-03) — an INTENTIONAL asymmetry with
+ * earnedScoreOf, which anchors at the earlier `referenceBlock` (do not "align"
+ * them): earned is capped pre-incident so score can't be farmed during the claim
+ * window, but spent must subtract EVERY prior commitment up to the open, INCLUDING
+ * a prior incident that finalized EARLIER IN THE SAME BLOCK this one opens in —
+ * openBlock−1 would miss that same-block spend and let it be reused. Reading at
+ * openBlock is safe because a newly-opened incident can't finalize in its own
+ * opening block, so this snapshot never includes the incident being settled.
+ * Anchoring spent at referenceBlock instead would miss score a user burned in
+ * (referenceBlock, openBlock] and let them re-claim it (double-spend).
  */
 export async function spentScoreOf(client: PublicClient, user: `0x${string}`, blockNumber: bigint): Promise<bigint> {
   return (await client.readContract({

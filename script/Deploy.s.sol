@@ -100,7 +100,7 @@ contract DeployScript is Script {
     ///         rejects the zero address — but equally unspendable.
     address constant SEED_SINK = 0x000000000000000000000000000000000000dEaD;
 
-    /// @notice scorePerTokenPerBlock for the two scored tokens, 1e18-scaled
+    /// @notice Insurance-score rate for the two scored tokens, 1e18-scaled
     ///         (1e18 ⇒ 1.0 score/token/block). Set for a 12s-block chain
     ///         (7200 blocks/day) so a whole token accrues, per day: USD8 → 1.0
     ///         (1e18/7200), sUSD8 → 0.1 (1e18/72000). Frontend shows rate ×
@@ -228,10 +228,9 @@ contract DeployScript is Script {
         d.registry.addPool(address(d.wstethPool));
 
         // Scored tokens + booster live on the Registry. sUSD8 earns 10× plain USD8;
-        // scoring starts now.
-        uint64 scoreStart = uint64(block.number);
-        d.registry.setScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE, scoreStart);
-        d.registry.setScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE, scoreStart);
+        // scoring starts now (the first setScoredToken effective at this block).
+        d.registry.setScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE);
+        d.registry.setScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE);
         d.registry.setBoosterNFT(USD8_BOOSTER);
 
         // Route Treasury profit to the pool (vesting-aware receiver).

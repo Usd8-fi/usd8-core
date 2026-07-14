@@ -19,6 +19,19 @@ export const CONFIG_VERSION = "3.1.0";
 // {configHash} commits the signer to (M-04).
 export const MAX_ORACLE_STALENESS = 86_400n;
 
+// eth_getLogs completeness policy (M-01). A truncating provider that silently
+// caps results makes the settler drop Transfer logs → wrong min-balance/score →
+// a wrong signed root. There is NO universal cap: providers differ (e.g.
+// Blockscout documents a 1,000-result eth_getLogs limit). So these MUST be set
+// to values at or below the CONFIGURED provider's documented limits, and they are
+// committed in {configHash} so which completeness policy produced a root is a
+// public, disputable fact. LOG_RESULT_CAP: if a single-block range still returns
+// ≥ this, the settler FAILS CLOSED (throws) rather than sign a possibly-truncated
+// result — completeness can't be proven past one block. Defaults are conservative
+// (Blockscout-compatible); raise only to a value proven ≤ the real provider cap.
+export const MAX_LOG_RANGE = 1_000n; // blocks per eth_getLogs request
+export const LOG_RESULT_CAP = 1_000; // results per request treated as "possibly truncated"
+
 // USD8 deploys to Ethereum mainnet only. Locked here (not configurable) so the
 // tool can never be pointed at a fork/testnet with colliding addresses; the
 // RPC's chain id is checked against this at startup.
@@ -79,6 +92,8 @@ export function configHash(): `0x${string}` {
         defiInsurance: CONFIG.defiInsurance.toLowerCase(),
         assetUsdFeed: feeds,
         maxOracleStaleness: MAX_ORACLE_STALENESS.toString(),
+        maxLogRange: MAX_LOG_RANGE.toString(),
+        logResultCap: LOG_RESULT_CAP.toString(),
       })
     )
   );

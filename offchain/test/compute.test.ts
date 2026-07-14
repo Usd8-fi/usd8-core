@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
+import { encodeAbiParameters, hashTypedData, keccak256 } from "viem";
 
 // Replace the chain-reading helpers with deterministic stubs so the pure
 // settlement algorithm can be exercised without an RPC. earnedScoreOf /
@@ -8,6 +9,9 @@ const h = vi.hoisted(() => ({
   integrals: new Map<string, bigint>(),
   minBalances: new Map<string, bigint>(),
   boosterBalances: new Map<string, bigint>(),
+  // When true, tokenBlockIntegral returns the WINDOW LENGTH (to−from) — a balance≡1
+  // proxy — so the piecewise rate-timeline tests can check per-segment integration.
+  windowMode: false,
 }));
 
 vi.mock("../src/chain.js", async (importOriginal) => {
@@ -18,12 +22,22 @@ vi.mock("../src/chain.js", async (importOriginal) => {
     priceUsd1e18: vi.fn(async () => actual.WAD), // underlying = $1
     minBalanceOver: vi.fn(async (_c: any, _t: any, who: string) => h.minBalances.get(who.toLowerCase()) ?? 10_000n * actual.WAD),
     minErc1155BalanceOver: vi.fn(async (_c: any, _col: any, who: string) => h.boosterBalances.get(who.toLowerCase()) ?? 0n),
-    tokenBlockIntegral: vi.fn(async (_c: any, _t: any, who: string) => h.integrals.get(who.toLowerCase()) ?? 0n),
+    tokenBlockIntegral: vi.fn(async (_c: any, _t: any, who: string, from: bigint, to: bigint) =>
+      h.windowMode ? to - from : (h.integrals.get(who.toLowerCase()) ?? 0n)
+    ),
   };
 });
 
 import * as chain from "../src/chain.js";
-import { settle, earnedScoreOf, settlementTree, LEAF_ENCODING } from "../src/compute.js";
+import {
+  settle,
+  earnedScoreOf,
+  settlementInputHashOf,
+  settlementTree,
+  settlementTypedData,
+  LEAF_ENCODING,
+} from "../src/compute.js";
+import { RpcScoreSource } from "../src/score.js";
 import type { IncidentConfig, InputEvent } from "../src/chain.js";
 
 beforeEach(() => vi.clearAllMocks());
@@ -44,7 +58,7 @@ const cfg: IncidentConfig = {
   underlyingConversionAddress: ZERO,
   underlyingConversionCallData: "0x",
   params: { twapLookbackBlocks: 10n, holdingMarginBlocks: 5n, sampleStepBlocks: 5n },
-  scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n, decimals: 18 }], // 1e18 = 1.0/token/block
+  scoredTokens: [{ token: SCORED, rates: [{ fromBlock: 0n, rate: WAD }], decimals: 18 }], // 1e18 = 1.0/token/block
 };
 
 function reg(claimId: bigint, user: `0x${string}`, amount: bigint, scoreToSpend: bigint): InputEvent {
@@ -64,6 +78,7 @@ function baseOpts(assetBalance: bigint) {
     poolAssetDecimals: [18],
     boosterCollection: BOOSTER,
     boosterId: 1n,
+    grossScoreOf: vi.fn(async (u: `0x${string}`) => h.integrals.get(u.toLowerCase()) ?? 0n),
     spentOf: (_u: `0x${string}`) => 0n,
     maxCoverPoolPayoutBps: 10_000n, // no per-incident cap by default; a dedicated test exercises it
   };
@@ -136,7 +151,7 @@ describe("settle — payout math", () => {
     expect(s.rows[0].lossUsd).toEqual(30n * WAD);
   });
 
-  it("eligibility window ends at referenceBlock; score/price pinned to referenceBlock", async () => {
+  it("eligibility ends at referenceBlock and settlement obtains score through its provider", async () => {
     setEarned();
     const opts = baseOpts(100n * WAD); // referenceBlock=100, windowEndBlock=110; joins at 105/106
     await settle({} as any, 1n, cfg, events, opts);
@@ -146,11 +161,11 @@ describe("settle — payout math", () => {
     const elig = (chain.minBalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls;
     expect(elig.map((c) => c[1])).toEqual([opts.insuredToken, opts.insuredToken]);
     expect(elig.map((c) => c[4])).toEqual(events.map(() => opts.referenceBlock)); // both end at referenceBlock (100)
-    // Score integral still ends at referenceBlock — no farming score during the
-    // claim window to inflate payout weight.
-    const score = (chain.tokenBlockIntegral as unknown as { mock: { calls: any[][] } }).mock.calls;
-    expect(score.length).toBe(2); // 2 claimants × 1 scored token
-    for (const c of score) expect(c[4]).toBe(opts.referenceBlock);
+    // Settlement no longer knows how score was produced; it consumes the injected
+    // gross-score provider. The Phase-1 RpcScoreSource pins its own referenceBlock.
+    const score = (opts.grossScoreOf as unknown as { mock: { calls: any[][] } }).mock.calls;
+    expect(score.map((c) => c[0])).toEqual([BOB, CAROL]);
+    expect((chain.tokenBlockIntegral as unknown as { mock: { calls: any[][] } }).mock.calls).toHaveLength(0);
   });
 
   it("no live claims → zero root, empty rows (L-D, no crash)", async () => {
@@ -175,6 +190,7 @@ describe("settle — payout math", () => {
     ];
     const s = await settle({} as any, 1n, cfg, withCancel, baseOpts(100n * WAD));
     expect(s.rows.map((r) => r.claimId)).toEqual([1n]); // carol dropped
+    expect(s.settlementInputHash).toBe(settlementInputHashOf([{ user: BOB, grossEarnedScore: 60n }]));
   });
 });
 
@@ -182,6 +198,15 @@ describe("earnedScoreOf — raw lifetime score", () => {
   it("is the un-boosted integral × rate (booster applied later, on the unspent remainder)", async () => {
     h.integrals.set(BOB.toLowerCase(), 60n);
     expect(await earnedScoreOf({} as any, cfg, BOB, 110n)).toEqual(60n);
+  });
+
+  it("RpcScoreSource preserves the raw-RPC calculation at its pinned block", async () => {
+    h.integrals.set(BOB.toLowerCase(), 60n);
+    const source = new RpcScoreSource({} as any, cfg, 110n);
+    expect(await source.grossScoreOf(BOB)).toBe(60n);
+    const calls = (chain.tokenBlockIntegral as unknown as { mock: { calls: any[][] } }).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0].slice(2)).toEqual([BOB, 0n, 110n]);
   });
 });
 
@@ -234,8 +259,78 @@ describe("settle — booster cap", () => {
     // The old bug gave 100 × 10200/10000 − 40 = 62 (booster boosting spent score).
     const opts = { ...baseOpts(10_000n * WAD), spentOf: (_u: `0x${string}`) => 40n };
     const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], opts);
+    expect(s.rows[0].grossEarnedScore).toEqual(100n); // signed input is pre-spend, pre-booster
     expect(s.rows[0].earnedScore).toEqual(61n);
     expect(s.rows[0].scoreSpent).toEqual(61n);
+    expect(s.settlementInputHash).toBe(settlementInputHashOf([{ user: BOB, grossEarnedScore: 100n }]));
+  });
+});
+
+describe("settlementInputHash — canonical gross-score commitment", () => {
+  const rows = [
+    { user: BOB, grossEarnedScore: 60n },
+    { user: CAROL, grossEarnedScore: 40n },
+  ];
+
+  it("is order-insensitive and exactly hashes abi.encode(address[],uint256[])", () => {
+    const expected = keccak256(
+      encodeAbiParameters(
+        [{ type: "address[]" }, { type: "uint256[]" }],
+        [[BOB, CAROL], [60n, 40n]]
+      )
+    );
+    expect(settlementInputHashOf(rows)).toBe(expected);
+    expect(settlementInputHashOf([...rows].reverse())).toBe(expected);
+  });
+
+  it("changes when one gross score changes by one unit", () => {
+    expect(settlementInputHashOf([{ ...rows[0], grossEarnedScore: 61n }, rows[1]])).not.toBe(
+      settlementInputHashOf(rows)
+    );
+  });
+
+  it("rejects duplicate users, including checksum/casing variants", () => {
+    const bobMixedCase = "0x000000000000000000000000000000000000B0B0" as const;
+    expect(() => settlementInputHashOf([rows[0], { user: bobMixedCase, grossEarnedScore: 1n }])).toThrow(
+      /duplicate settlement input user/
+    );
+  });
+
+  it("hashes empty input as two ABI-encoded empty arrays, not bytes32(0)", () => {
+    const expected = keccak256(
+      encodeAbiParameters(
+        [{ type: "address[]" }, { type: "uint256[]" }],
+        [[], []]
+      )
+    );
+    expect(settlementInputHashOf([])).toBe(expected);
+    expect(expected).not.toBe(`0x${"0".repeat(64)}`);
+  });
+
+  it("is appended to the EIP-712 Settlement payload and changes its digest", () => {
+    const settlement = {
+      incidentId: 7n,
+      root: `0x${"11".repeat(32)}` as `0x${string}`,
+      poolPayouts: [1n, 2n],
+      poolAddrs: [ASSET, INS],
+    };
+    const claimSet = `0x${"22".repeat(32)}` as `0x${string}`;
+    const configHash = `0x${"33".repeat(32)}` as `0x${string}`;
+    const inputHash = settlementInputHashOf(rows);
+    const typed = settlementTypedData(1, INS, settlement, 2n, claimSet, configHash, inputHash);
+    expect(typed.types.Settlement.at(-1)).toEqual({ name: "settlementInputHash", type: "bytes32" });
+    expect(typed.message.settlementInputHash).toBe(inputHash);
+
+    const changed = settlementTypedData(
+      1,
+      INS,
+      settlement,
+      2n,
+      claimSet,
+      configHash,
+      `0x${"44".repeat(32)}`
+    );
+    expect(hashTypedData(changed)).not.toBe(hashTypedData(typed));
   });
 });
 
@@ -326,13 +421,54 @@ describe("configHash — settlement config commitment (M-04)", () => {
   });
 });
 
+describe("earnedScoreOf — rate timeline (piecewise, non-retroactive)", () => {
+  // balance≡1 proxy: mock the integral over [from,to] to be the window length, so a
+  // segment's contribution is exactly (windowLength × rate) and the piecewise sum is
+  // trivially checkable.
+  const scoredCfg = (rates: { fromBlock: bigint; rate: bigint }[]) => ({
+    ...cfg,
+    scoredTokens: [{ token: SCORED, rates, decimals: 18 }],
+  });
+
+  beforeEach(() => {
+    h.windowMode = true;
+  });
+  afterEach(() => {
+    h.windowMode = false;
+  });
+
+  it("single segment == constant rate over the whole window (reproduces the old result)", async () => {
+    // [10,110] = 100 blocks × rate 1.0 → 100.
+    expect(await earnedScoreOf({} as any, scoredCfg([{ fromBlock: 10n, rate: WAD }]), BOB, 110n)).toBe(100n);
+  });
+
+  it("a rate change applies the OLD rate to the old window and the NEW rate only from the change block", async () => {
+    // rate 3 over [0,40) = 120, rate 1 over [40,100] = 60 → 180. The change does NOT
+    // retroactively re-price [0,40) at rate 1 (that would give 100).
+    const c = scoredCfg([{ fromBlock: 0n, rate: 3n * WAD }, { fromBlock: 40n, rate: WAD }]);
+    expect(await earnedScoreOf({} as any, c, BOB, 100n)).toBe(180n);
+  });
+
+  it("a rate-0 segment (scoring off) accrues nothing over its window", async () => {
+    // rate 1 over [0,50) = 50, rate 0 over [50,100] = 0 → 50.
+    const c = scoredCfg([{ fromBlock: 0n, rate: WAD }, { fromBlock: 50n, rate: 0n }]);
+    expect(await earnedScoreOf({} as any, c, BOB, 100n)).toBe(50n);
+  });
+
+  it("a segment starting at/after the reference block contributes nothing", async () => {
+    const c = scoredCfg([{ fromBlock: 0n, rate: WAD }, { fromBlock: 100n, rate: 9n * WAD }]);
+    // only [0,100) at rate 1 counts → 100; the {100, 9x} segment has an empty window.
+    expect(await earnedScoreOf({} as any, c, BOB, 100n)).toBe(100n);
+  });
+});
+
 describe("earnedScoreOf — decimal normalization (F6)", () => {
   it("normalizes each scored token's integral to an 18-dec basis before summing", async () => {
     h.integrals.clear();
     h.integrals.set(BOB.toLowerCase(), 1_000_000n); // same RAW balance·block integral
 
     const at = (dec: number) =>
-      earnedScoreOf({} as any, { ...cfg, scoredTokens: [{ token: SCORED, scorePerTokenPerBlock: WAD, startBlock: 0n, decimals: dec }] }, BOB, 100n);
+      earnedScoreOf({} as any, { ...cfg, scoredTokens: [{ token: SCORED, rates: [{ fromBlock: 0n, rate: WAD }], decimals: dec }] }, BOB, 100n);
 
     // A 6-dec token's raw integral must scale up by 1e12 vs an 18-dec token's, so
     // the same *whole-token* holding scores the same regardless of token decimals.

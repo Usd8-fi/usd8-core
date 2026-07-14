@@ -65,7 +65,10 @@ npm run compute 1
 ```
 
 `compute` prints, per claim, the exact `(amounts, scoreSpent, proof)` a
-claimant passes to `DefiInsurance.finalizeClaim`.
+claimant passes to `DefiInsurance.finalizeClaim`. It also publishes the
+canonical, address-sorted `(user, grossEarnedScore)` rows and their
+`settlementInputHash`; this is the per-incident input commitment included in
+the TEE's EIP-712 signature.
 
 ## What it computes (all from chain state)
 
@@ -92,8 +95,14 @@ claimant passes to `DefiInsurance.finalizeClaim`.
 5. **Payout**: `min(scoreShare × poolUsd, κ × lossUsd)`, split per pool
    pro-rata to the pool mix, aligned to `Registry.pools()` at `openBlock`.
 6. **Merkle root**: OZ `StandardMerkleTree` over
-   `(incidentId, claimId, user, amounts, scoreSpent)` — the exact leaf
+   `(incidentId, claimId, user, amounts, scoreSpent, eligibleAmount)` — the exact leaf
    encoding `finalizeClaim` verifies with `bytes32[] proof`.
+
+Phase 1 obtains gross score through `RpcScoreSource`, which preserves the exact
+raw historical-RPC replay. The payout computation depends only on the
+`ScoreSource` interface, so a future indexed snapshot can replace the transport
+without changing score arithmetic, payout math, or the canonical signed input
+rows.
 
 All tunable parameters (coverage κ, TWAP/holding windows, the conversion recipe,
 the underlying oracle, the scored-token set) are read from contract state at the
@@ -115,7 +124,7 @@ npm test
 #    settle and pay each claimant exactly the off-chain amounts. Requires the
 #    build artifacts and is opt-in:
 npm run build
-cd .. && RUN_INTEGRATION=1 forge test --ffi --match-path test/SettlementIntegration.t.sol -vv
+cd .. && RUN_INTEGRATION=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 ```
 
 The integration test is skipped by a plain `forge test` (no `--ffi`, no env), so
@@ -127,6 +136,7 @@ it never breaks the default Solidity suite.
 src/config.ts    contract addresses + per-asset USD feeds (the only thing to edit; chain locked to mainnet)
 src/chain.ts     read-only RPC helpers (events, prices, balances, config)
 src/compute.ts   the settlement algorithm (pure, given the chain reads)
+src/score.ts     ScoreSource abstraction + Phase-1 raw-RPC implementation
 src/ffi.ts       FFI bridge used by the Foundry integration test
 src/main.ts      the compute / verify CLI
 test/            Vitest unit tests

@@ -24,8 +24,8 @@
 //   digest            → payload abi.encode(uint256 chainId, address verifyingContract,
 //                       uint256 incidentId, bytes32 root, uint256 unresolved,
 //                       uint256[] poolPayouts, address[] poolAddrs, bytes32 claimSet,
-//                       bytes32 configHash); prints abi.encode(bytes32) of the
-//                       EIP-712 settlement digest.
+//                       bytes32 configHash, bytes32 settlementInputHash); prints
+//                       abi.encode(bytes32) of the EIP-712 settlement digest.
 //   claimset          → payload abi.encode(uint8[] kinds (0=register, 1=cancel),
 //                       uint256[] claimIds, address[] users, uint256[] escrows,
 //                       uint256[] scoreToSpends, uint256[] boosterAmounts), aligned
@@ -73,28 +73,51 @@ if (cmd === "root" || cmd === "proof") {
     emit("bytes32[]", proof);
   }
 } else if (cmd === "digest") {
-  const [chainId, verifyingContract, incidentId, root, unresolved, poolPayouts, poolAddrs, claimSet, configHash] =
-    decodeAbiParameters(
-      [
-        { type: "uint256" },
-        { type: "address" },
-        { type: "uint256" },
-        { type: "bytes32" },
-        { type: "uint256" },
-        { type: "uint256[]" },
-        { type: "address[]" },
-        { type: "bytes32" },
-        { type: "bytes32" },
-      ],
-      hex
-    ) as [bigint, `0x${string}`, bigint, `0x${string}`, bigint, bigint[], `0x${string}`[], `0x${string}`, `0x${string}`];
+  const [
+    chainId,
+    verifyingContract,
+    incidentId,
+    root,
+    unresolved,
+    poolPayouts,
+    poolAddrs,
+    claimSet,
+    configHash,
+    settlementInputHash,
+  ] = decodeAbiParameters(
+    [
+      { type: "uint256" },
+      { type: "address" },
+      { type: "uint256" },
+      { type: "bytes32" },
+      { type: "uint256" },
+      { type: "uint256[]" },
+      { type: "address[]" },
+      { type: "bytes32" },
+      { type: "bytes32" },
+      { type: "bytes32" },
+    ],
+    hex
+  ) as [
+    bigint,
+    `0x${string}`,
+    bigint,
+    `0x${string}`,
+    bigint,
+    bigint[],
+    `0x${string}`[],
+    `0x${string}`,
+    `0x${string}`,
+    `0x${string}`,
+  ];
   const typedData = settlementTypedData(
     Number(chainId),
     verifyingContract,
     { incidentId, root, poolPayouts: [...poolPayouts], poolAddrs: [...poolAddrs] },
     unresolved,
     claimSet,
-    configHash
+    configHash,
+    settlementInputHash
   );
   emit("bytes32", hashTypedData(typedData));
 } else if (cmd === "claimset") {
