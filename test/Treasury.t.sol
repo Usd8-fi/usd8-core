@@ -11,7 +11,6 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {USD8} from "../src/USD8.sol";
-import {SavingsUSD8} from "../src/SavingsUSD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {Registry} from "../src/Registry.sol";
 import {RegistryManaged} from "../src/RegistryManaged.sol";
@@ -23,9 +22,19 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {LossyWithdrawStrategy} from "./mocks/LossyWithdrawStrategy.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
+import {IProfitDistributionReceiver} from "../src/interfaces/IProfitDistributionReceiver.sol";
 import {ERC4626Strategy} from "../src/strategies/ERC4626Strategy.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import {VaultV2} from "vault-v2/src/VaultV2.sol";
+import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
+import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
+import {USD8SavingsAdapter} from "../src/adapters/USD8SavingsAdapter.sol";
+import {USD8SavingsAdapterFactory} from "../src/adapters/USD8SavingsAdapterFactory.sol";
+
+contract NonPullingProfitReceiver is IProfitDistributionReceiver {
+    function receiveProfitDistribution(uint256) external pure {}
+}
 
 contract TreasuryTest is Test {
     Registry registry;
@@ -85,6 +94,30 @@ contract TreasuryTest is Test {
         assertEq(usd8.treasury(), address(treasury));
         assertEq(registry.timelock(), timelock);
         assertTrue(registry.isAdmin(admin));
+    }
+
+    function _deployMorphoSavings() internal returns (VaultV2 vault, USD8SavingsAdapter adapter) {
+        VaultV2Factory factory = new VaultV2Factory();
+        vault = VaultV2(factory.createVaultV2(address(this), address(usd8), keccak256("sUSD8")));
+        adapter = USD8SavingsAdapter(new USD8SavingsAdapterFactory().createUSD8SavingsAdapter(address(vault)));
+        vault.setCurator(address(this));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.setIsAllocator, (address(this), true)));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.addAdapter, (address(adapter))));
+        bytes memory idData = abi.encode("this", address(adapter));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.increaseAbsoluteCap, (idData, type(uint128).max)));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.increaseRelativeCap, (idData, 1e18)));
+        vault.setMaxRate(20e16 / uint256(365 days));
+        vault.setLiquidityAdapterAndData(address(adapter), "");
+    }
+
+    function _executeMorpho(VaultV2 vault, bytes memory data) internal {
+        vault.submit(data);
+        (bool success, bytes memory returnData) = address(vault).call(data);
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returnData, 32), mload(returnData))
+            }
+        }
     }
 
     function test_ConstantsMatchSpec() public view {
@@ -373,12 +406,9 @@ contract TreasuryTest is Test {
         assertEq(usd8.balanceOf(address(treasury)), 7.9e18);
     }
 
-    function test_DistributeRevenueToSavingsUsesProfitVesting() public {
-        SavingsUSD8 savings = SavingsUSD8(
-            address(
-                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (registry, usd8)))
-            )
-        );
+    /// forge-config: default.isolate = true
+    function test_DistributeRevenueToMorphoSavingsUsesMaxRateBuffer() public {
+        (VaultV2 savings, USD8SavingsAdapter adapter) = _deployMorphoSavings();
 
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
@@ -392,16 +422,26 @@ contract TreasuryTest is Test {
 
         vm.prank(timelock);
         treasury.distributeRevenue(
-            address(savings), 19.9e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution
+            address(adapter), 19.9e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution
         );
 
         assertEq(usd8.balanceOf(address(treasury)), 0);
-        assertEq(savings.pendingProfit(), 19.9e18);
-        assertEq(savings.unvestedProfit(), 19.9e18);
+        assertEq(usd8.balanceOf(address(adapter)), 119.9e18);
         assertEq(savings.totalAssets(), 100e18, "no instant share-price jump");
 
-        vm.warp(block.timestamp + 7 days);
-        assertEq(savings.totalAssets(), 119.9e18);
+        vm.warp(block.timestamp + 365 days);
+        assertApproxEqAbs(savings.totalAssets(), 119.9e18, 1e10);
+    }
+
+    function test_DistributeRevenueRevertsWhenReceiverPullsNothing() public {
+        NonPullingProfitReceiver nonPulling = new NonPullingProfitReceiver();
+        _seedTreasuryUsd8(10e18);
+
+        vm.prank(timelock);
+        vm.expectRevert(abi.encodeWithSelector(Treasury.RevenueDeliveryMismatch.selector, 10e18, 0));
+        treasury.distributeRevenue(
+            address(nonPulling), 10e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution
+        );
     }
 
     function test_DistributeRevenueToZeroAddressReverts() public {
@@ -512,13 +552,9 @@ contract TreasuryTest is Test {
         assertEq(usd8.balanceOf(recipient2), 0);
     }
 
-    function test_HarvestAndDistributeToVestingReceiver() public {
-        SavingsUSD8 savings = SavingsUSD8(
-            address(
-                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (registry, usd8)))
-            )
-        );
-        // Give the vault a depositor so receiveProfitDistribution accepts profit.
+    /// forge-config: default.isolate = true
+    function test_HarvestAndDistributeToMorphoSavingsAdapter() public {
+        (VaultV2 savings, USD8SavingsAdapter adapter) = _deployMorphoSavings();
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
         usdc.approve(address(treasury), 100e6);
@@ -530,14 +566,14 @@ contract TreasuryTest is Test {
         usdc.mint(address(treasury), 20e6); // surplus → 19.9e18
 
         vm.startPrank(admin);
-        treasury.setProfitReceiver(address(savings), 1, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
+        treasury.setProfitReceiver(address(adapter), 1, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
         treasury.setProfitReceiver(recipient, 1, Treasury.RevenueDistributionMode.DirectTransfer);
         treasury.harvestAndDistribute(); // 19.9e18 split 1:1 → 9.95e18 each
         vm.stopPrank();
 
         assertEq(usd8.balanceOf(recipient), 9.95e18);
-        assertEq(savings.pendingProfit(), 9.95e18);
-        assertEq(savings.totalAssets(), 100e18, "vests, no instant jump");
+        assertEq(usd8.balanceOf(address(adapter)), 109.95e18);
+        assertEq(savings.totalAssets(), 100e18, "maxRate prevents instant jump");
     }
 
     function test_HarvestAndDistributeRevertsIfSurplusButNoEligible() public {

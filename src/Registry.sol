@@ -55,7 +55,7 @@ interface ICoverPool {
 ///         existing fields across an upgrade — only append new ones at the end (OZ v5
 ///         Initializable/UUPS state lives in its own ERC-7201 namespace, so it does
 ///         not collide with these sequential slots). Upgrades carry the same
-///         timelock-gated discipline as USD8/SavingsUSD8.
+///         timelock-gated discipline as USD8/Treasury.
 /// @custom:security-contact rick@usd8.fi
 contract Registry is Initializable, UUPSUpgradeable {
     /// @notice The single root governance address (expected: a TimelockController).
@@ -218,7 +218,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     }
 
     /// @dev Only the timelock can upgrade the Registry — the same authority that
-    ///      gates USD8/SavingsUSD8 upgrades. No admin upgrade path.
+    ///      gates USD8/Treasury upgrades. No admin upgrade path.
     function _authorizeUpgrade(address) internal override onlyTimelock {}
 
     // ─────────────────────────── Governance (timelock) ───────────────────────────

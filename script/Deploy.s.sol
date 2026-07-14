@@ -18,7 +18,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Registry} from "../src/Registry.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
-import {SavingsUSD8} from "../src/SavingsUSD8.sol";
+import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
+import {USD8SavingsBootstrap} from "../src/deployment/USD8SavingsBootstrap.sol";
 import {SingleAssetCoverPool} from "../src/SingleAssetCoverPool.sol";
 import {DefiInsurance} from "../src/DefiInsurance.sol";
 import {ERC4626Strategy} from "../src/strategies/ERC4626Strategy.sol";
@@ -26,7 +27,8 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 /// @title  Deploy
 /// @notice Deployer: Registry, USD8 (proxy + impl), Treasury (UUPS proxy + impl,
-///         with two USDC yield strategies — Aave + Morpho), SavingsUSD8, a wstETH SingleAssetCoverPool
+///         with two USDC yield strategies — Aave + Morpho), Morpho Vault V2 sUSD8 with a custom idle/profit adapter,
+///         a wstETH SingleAssetCoverPool
 ///         behind an UpgradeableBeacon (the capital base), and DefiInsurance (the
 ///         single payout module). Scored tokens (USD8, sUSD8) and the booster are
 ///         set on the Registry. Insured tokens and extra pools are left for
@@ -69,7 +71,7 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///
 ///  5. setTimelock IS IRREVERSIBLE — TRIPLE-CHECK THE ADDRESS. setTimelock is
 ///     single-step, and the timelock holds upgrade authority for Registry, USD8,
-///     Treasury, and SavingsUSD8 (UUPS), and owns the pool beacon (all pools
+///     Treasury, and owns the immutable Morpho sUSD8 vault plus the pool beacon (all pools
 ///     upgrade through it). A wrong or
 ///     typo'd address permanently and unrecoverably loses governance AND
 ///     upgradeability. NOTE: the pool beacon is Ownable and its ownership is
@@ -90,7 +92,7 @@ contract DeployScript is Script {
     uint256 constant TIMELOCK_MIN_DELAY = 24 hours;
 
     /// @notice USDC seeded into the protocol at deploy. Minted 1:1 into USD8
-    ///         and deposited into SavingsUSD8 with the shares burned, so the
+    ///         and deposited into the Morpho Vault V2 sUSD8 vault with the shares burned, so the
     ///         vault can never be emptied to a near-zero supply — the
     ///         first-depositor inflation attack has no foothold. Backed by
     ///         real USDC, so it does NOT dilute the peg.
@@ -127,6 +129,13 @@ contract DeployScript is Script {
     address constant AAVE_USDC_VAULT = 0x73edDFa87C71ADdC275c2b9890f5c3a8480bC9E6;
     address constant MORPHO_USDC_VAULT = 0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB;
 
+    /// @notice Canonical Ethereum Morpho Vault V2 factory.
+    address constant MORPHO_VAULT_V2_FACTORY = 0xA1D94F746dEfa1928926b84fB2596c06926C0405;
+
+    /// @notice Maximum positive sUSD8 share-price growth: 20% simple annual rate, WAD per second.
+    uint256 constant SUSD8_MAX_RATE = 20e16 / uint256(365 days);
+    bytes32 constant SUSD8_SALT = keccak256("USD8 Savings Morpho Vault V2");
+
     struct Deployed {
         TimelockController timelock;
         Registry registry;
@@ -134,8 +143,10 @@ contract DeployScript is Script {
         USD8 usd8;
         address treasuryImpl;
         Treasury treasury;
-        address savingsImpl;
-        SavingsUSD8 savings;
+        IVaultV2 savings;
+        address savingsAdapter;
+        address savingsAdapterFactory;
+        address savingsGate;
         address poolImpl;
         address poolBeacon;
         SingleAssetCoverPool wstethPool;
@@ -201,16 +212,29 @@ contract DeployScript is Script {
         // through the normal USDC-backed mint path (no unbacked supply).
         d.usd8.setTreasury(address(d.treasury));
 
-        // SavingsUSD8 impl (UUPS). The proxy is created AND seeded atomically by
-        // SavingsSeeder (below), in one tx, so the first-depositor seed can't be
-        // front-run: mint USD8 1:1 from real USDC (fully backed, peg unaffected),
-        // deposit it, and burn the shares to SEED_SINK so the vault's supply can
-        // never be drained back toward zero. Fund the seeder, then run it.
-        SavingsUSD8 savingsImpl = new SavingsUSD8();
-        d.savingsImpl = address(savingsImpl);
-        SavingsSeeder savingsSeeder = new SavingsSeeder();
-        d.treasury.USDC().transfer(address(savingsSeeder), SEED_USDC);
-        d.savings = savingsSeeder.run(address(savingsImpl), d.registry, d.usd8, d.treasury, SEED_USDC, SEED_SINK);
+        // Canonical Morpho Vault V2 sUSD8, custom idle/profit adapter, Registry pause gates,
+        // and dead-share seed are created/configured atomically. The bootstrap owns the
+        // fresh vault only during this transaction, then hands owner/curator/allocator
+        // roles to the TimelockController. Seed USD8 is minted 1:1 from real USDC.
+        USD8SavingsBootstrap savingsBootstrap = new USD8SavingsBootstrap();
+        require(d.treasury.USDC().transfer(address(savingsBootstrap), SEED_USDC), "sUSD8 seed transfer failed");
+        USD8SavingsBootstrap.Deployment memory savingsDeployment = savingsBootstrap.run(
+            USD8SavingsBootstrap.Config({
+                vaultFactory: MORPHO_VAULT_V2_FACTORY,
+                registry: d.registry,
+                usd8: d.usd8,
+                treasury: d.treasury,
+                seedUsdc: SEED_USDC,
+                seedSink: SEED_SINK,
+                governance: address(d.timelock),
+                maxRate: SUSD8_MAX_RATE,
+                salt: SUSD8_SALT
+            })
+        );
+        d.savings = IVaultV2(savingsDeployment.vault);
+        d.savingsAdapter = savingsDeployment.adapter;
+        d.savingsAdapterFactory = savingsDeployment.adapterFactory;
+        d.savingsGate = savingsDeployment.gate;
         assert(d.usd8.treasuryLocked());
 
         // SingleAssetCoverPool implementation behind a shared UpgradeableBeacon (owner
@@ -247,7 +271,10 @@ contract DeployScript is Script {
         d.registry.setScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE);
         d.registry.setBoosterNFT(USD8_BOOSTER);
 
-        // Route Treasury profit to the pool (vesting-aware receiver).
+        // Route Treasury profit equally to sUSD8 and the cover pool. Both use explicit
+        // accounting hooks: the adapter checkpoints Morpho before pulling profit so
+        // pre-donation elapsed time cannot be recognized instantly.
+        d.treasury.setProfitReceiver(d.savingsAdapter, 1, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
         d.treasury
             .setProfitReceiver(address(d.wstethPool), 1, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
 
@@ -306,9 +333,13 @@ contract DeployScript is Script {
         console2.log("Implementation:    ", d.treasuryImpl);
         console2.log("Proxy:             ", address(d.treasury));
         console2.log("");
-        console2.log("=== SavingsUSD8 ===");
-        console2.log("Implementation:    ", d.savingsImpl);
-        console2.log("Proxy:             ", address(d.savings));
+        console2.log("=== Morpho Vault V2 sUSD8 ===");
+        console2.log("Canonical factory: ", MORPHO_VAULT_V2_FACTORY);
+        console2.log("Vault/share token: ", address(d.savings));
+        console2.log("Savings adapter:   ", d.savingsAdapter);
+        console2.log("Adapter factory:   ", d.savingsAdapterFactory);
+        console2.log("Registry pause gate:", d.savingsGate);
+        console2.log("maxRate (WAD/sec): ", SUSD8_MAX_RATE);
         console2.log("");
         console2.log("=== SingleAssetCoverPool (wstETH) ===");
         console2.log("Implementation:    ", d.poolImpl);
@@ -324,33 +355,5 @@ contract DeployScript is Script {
         console2.log("");
         console2.log("=== Admin (fast deny-only levers) ===");
         console2.log("Address:           ", admin);
-    }
-}
-
-/// @notice One-shot deployer that creates the SavingsUSD8 UUPS proxy AND makes the
-///         seed deposit (dead shares to `sink`) in a SINGLE transaction, so the
-///         first-depositor seed can't be front-run (the vault does not exist until
-///         {run}). Fund this with `seedUsdc` USDC first; it mints fully-backed USD8
-///         via the Treasury and deposits it. {run} is owner-only.
-contract SavingsSeeder {
-    address private immutable owner;
-
-    constructor() {
-        owner = msg.sender;
-    }
-
-    function run(address savingsImpl, Registry registry, USD8 usd8, Treasury treasury, uint256 seedUsdc, address sink)
-        external
-        returns (SavingsUSD8 savings)
-    {
-        require(msg.sender == owner, "SavingsSeeder: not owner");
-        savings = SavingsUSD8(
-            address(new ERC1967Proxy(savingsImpl, abi.encodeCall(SavingsUSD8.initialize, (registry, usd8))))
-        );
-        treasury.USDC().approve(address(treasury), seedUsdc);
-        treasury.mintUSD8(seedUsdc); // mints fully-backed USD8 to this contract
-        uint256 seedUsd8 = seedUsdc * treasury.USDC_TO_USD8_SCALE();
-        usd8.approve(address(savings), seedUsd8);
-        savings.deposit(seedUsd8, sink);
     }
 }

@@ -185,6 +185,10 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         distribute but no registered receiver has a positive weight.
     error NoEligibleProfitReceivers();
 
+    /// @notice Thrown when a hook-based receiver does not pull exactly the
+    ///         approved revenue amount.
+    error RevenueDeliveryMismatch(uint256 expected, uint256 actual);
+
     // ─────────────────────────── Events ──────────────────────────
 
     /// @notice Emitted when user deposits USDC and receives USD8.
@@ -259,7 +263,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
 
     /// @dev Only the timelock can upgrade the Treasury — in place, so the reserve
     ///      and USD8 authority never move (audit M-06). Same authority that gates
-    ///      the Registry/USD8/SavingsUSD8 upgrades.
+    ///      the Registry/USD8 upgrades.
     function _authorizeUpgrade(address) internal override onlyTimelock {}
 
     // ─────────────────────────── Modifiers ───────────────────────
@@ -526,7 +530,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         {harvestAndDistribute}. Admin or timelock; blocked while paused.
     ///         mode controls whether USD8 is sent directly or delivered through
     ///         {IProfitDistributionReceiver-receiveProfitDistribution} —
-    ///         vesting-aware consumers such as {SavingsUSD8} MUST be paid via
+    ///         accounting-aware consumers such as the sUSD8 Morpho adapter MUST be paid via
     ///         ReceiveProfitDistribution.
     function distributeRevenue(address recipient, uint256 amount, RevenueDistributionMode mode)
         external
@@ -542,15 +546,20 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     /// @dev Deliver amount USD8 to recipient via mode. DirectTransfer sends the
     ///      token raw; ReceiveProfitDistribution approves and calls the vesting-
     ///      aware {IProfitDistributionReceiver-receiveProfitDistribution}, then
-    ///      clears any residual allowance (the recipient may pull less).
+    ///      clears any residual allowance and verifies the exact balance delta.
     function _deliverRevenue(address recipient, uint256 amount, RevenueDistributionMode mode) internal {
         if (mode == RevenueDistributionMode.DirectTransfer) {
             // no need for SafeTransfer here, usd8 is our own token.
             usd8.transfer(recipient, amount);
         } else {
+            uint256 balanceBefore = usd8.balanceOf(address(this));
             usd8.approve(recipient, amount);
             IProfitDistributionReceiver(recipient).receiveProfitDistribution(amount);
             usd8.approve(recipient, 0);
+
+            uint256 balanceAfter = usd8.balanceOf(address(this));
+            uint256 delivered = balanceAfter <= balanceBefore ? balanceBefore - balanceAfter : 0;
+            if (delivered != amount) revert RevenueDeliveryMismatch(amount, delivered);
         }
 
         emit RevenueDistributed(recipient, amount);
@@ -563,7 +572,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     /// @param receiver  Recipient of weighted distributions (non-zero).
     /// @param weight    Relative distribution share.
     /// @param mode      Delivery mode (see {RevenueDistributionMode}). Vesting
-    ///                  vaults such as {SavingsUSD8} MUST use ReceiveProfitDistribution.
+    ///                  accounting-aware receivers MUST use ReceiveProfitDistribution.
     function setProfitReceiver(address receiver, uint256 weight, RevenueDistributionMode mode)
         external
         onlyAdminOrTimelock

@@ -16,5 +16,11 @@
       "name": "v5.6.1",
       "rev": "7bf4727aacdbfaa0f36cbd664654d0c9e1dc52bf"
     }
+  },
+  "lib/vault-v2": {
+    "tag": {
+      "name": "2026-07-08",
+      "rev": "549b113106e505b83952c7b296622534338d5f92"
+    }
   }
 }

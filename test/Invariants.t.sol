@@ -9,8 +9,12 @@ import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol"
 import {Registry} from "../src/Registry.sol";
 import {SingleAssetCoverPool} from "../src/SingleAssetCoverPool.sol";
 import {USD8} from "../src/USD8.sol";
-import {SavingsUSD8} from "../src/SavingsUSD8.sol";
 import {Treasury} from "../src/Treasury.sol";
+import {USD8SavingsAdapter} from "../src/adapters/USD8SavingsAdapter.sol";
+import {USD8SavingsAdapterFactory} from "../src/adapters/USD8SavingsAdapterFactory.sol";
+import {VaultV2} from "vault-v2/src/VaultV2.sol";
+import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
+import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 // ════════════════════════════════════════════════════════════════════════
@@ -180,17 +184,32 @@ contract StatelessFuzzTest is Test {
     address constant USDC_ADDR = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address admin = address(0xA11CE);
 
-    // ── property 4: SavingsUSD8 totalAssets never reverts; no JIT free yield ──
-    function _deploySavings() internal returns (USD8 usd8, SavingsUSD8 vault) {
+    // ── property 4: Morpho sUSD8 totalAssets never reverts; no JIT free yield ──
+    function _deploySavings() internal returns (USD8 usd8, VaultV2 vault, USD8SavingsAdapter adapter) {
         Registry registry = Registry(
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
         );
         usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, admin)))));
-        vault = SavingsUSD8(
-            address(
-                new ERC1967Proxy(address(new SavingsUSD8()), abi.encodeCall(SavingsUSD8.initialize, (registry, usd8)))
-            )
-        );
+        vault = VaultV2(new VaultV2Factory().createVaultV2(address(this), address(usd8), keccak256("sUSD8")));
+        adapter = USD8SavingsAdapter(new USD8SavingsAdapterFactory().createUSD8SavingsAdapter(address(vault)));
+        vault.setCurator(address(this));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.setIsAllocator, (address(this), true)));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.addAdapter, (address(adapter))));
+        bytes memory idData = abi.encode("this", address(adapter));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.increaseAbsoluteCap, (idData, type(uint128).max)));
+        _executeMorpho(vault, abi.encodeCall(IVaultV2.increaseRelativeCap, (idData, 1e18)));
+        vault.setMaxRate(20e16 / uint256(365 days));
+        vault.setLiquidityAdapterAndData(address(adapter), "");
+    }
+
+    function _executeMorpho(VaultV2 vault, bytes memory data) internal {
+        vault.submit(data);
+        (bool success, bytes memory returnData) = address(vault).call(data);
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returnData, 32), mload(returnData))
+            }
+        }
     }
 
     function _mintUsd8(USD8 usd8, address to, uint256 amt) internal {
@@ -198,14 +217,14 @@ contract StatelessFuzzTest is Test {
         usd8.mint(to, amt);
     }
 
-    function testFuzz_VestingTotalAssetsNoRevert(uint256 seedDeposit, uint256 profit, uint256 t1, uint256 t2) public {
-        (USD8 usd8, SavingsUSD8 vault) = _deploySavings();
+    /// forge-config: default.isolate = true
+    function testFuzz_MorphoTotalAssetsNoRevert(uint256 seedDeposit, uint256 profit, uint256 t1, uint256 t2) public {
+        (USD8 usd8, VaultV2 vault, USD8SavingsAdapter adapter) = _deploySavings();
         seedDeposit = bound(seedDeposit, 1e6, 1e24);
         profit = bound(profit, 1, 1e24);
         t1 = bound(t1, 0, 14 days);
         t2 = bound(t2, 0, 14 days);
 
-        // seed depositor
         address dep = address(0xD00D);
         _mintUsd8(usd8, dep, seedDeposit);
         vm.startPrank(dep);
@@ -213,28 +232,24 @@ contract StatelessFuzzTest is Test {
         vault.deposit(seedDeposit, dep);
         vm.stopPrank();
 
-        // distribute profit
         _mintUsd8(usd8, admin, profit);
         vm.startPrank(admin);
-        usd8.approve(address(vault), profit);
-        vault.receiveProfitDistribution(profit);
+        usd8.approve(address(adapter), profit);
+        adapter.receiveProfitDistribution(profit);
         vm.stopPrank();
 
         vm.warp(block.timestamp + t1);
-        uint256 ta1 = vault.totalAssets(); // must not revert
-
+        uint256 ta1 = vault.totalAssets();
         vm.warp(block.timestamp + t2);
-        uint256 ta2 = vault.totalAssets(); // must not revert
+        uint256 ta2 = vault.totalAssets();
 
-        // share price non-decreasing across pure time (no loss here)
-        if (vault.totalSupply() > 0) {
-            // ta2 should be >= ta1 because vesting only releases more profit over time
-            assertGe(ta2 + 1, ta1, "totalAssets decreased over pure time warp");
-        }
+        assertGe(ta2 + 1, ta1, "totalAssets decreased over pure time warp");
+        assertLe(ta2, usd8.balanceOf(address(adapter)), "reported assets exceed controlled assets");
     }
 
-    function testFuzz_VestingNoJITFreeYield(uint256 seedDeposit, uint256 profit, uint256 jitDeposit) public {
-        (USD8 usd8, SavingsUSD8 vault) = _deploySavings();
+    /// forge-config: default.isolate = true
+    function testFuzz_MorphoNoJITFreeYield(uint256 seedDeposit, uint256 profit, uint256 jitDeposit) public {
+        (USD8 usd8, VaultV2 vault, USD8SavingsAdapter adapter) = _deploySavings();
         seedDeposit = bound(seedDeposit, 1e6, 1e24);
         profit = bound(profit, 1e6, 1e24);
         jitDeposit = bound(jitDeposit, 1e6, 1e24);
@@ -248,11 +263,10 @@ contract StatelessFuzzTest is Test {
 
         _mintUsd8(usd8, admin, profit);
         vm.startPrank(admin);
-        usd8.approve(address(vault), profit);
-        vault.receiveProfitDistribution(profit);
+        usd8.approve(address(adapter), profit);
+        adapter.receiveProfitDistribution(profit);
         vm.stopPrank();
 
-        // JIT attacker deposits and immediately withdraws in the same block.
         address atk = address(0xBAD);
         _mintUsd8(usd8, atk, jitDeposit);
         vm.startPrank(atk);
@@ -261,7 +275,6 @@ contract StatelessFuzzTest is Test {
         uint256 assetsBack = vault.redeem(sharesOut, atk, atk);
         vm.stopPrank();
 
-        // attacker must not profit from unvested yield in a single block.
         assertLe(assetsBack, jitDeposit, "JIT attacker extracted free yield");
     }
 

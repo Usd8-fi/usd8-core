@@ -14,7 +14,7 @@ Ships the core stablecoin stack:
 - [`Registry`](src/Registry.sol) — UUPS-upgradeable access + pause + topology hub. Holds the timelock/admin roles, per-contract pause flags, the pool set, the single payout module, the incident-freeze flag, the insurance-score token set, and the booster collection. Every other core contract inherits [`RegistryManaged`](src/RegistryManaged.sol) and defers to it.
 - [`USD8`](src/USD8.sol) — UUPS-upgradeable ERC20 stablecoin. Mint/burn restricted to a configured Treasury.
 - [`Treasury`](src/Treasury.sol) — UUPS-upgradeable, fixed-address reserve anchor. Wraps mainnet USDC into USD8 at a fixed 1:1 peg, manages approved yield strategies, and (via `harvestAndDistribute`) harvests surplus and routes it to weighted profit receivers.
-- [`SavingsUSD8`](src/SavingsUSD8.sol) — UUPS-upgradeable ERC4626 savings vault for USD8. Pure linear profit vesting (JIT-resistant); it holds deposits idle and receives yield from Treasury distributions (no strategy stack).
+- **sUSD8** — canonical Morpho Vault V2 share token backed by [`USD8SavingsAdapter`](src/adapters/USD8SavingsAdapter.sol). Deposits remain idle in the adapter; Treasury profit enters through an accounting hook and Morpho `maxRate` smooths share-price growth. Registry-backed gates preserve emergency pause behavior.
 - [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) — single-asset staking pool (one per stake asset, behind a shared beacon) whose deposits may be drawn upon to cover losses from covered DeFi protocols. Stakers earn USD8 yield in exchange for loss-coverage risk. Multi-asset coverage is replication: deploy another pool per asset.
 - [`DefiInsurance`](src/DefiInsurance.sol) — the single payout module: insured-token registry, incident lifecycle, claimant escrow, and TEE-signed settlement; pays claims out of the registered pools.
 - [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) — `IStrategy` adapter that deploys Treasury USDC into any ERC-4626 USDC vault (Aave v3 static aUSDC, MetaMorpho, …); one instance per vault.
@@ -39,12 +39,12 @@ Ships the core stablecoin stack:
         ▼                          ▼                     ▼
 ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
 │                     │   │                     │   │                     │
-│ External strategies │   │     Savings USD8    │   │ SingleAssetCoverPool│
+│ External strategies │   │ Morpho V2 sUSD8 +   │   │ SingleAssetCoverPool│
 │                     │   │                     │   │      (per asset)    │
 └─────────────────────┘   └─────────────────────┘   └─────────────────────┘
 ```
 
-Profit distribution is weight-routed to registered receivers via [`Treasury.harvestAndDistribute`](src/Treasury.sol) (or the ad-hoc `distributeRevenue`); SavingsUSD8 and each cover pool are receivers. Only the Treasury has a strategy queue now (SavingsUSD8 holds deposits idle); the strategy at `strategies[0]` is the first source consulted on redeems.
+Profit distribution is weight-routed to registered receivers via [`Treasury.harvestAndDistribute`](src/Treasury.sol) (or the ad-hoc `distributeRevenue`); the sUSD8 adapter and each cover pool are receivers. Only Treasury has a strategy queue. sUSD8 deposits remain idle in the adapter, while its `realAssets()` reports principal plus realized Treasury donations to Morpho Vault V2.
 
 ## Cover pool flows
 
