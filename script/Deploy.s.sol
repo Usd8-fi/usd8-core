@@ -145,7 +145,6 @@ contract DeployScript is Script {
         Treasury treasury;
         IVaultV2 savings;
         address savingsAdapter;
-        address savingsAdapterFactory;
         address savingsGate;
         address poolImpl;
         address poolBeacon;
@@ -233,7 +232,6 @@ contract DeployScript is Script {
         );
         d.savings = IVaultV2(savingsDeployment.vault);
         d.savingsAdapter = savingsDeployment.adapter;
-        d.savingsAdapterFactory = savingsDeployment.adapterFactory;
         d.savingsGate = savingsDeployment.gate;
         assert(d.usd8.treasuryLocked());
 
@@ -337,7 +335,6 @@ contract DeployScript is Script {
         console2.log("Canonical factory: ", MORPHO_VAULT_V2_FACTORY);
         console2.log("Vault/share token: ", address(d.savings));
         console2.log("Savings adapter:   ", d.savingsAdapter);
-        console2.log("Adapter factory:   ", d.savingsAdapterFactory);
         console2.log("Registry pause gate:", d.savingsGate);
         console2.log("maxRate (WAD/sec): ", SUSD8_MAX_RATE);
         console2.log("");

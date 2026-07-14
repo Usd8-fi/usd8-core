@@ -12,7 +12,7 @@ import {IProfitDistributionReceiver} from "../interfaces/IProfitDistributionRece
 contract USD8SavingsAdapter is IAdapter, IProfitDistributionReceiver {
     using SafeERC20 for IERC20;
 
-    address public immutable factory;
+    address public immutable deployer;
     address public immutable parentVault;
     address public immutable asset;
     bytes32 public immutable adapterId;
@@ -24,7 +24,7 @@ contract USD8SavingsAdapter is IAdapter, IProfitDistributionReceiver {
     event ProfitDistributed(address indexed distributor, uint256 assets);
 
     constructor(address _parentVault) {
-        factory = msg.sender;
+        deployer = msg.sender;
         parentVault = _parentVault;
         asset = IVaultV2(_parentVault).asset();
         adapterId = keccak256(abi.encode("this", address(this)));

@@ -11,7 +11,6 @@ import {SingleAssetCoverPool} from "../src/SingleAssetCoverPool.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {USD8SavingsAdapter} from "../src/adapters/USD8SavingsAdapter.sol";
-import {USD8SavingsAdapterFactory} from "../src/adapters/USD8SavingsAdapterFactory.sol";
 import {VaultV2} from "vault-v2/src/VaultV2.sol";
 import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
@@ -191,7 +190,7 @@ contract StatelessFuzzTest is Test {
         );
         usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, admin)))));
         vault = VaultV2(new VaultV2Factory().createVaultV2(address(this), address(usd8), keccak256("sUSD8")));
-        adapter = USD8SavingsAdapter(new USD8SavingsAdapterFactory().createUSD8SavingsAdapter(address(vault)));
+        adapter = new USD8SavingsAdapter(address(vault));
         vault.setCurator(address(this));
         _executeMorpho(vault, abi.encodeCall(IVaultV2.setIsAllocator, (address(this), true)));
         _executeMorpho(vault, abi.encodeCall(IVaultV2.addAdapter, (address(adapter))));

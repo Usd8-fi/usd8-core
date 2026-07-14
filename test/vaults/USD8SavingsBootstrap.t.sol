@@ -85,6 +85,7 @@ contract USD8SavingsBootstrapTest is Test {
         assertEq(vault.managementFee(), 0);
         assertEq(vault.balanceOf(SEED_SINK), SEED_USDC * treasury.USDC_TO_USD8_SCALE());
         assertEq(usd8.balanceOf(d.adapter), SEED_USDC * treasury.USDC_TO_USD8_SCALE());
+        assertEq(adapter.deployer(), d.bootstrap, "bootstrap should deploy the single adapter directly");
         assertEq(adapter.realAssets(), SEED_USDC * treasury.USDC_TO_USD8_SCALE());
         assertEq(vault.sendAssetsGate(), d.gate);
         assertEq(vault.receiveAssetsGate(), d.gate);

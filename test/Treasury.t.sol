@@ -30,7 +30,6 @@ import {VaultV2} from "vault-v2/src/VaultV2.sol";
 import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {USD8SavingsAdapter} from "../src/adapters/USD8SavingsAdapter.sol";
-import {USD8SavingsAdapterFactory} from "../src/adapters/USD8SavingsAdapterFactory.sol";
 
 contract NonPullingProfitReceiver is IProfitDistributionReceiver {
     function receiveProfitDistribution(uint256) external pure {}
@@ -99,7 +98,7 @@ contract TreasuryTest is Test {
     function _deployMorphoSavings() internal returns (VaultV2 vault, USD8SavingsAdapter adapter) {
         VaultV2Factory factory = new VaultV2Factory();
         vault = VaultV2(factory.createVaultV2(address(this), address(usd8), keccak256("sUSD8")));
-        adapter = USD8SavingsAdapter(new USD8SavingsAdapterFactory().createUSD8SavingsAdapter(address(vault)));
+        adapter = new USD8SavingsAdapter(address(vault));
         vault.setCurator(address(this));
         _executeMorpho(vault, abi.encodeCall(IVaultV2.setIsAllocator, (address(this), true)));
         _executeMorpho(vault, abi.encodeCall(IVaultV2.addAdapter, (address(adapter))));

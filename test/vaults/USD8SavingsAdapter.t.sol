@@ -7,29 +7,24 @@ import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {USD8SavingsAdapter} from "../../src/adapters/USD8SavingsAdapter.sol";
-import {USD8SavingsAdapterFactory} from "../../src/adapters/USD8SavingsAdapterFactory.sol";
 
 contract USD8SavingsAdapterTest is Test {
     MockERC20 asset;
     VaultV2 vault;
-    USD8SavingsAdapterFactory adapterFactory;
     USD8SavingsAdapter adapter;
 
     function setUp() public {
         asset = new MockERC20("USD8", "USD8", 18);
         VaultV2Factory vaultFactory = new VaultV2Factory();
         vault = VaultV2(vaultFactory.createVaultV2(address(this), address(asset), bytes32("sUSD8")));
-        adapterFactory = new USD8SavingsAdapterFactory();
-        adapter = USD8SavingsAdapter(adapterFactory.createUSD8SavingsAdapter(address(vault)));
+        adapter = new USD8SavingsAdapter(address(vault));
     }
 
-    function test_FactoryCreatesCorrectlyBoundAdapter() public {
-        assertEq(adapter.factory(), address(adapterFactory));
+    function test_DirectDeploymentCreatesCorrectlyBoundAdapter() public view {
+        assertEq(adapter.deployer(), address(this));
         assertEq(adapter.parentVault(), address(vault));
         assertEq(adapter.asset(), address(asset));
         assertEq(adapter.adapterId(), keccak256(abi.encode("this", address(adapter))));
-        assertEq(adapterFactory.usd8SavingsAdapter(address(vault)), address(adapter));
-        assertTrue(adapterFactory.isUSD8SavingsAdapter(address(adapter)));
     }
 
     function test_DepositRoutesAssetsToAdapterAndReportsActualBalance() public {

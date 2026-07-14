@@ -8,7 +8,7 @@ import {IVaultV2Factory} from "vault-v2/src/interfaces/IVaultV2Factory.sol";
 import {Registry} from "../Registry.sol";
 import {USD8} from "../USD8.sol";
 import {Treasury} from "../Treasury.sol";
-import {USD8SavingsAdapterFactory} from "../adapters/USD8SavingsAdapterFactory.sol";
+import {USD8SavingsAdapter} from "../adapters/USD8SavingsAdapter.sol";
 import {USD8SavingsGate} from "./USD8SavingsGate.sol";
 
 /// @title USD8 Savings Bootstrap
@@ -20,7 +20,6 @@ contract USD8SavingsBootstrap {
         address bootstrap;
         address vault;
         address adapter;
-        address adapterFactory;
         address gate;
     }
 
@@ -70,9 +69,7 @@ contract USD8SavingsBootstrap {
         vault.setSymbol("sUSD8");
         vault.setCurator(address(this));
 
-        USD8SavingsAdapterFactory adapterFactory = new USD8SavingsAdapterFactory();
-        d.adapterFactory = address(adapterFactory);
-        d.adapter = adapterFactory.createUSD8SavingsAdapter(d.vault);
+        d.adapter = address(new USD8SavingsAdapter(d.vault));
         d.gate = address(new USD8SavingsGate(config.registry, d.vault));
 
         _execute(vault, abi.encodeCall(IVaultV2.setIsAllocator, (address(this), true)));
