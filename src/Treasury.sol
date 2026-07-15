@@ -86,6 +86,13 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         the system across the distressed-redemption boundary.
     uint256 public constant HARVEST_BUFFER_DIVISOR = 1000;
 
+    /// @notice Default reserve-check rounding tolerance assigned when a strategy
+    ///         is approved, in USDC base units.
+    uint256 public constant DEFAULT_STRATEGY_TOLERANCE = 5;
+
+    /// @notice Maximum configurable tolerance per strategy: 1 USDC.
+    uint256 public constant MAX_STRATEGY_TOLERANCE = 1e6;
+
     /// @dev Returned only when executed through this implementation's active
     ///      ERC-1967 proxy. USD8 checks it before making the proxy its permanent
     ///      mint/burn authority, preventing accidental legacy/direct wiring.
@@ -132,6 +139,10 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         positive-weight receiver.
     ProfitReceiver[] public profitReceivers;
 
+    /// @notice Per-strategy reserve-check rounding tolerance, in USDC base units.
+    ///         Appended after existing proxy state to preserve upgrade storage layout.
+    mapping(IStrategy strategy => uint256 tolerance) public strategyTolerance;
+
     // ─────────────────────────── Errors ──────────────────────────
 
     /// @notice Thrown when a mint or redeem is called with zero amount.
@@ -162,6 +173,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
 
     /// @notice Thrown by {addStrategy} when the strategy is already approved.
     error StrategyAlreadyApproved(IStrategy strategy);
+
+    /// @notice Thrown when a strategy tolerance exceeds the conservative 1 USDC cap.
+    error InvalidStrategyTolerance(uint256 tolerance, uint256 maximum);
 
     /// @notice Thrown when initialization receives a non-contract dependency.
     error InvalidContract(address account);
@@ -204,6 +218,10 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         {removeStrategy} — this is a force-removal that does not
     ///         require the strategy to be drained first.
     event StrategyRemoved(IStrategy indexed strategy);
+
+    /// @notice Emitted when admin or timelock changes an approved strategy's
+    ///         reserve-check rounding tolerance.
+    event StrategyToleranceSet(IStrategy indexed strategy, uint256 oldTolerance, uint256 newTolerance);
 
     /// @notice Emitted when timelock pushes idle USDC to a strategy.
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
@@ -272,17 +290,15 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///      system starts healthy or in surplus, surplus must not decrease; if it
     ///      starts distressed, the reserve/supply ratio must not decrease.
     ///
-    ///      Each check allows a small tolerance for the sub-USDC accounting dust
-    ///      a strategy withdrawal can shave off getReserveBalance: an ERC-4626
-    ///      strategy burns CEIL shares while reporting FLOOR assets, so a redeem
-    ///      that pulls from it lowers the reserve a hair beyond the payout —
-    ///      up to the value of ONE SHARE BASE UNIT per strategy. For 18-dec-share
-    ///      vaults (MetaMorpho) that is ~1e-12 USDC; for offset-0 wrappers whose
-    ///      rate grows above 1 (Aave stataUSDC) it is ~the share rate in USDC
-    ///      units. The allowance is 5 USDC base units per approved strategy —
-    ///      covers share rates to ~5 (decades of drift) and is NOT an extraction
-    ///      budget: tol only decides revert-vs-pass; the redeemer's payout is
-    ///      fixed by the formula either way, so slack cannot be farmed.
+    ///      Each check allows the sum of the approved strategies' configured
+    ///      tolerances for sub-USDC accounting dust a strategy withdrawal can
+    ///      shave off {getReserveBalance}. An ERC-4626 strategy burns CEIL shares
+    ///      while reporting FLOOR assets, so a redeem that pulls from it can lower
+    ///      the reserve slightly beyond the payout — up to roughly the value of one
+    ///      share base unit. The admin or timelock sets each strategy-specific
+    ///      allowance in USDC base units; newly approved strategies default to 5.
+    ///      Tolerance only decides revert-vs-pass: the redeemer's payout is fixed
+    ///      by the formula either way, so the slack cannot itself be withdrawn.
     modifier reserveSupplyStatusCheck() {
         uint256 reserveBefore = getReserveBalance();
         uint256 supplyBefore = usd8.totalSupply();
@@ -292,7 +308,11 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
         uint256 supplyAfter = usd8.totalSupply();
         uint256 reserveBeforeInUsd8 = reserveBefore * USDC_TO_USD8_SCALE;
         uint256 reserveAfterInUsd8 = reserveAfter * USDC_TO_USD8_SCALE;
-        uint256 tol = strategies.length * 5 * USDC_TO_USD8_SCALE;
+        uint256 tol;
+        for (uint256 i = 0; i < strategies.length; i++) {
+            tol += strategyTolerance[strategies[i]];
+        }
+        tol *= USDC_TO_USD8_SCALE;
 
         if (reserveBeforeInUsd8 >= supplyBefore) {
             // surplusAfter >= surplusBefore - tol, rearranged to avoid underflow
@@ -388,7 +408,22 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
             strategies[i] = strategies[i - 1];
         }
         strategies[index] = s;
+        strategyTolerance[s] = DEFAULT_STRATEGY_TOLERANCE;
         emit StrategyAdded(s);
+        emit StrategyToleranceSet(s, 0, DEFAULT_STRATEGY_TOLERANCE);
+    }
+
+    /// @notice Set an approved strategy's reserve-check rounding tolerance.
+    /// @param s Strategy whose tolerance is updated.
+    /// @param newTolerance Tolerance in USDC base units.
+    function setStrategyTolerance(IStrategy s, uint256 newTolerance) external onlyAdminOrTimelock {
+        _findApprovedStrategy(s);
+        if (newTolerance > MAX_STRATEGY_TOLERANCE) {
+            revert InvalidStrategyTolerance(newTolerance, MAX_STRATEGY_TOLERANCE);
+        }
+        uint256 oldTolerance = strategyTolerance[s];
+        strategyTolerance[s] = newTolerance;
+        emit StrategyToleranceSet(s, oldTolerance, newTolerance);
     }
 
     /// @notice Remove a previously approved strategy. Timelock only.
@@ -418,6 +453,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
             strategies[i] = strategies[i + 1];
         }
         strategies.pop();
+        delete strategyTolerance[s];
         emit StrategyRemoved(s);
     }
 

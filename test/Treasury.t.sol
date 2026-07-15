@@ -62,6 +62,7 @@ contract TreasuryTest is Test {
     event AdminSet(address indexed account, bool allowed);
     event StrategyAdded(IStrategy indexed strategy);
     event StrategyRemoved(IStrategy indexed strategy);
+    event StrategyToleranceSet(IStrategy indexed strategy, uint256 oldTolerance, uint256 newTolerance);
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
     event WithdrawnFromStrategy(IStrategy indexed strategy, uint256 amount);
     event RevenueDistributed(address indexed recipient, uint256 amount);
@@ -337,6 +338,7 @@ contract TreasuryTest is Test {
         MockStrategy strat = new MockStrategy(usdc);
         vm.startPrank(timelock);
         treasury.addStrategy(strat, 0);
+        treasury.setStrategyTolerance(strat, 9);
         treasury.setProfitReceiver(recipient, 7, Treasury.RevenueDistributionMode.DirectTransfer);
         vm.stopPrank();
         usdc.mint(alice, 100e6);
@@ -366,6 +368,7 @@ contract TreasuryTest is Test {
         assertEq(address(treasury.registry()), address(registry));
         assertEq(treasury.strategiesLength(), 1);
         assertEq(address(treasury.strategies(0)), address(strat));
+        assertEq(treasury.strategyTolerance(strat), 9);
         assertEq(usdc.balanceOf(address(treasury)), 60e6);
         assertEq(strat.totalAssets(), 40e6);
         assertEq(treasury.getReserveBalance(), 100e6);
@@ -733,21 +736,19 @@ contract TreasuryTest is Test {
         LossyWithdrawStrategy strat = new LossyWithdrawStrategy(usdc);
         vm.startPrank(timelock);
         treasury.addStrategy(strat, type(uint256).max);
+        treasury.setStrategyTolerance(strat, 7);
         treasury.depositToStrategy(strat, 100e6); // idle -> 0
         vm.stopPrank();
         usdc.mint(address(strat), 10e6); // simulated yield -> 10e18 surplus
 
-        // Withdraw leaks 5 USDC units (the per-strategy allowance — sized for
-        // offset-0 ERC-4626 wrappers like stataUSDC whose share unit is worth
-        // >1 USDC unit): tol = 1 strategy * 5e12 covers it, so the redeem
-        // succeeds instead of false-reverting.
-        strat.setLossOnNextWithdraw(5);
+        // This strategy is configured to tolerate 7 USDC base units.
+        strat.setLossOnNextWithdraw(7);
         vm.prank(alice);
         treasury.redeemUSD8(50e18, 0);
         assertEq(usdc.balanceOf(alice), 50e6);
 
-        // A shortfall beyond the per-strategy dust bound is a real worsening.
-        strat.setLossOnNextWithdraw(6);
+        // A shortfall beyond this strategy's configured dust bound is real worsening.
+        strat.setLossOnNextWithdraw(8);
         vm.prank(alice);
         vm.expectRevert(); // ReserveSupplyStatusWorsened
         treasury.redeemUSD8(10e18, 0);
@@ -868,10 +869,120 @@ contract TreasuryTest is Test {
         vm.prank(timelock);
         vm.expectEmit(true, false, false, true, address(treasury));
         emit StrategyAdded(strat);
+        vm.expectEmit(true, false, false, true, address(treasury));
+        emit StrategyToleranceSet(strat, 0, 5);
         treasury.addStrategy(strat, type(uint256).max);
 
         assertEq(treasury.strategiesLength(), 1);
         assertEq(address(treasury.strategies(0)), address(strat));
+    }
+
+    function test_AdminCanSetStrategyTolerance() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+        assertEq(treasury.strategyTolerance(strat), 5);
+
+        vm.prank(admin);
+        vm.expectEmit(true, false, false, true, address(treasury));
+        emit StrategyToleranceSet(strat, 5, 9);
+        treasury.setStrategyTolerance(strat, 9);
+
+        assertEq(treasury.strategyTolerance(strat), 9);
+    }
+
+    function test_NonAdminCannotSetStrategyTolerance() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+
+        vm.expectRevert(_unauthorizedAdmin(alice));
+        vm.prank(alice);
+        treasury.setStrategyTolerance(strat, 9);
+    }
+
+    function test_SetStrategyToleranceRejectsUnapprovedStrategy() public {
+        MockStrategy strat = new MockStrategy(usdc);
+
+        vm.expectRevert(abi.encodeWithSelector(Treasury.StrategyNotApproved.selector, strat));
+        vm.prank(admin);
+        treasury.setStrategyTolerance(strat, 9);
+    }
+
+    function test_SetStrategyToleranceRejectsExcessiveValue() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+
+        uint256 excessive = 1e6 + 1;
+        vm.expectRevert(abi.encodeWithSelector(Treasury.InvalidStrategyTolerance.selector, excessive, 1e6));
+        vm.prank(admin);
+        treasury.setStrategyTolerance(strat, excessive);
+    }
+
+    function test_TimelockCanSetStrategyTolerance() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+        treasury.setStrategyTolerance(strat, 11);
+        vm.stopPrank();
+
+        assertEq(treasury.strategyTolerance(strat), 11);
+    }
+
+    function test_StrategyToleranceAcceptsZeroAndMaximum() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.prank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+
+        vm.startPrank(admin);
+        treasury.setStrategyTolerance(strat, 1e6);
+        assertEq(treasury.strategyTolerance(strat), 1e6);
+        treasury.setStrategyTolerance(strat, 0);
+        vm.stopPrank();
+
+        assertEq(treasury.strategyTolerance(strat), 0);
+    }
+
+    function test_RemoveThenReaddRestoresDefaultStrategyTolerance() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, type(uint256).max);
+        treasury.setStrategyTolerance(strat, 9);
+        treasury.removeStrategy(strat);
+        treasury.addStrategy(strat, type(uint256).max);
+        vm.stopPrank();
+
+        assertEq(treasury.strategyTolerance(strat), 5);
+    }
+
+    function test_ReserveCheckSumsConfiguredStrategyTolerances() public {
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(treasury), 100e6);
+        treasury.mintUSD8(100e6);
+        vm.stopPrank();
+
+        LossyWithdrawStrategy funded = new LossyWithdrawStrategy(usdc);
+        MockStrategy idle = new MockStrategy(usdc);
+        vm.startPrank(timelock);
+        treasury.addStrategy(funded, type(uint256).max);
+        treasury.addStrategy(idle, type(uint256).max);
+        treasury.setStrategyTolerance(funded, 3);
+        treasury.setStrategyTolerance(idle, 7);
+        treasury.depositToStrategy(funded, 100e6);
+        vm.stopPrank();
+        usdc.mint(address(funded), 10e6);
+
+        funded.setLossOnNextWithdraw(10);
+        vm.prank(alice);
+        treasury.redeemUSD8(50e18, 0);
+        assertEq(usdc.balanceOf(alice), 50e6);
+
+        funded.setLossOnNextWithdraw(11);
+        vm.expectRevert(); // ReserveSupplyStatusWorsened
+        vm.prank(alice);
+        treasury.redeemUSD8(10e18, 0);
     }
 
     function test_AddStrategyRejectsZeroAddress() public {
@@ -917,6 +1028,7 @@ contract TreasuryTest is Test {
         treasury.removeStrategy(strat);
 
         assertEq(treasury.strategiesLength(), 0);
+        assertEq(treasury.strategyTolerance(strat), 0);
         assertEq(usdc.balanceOf(address(strat)), 50e6, "funds orphaned in strategy");
     }
 
