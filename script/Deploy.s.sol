@@ -108,15 +108,16 @@ contract DeployScript is Script {
     uint256 constant TIMELOCK_MIN_DELAY = 24 hours;
 
     /// @notice USDC seeded into the protocol at deploy. Minted 1:1 into USD8
-    ///         and deposited into the Morpho Vault V2 sUSD8 vault with the shares burned, so the
-    ///         vault can never be emptied to a near-zero supply — the
+    ///         and deposited into the Morpho Vault V2 sUSD8 vault, with the shares
+    ///         sent to {SEED_SINK}. They remain in totalSupply but are irrecoverable,
+    ///         so the vault cannot be emptied to a near-zero supply and the
     ///         first-depositor inflation attack has no foothold. Backed by
     ///         real USDC, so it does NOT dilute the peg.
     ///         Deployer must hold at least this much USDC at run time.
     uint256 constant SEED_USDC = 100e6;
 
-    /// @notice Burn sink for the seed shares. Not address(0) — ERC20 _mint
-    ///         rejects the zero address — but equally unspendable.
+    /// @notice Irrecoverable holder for seed shares. It is not address(0), which
+    ///         ERC20 minting rejects, and shares held here remain in totalSupply.
     address constant SEED_SINK = 0x000000000000000000000000000000000000dEaD;
 
     /// @notice Insurance-score rate for the two scored tokens, 1e18-scaled

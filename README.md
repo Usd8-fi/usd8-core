@@ -1,125 +1,189 @@
 # USD8 Core
 
-Stablecoin protocol contracts for [usd8.fi](https://usd8.fi).
+USD8 is a stable coin offering free defi insurance to users. This repo contains the contracts for USD8 protocol. The system is under active development, currently no bounties are offered, do not submit vulnerability reports.
 
-Please note this repo is under development, codebase is expected to change often, there are no bug bounties, do not report bugs for now.
 
-> **Deployment note:** the Treasury UUPS conversion and USD8's permanent Treasury lock are a fresh-deployment path.
-> They do not migrate reserve assets, strategy state, receiver configuration, or historical issuance state from legacy deployments.
+## Contents
 
-## Release scope
+- [Protocol overview](#protocol-overview)
+- [Treasury and USD8](#treasury-and-usd8)
+- [Insurance score](#insurance-score)
+- [Cover pools](#cover-pools)
+- [Claims and settlement](#claims-and-settlement)
+- [Governance and trust assumptions](#governance-and-trust-assumptions)
+- [Repository layout](#repository-layout)
+- [Getting started](#getting-started)
+- [Security](#security)
+- [License](#license)
 
-Ships the core stablecoin stack:
+<br/><br/><br/><br/>
 
-- [`Registry`](src/Registry.sol) — UUPS-upgradeable access + pause + topology hub. Holds the timelock/admin roles, per-contract pause flags, the pool set, the single payout module, the incident-freeze flag, the insurance-score token set, and the booster collection. Every other core contract inherits [`RegistryManaged`](src/RegistryManaged.sol) and defers to it.
-- [`USD8`](src/USD8.sol) — UUPS-upgradeable ERC20 stablecoin. Mint/burn restricted to a configured Treasury.
-- [`Treasury`](src/Treasury.sol) — UUPS-upgradeable, fixed-address reserve anchor. Wraps mainnet USDC into USD8 at a fixed 1:1 peg, manages approved yield strategies, and (via `harvestAndDistribute`) harvests surplus and routes it to weighted profit receivers.
-- **USD8 savings** — canonical Morpho Vault V2 share token (symbol `sUSD8`; there is no custom sUSD8 vault contract) backed by [`USD8SavingsAdapter`](src/adapters/USD8SavingsAdapter.sol). Deposits remain idle in the adapter; Treasury profit enters through an accounting hook and Morpho `maxRate` smooths share-price growth. Registry-backed gates preserve emergency pause behavior.
-- [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) — single-asset staking pool (one per stake asset, behind a shared beacon) whose deposits may be drawn upon to cover losses from covered DeFi protocols. Stakers earn USD8 yield in exchange for loss-coverage risk. Multi-asset coverage is replication: deploy another pool per asset.
-- [`DefiInsurance`](src/DefiInsurance.sol) — the single payout module: insured-token registry, incident lifecycle, claimant escrow, and TEE-signed settlement; pays claims out of the registered pools.
-- [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) — `IStrategy` adapter that deploys Treasury USDC into any ERC-4626 USDC vault (Aave v3 static aUSDC, MetaMorpho, …); one instance per vault.
+# Protocol overview
 
-## Architecture overview
+```
+          ┌───────────┐
+          │   Users   │
+          └───────────┘
+                ▲                      ┌────────────────┐
+  1.Mint/Redeem │                      │  USD8 Savings  │
+    USD8<->USDC │                 ┌───►│  Morpho Vault  │
+                │                 │    └────────────────┘
+                ▼                 │
+  ┌───────────────────────────┐   │
+  │                           │   │
+  │       USD8 Treasury       │   │    ┌───────────────┐
+  │          IN USDC          │   ├───►│  USD8 Cover   │                  4.File claim
+  │                           │   │    │    Pool 1     ├───┐                get payout
+  └────────────┬──────────────┘   │    └───────────────┘   │  ┌───────────┐
+               │                  │                        │  │   Defi    │        ┌───────────┐
+               │                  │                        ├──┤ Insurance │◄──────►│   Users   │
+2. Deploy USDC │                  │    ┌───────────────┐   │  │           │        └───────────┘
+               │                  ├───►│   USD8 Cover  │   │  └───────────┘
+               ▼                  │    │     Pool 2    ├───┘
+     ┌────────────────────┐       │    └───────────────┘
+     │   Yield Strategy   ├───────┘
+     └────────────────────┘   3. Profit Distribution
+```
+
+| Component | Role |
+|---|---|
+| [`Registry`](src/Registry.sol) | UUPS access-control, pause, topology, pool, payout-module, scored-token, booster, and incident-freeze hub. |
+| [`USD8`](src/USD8.sol) | UUPS ERC-20 stablecoin. Only its permanently configured Treasury may mint or burn it. |
+| [`Treasury`](src/Treasury.sol) | Mints USD8 against USDC, manages the USDC reserve and approved strategies, harvests surplus, and routes USD8 revenue. |
+| Morpho Vault V2 savings | Official Morpho Vault V2 share token with symbol `sUSD8`, backed by [`USD8SavingsAdapter`](src/adapters/USD8SavingsAdapter.sol). There is no custom sUSD8 vault contract. |
+| [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) | One ERC-4626 staking pool per cover asset. Stakers earn USD8 rewards and accept claim-loss risk. |
+| [`DefiInsurance`](src/DefiInsurance.sol) | Insured-token configuration, claimant escrow, incident lifecycle, TEE-signed settlement, disputes, and claim payouts. |
+| [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) | Adapter for deploying Treasury USDC into an approved ERC-4626 USDC vault. One adapter is used per vault. |
+<br/><br/><br/><br/>
+
+
+# USD8 and Treasury
 
 ```
 
         ┌───────────┐
         │   Users   │
         └───────────┘
-              ▲                                     ┌────────────────┐
-              │ 1.Mint/Redeem                       │  USD8 Savings  │
-              │   USD8<->USDC           ┌──────────►│  Morpho Vault  │
-              │                         │           └────────────────┘
-              ▼                         │
-┌───────────────────────────┐           │
-│                           │           │
-│       USD8 Treasury       │           │           ┌───────────────┐
-│           (USDC)          │           ├──────────►│  USD8 Cover   │
-│                           │           │           │    Pool 1     │
-└────────────┬──────────────┘           │           └───────────────┘
-             │                          │
-             │                          │
-             │  2. Deploy               │           ┌───────────────┐
-             │                          ├──────────►│   USD8 Cover  │
-             ▼                          │           │     Pool 2    │
-   ┌────────────────────┐               │           └───────────────┘
-   │   Yield Strategies ├───────────────┘
+              │                           ┌────────────────┐
+              │ 1.Mint/Redeem             │  USD8 Savings  │
+              │   USD8<->USDC       ┌────►│  Morpho Vault  │
+              │                     │     └────────────────┘
+              ▼                     │
+┌───────────────────────────┐       │
+│                           │       │
+│       USD8 Treasury       │       │     ┌───────────────┐
+│           (USDC)          │       ├────►│  USD8 Cover   │
+│                           │       │     │    Pool 1     │
+└────────────┬──────────────┘       │     └───────────────┘
+             │                      │
+             │                      │
+             │  2. Deploy USDC      │     ┌───────────────┐
+             │                      ├────►│   USD8 Cover  │
+             ▼                      │     │     Pool 2    │
+   ┌────────────────────┐           │     └───────────────┘
+   │   Yield Strategies ├───────────┘
    └────────────────────┘   3. Profit Distribution
 
 
 ```
 
-Profit distribution is weight-routed to registered receivers via [`Treasury.harvestAndDistribute`](src/Treasury.sol) (or the ad-hoc `distributeRevenue`). The Morpho savings adapter is registered with **zero launch weight**, so dead seed shares receive no pre-TVL Treasury revenue; governance may activate it after meaningful organic deposits dilute the seed fraction. Until then, recurring revenue goes to the cover pool. Only Treasury has a strategy queue. Savings deposits remain idle in the adapter, while its `realAssets()` reports principal plus realized Treasury donations to Morpho Vault V2.
+## Mint and Redeem USD8
+- anyone can mint and redeem USD8 with USDC 1 to 1
+- in extreme cases, if the treasury do not have enough backings(which should not happen), everyone takes a hair cut. No bank run by design
+- USD8 is insured by the Cover Pools, so any loss can be covered
 
-## Deployment and trust assumptions
 
-- `Deploy.s.sol` is hard-locked to Ethereum mainnet (`block.chainid == 1`) before broadcasting because its dependency addresses are mainnet-specific.
-- The Registry admin and timelock are privileged by design during beta. They control upgrades, topology, strategy allocation, profit routing, pauses, and incident/root operations. This is an accepted trust assumption, not a deny-only role; migrate the admin/proposer to a monitored Safe before meaningful TVL.
-- Morpho seed shares remain permanently burned to prevent first-depositor inflation. Savings profit weight stays zero until governance confirms meaningful organic TVL, then monitors `deadShares / totalSupply` when activating revenue.
 
-## Cover pool flows
+## Reserve yield
+- yield strategies must be approved by Timelock so admin can't steal
+- yield is in USD8 and distributed to Morpho Savings sUSD8 and all High yield Cover Pools, admin decides the distribution proportion
 
-Stakers deposit the pool's asset and earn USD8 yield in exchange for accepting loss-coverage risk. Claimants escrow a covered protocol's token; after the TEE signs one settlement root, each claimant may prove their allocation against that root and draw from the registered pools. One incident is processed at a time. While it is active, every cover pool is frozen: new stakes and completed exits are blocked, pending exit shares keep earning and absorbing losses, and a second incident cannot open.
 
-### Staking and incident-delayed exits
 
+## Morpho savings sUSD8
+- A simple savings vault, user deposit USD8, get sUSD8 which comes with a APY
+- using Morpho vault V2 instead of building our own
+- sUSD8 is insured by the Cover Pools, so any loss can be covered.
+
+
+## Insurance score
+- scores are cumulative block weighted token balance
+- currently two tokens accrue score: about 1 per day for USD8 and 0.1 per day for sUSD8
+- the more user hold these tokens, the more score will accrue.
+- scores are not transferrable and does not expire
+<br/><br/><br/><br/>
+
+# Cover pools
+4626 vaults with high APY yield but high risk to cover losses
+
+## Deposit and withdraw
+- anyone can deposit
+- withdraw is subjected to a 7 day cool down(while still earning APY), followed by a 2 day withdraw window. If not withdrawn, the funds are back into the pool.
+- if there is a live claim incident before the 7 day cool down ends, the withdraw will be delayed till the incident ends
+
+
+```text
+    deposit
+       │
+       ▼
+ ┌──────────────┐
+ │  Cover Pool  │──── claim yield ───▶ USD8
+ └──────┬───────┘
+        │ request withdraw
+        ▼
+ ┌──────────────┐
+ │ 7d cooldown  │  funds still earn rewards and absorb losses
+ └──────┬───────┘
+        ▼
+  incident active?
+      │       │
+     no      yes
+      │       │
+      ▼       ▼
+ ┌─────────┐ ┌──────────────────┐
+ │ 2d exit │ │ wait for incident│
+ │ window  │ │ to finish        │
+ └────┬────┘ └────────┬─────────┘
+      │               │ fresh 2d exit window
+      └───────┬───────┘
+              │ completeRedeem
+              ▼
+          assets out
 ```
- deposit / mint (only while no incident is active)
-                         │
-                         ▼
-                ┌──────────────────┐
-                │      STAKED      │
-                │ earning high APY │──── claimReward ───▶ USD8
-                │ absorbing losses │
-                └──────────────────┘
-                         │ requestRedeem
-                         ▼
-                ┌──────────────────┐
-                │  7-DAY COOLDOWN  │
-                │ still earning APY│
-                └──────────────────┘
-                         │
-                         ▼
-                  incident active?
-                    │          │
-                   no         yes
-                    │          │
-                    ▼          ▼
-       ┌──────────────────┐   ┌──────────────────┐
-       │ 2-DAY EXIT WINDOW│   │ WAIT FOR INCIDENT│
-       └──────────────────┘   │      TO END      │
-                    │         │ still earning APY│
-                    │         └──────────────────┘
-                    │                   │ incident ends
-                    │                   ▼
-                    │         ┌──────────────────┐
-                    │         │ FRESH 2-DAY EXIT │
-                    │         └──────────────────┘
-                    │                   │
-                    └─────────┬─────────┘
-                              │ completeRedeem
-                              ▼
-                         assets out
-```
 
-After the seven-day cooldown, an active incident sends the request into the waiting branch. When the incident ends, the staker receives a fresh two-day exit window. If an incident opens during an existing exit window, redemption is likewise blocked until it ends. Missing an available exit window means filing a new request and waiting seven days again. `cancelRedeemRequest()` remains available throughout.
+## High APY
+- Cover Pool receive a high payout from the treasury yield
+- yield is in USD8, not compounded, thus not covering any loss. Claim anytime.
 
-### Claiming and pool-freeze routes
+## Payouts and limits
+- Cover pools will payout to Defi insurance as requested
+- each incident can only drain up to `maxCoverPoolPayoutBps`(currently 50%)
 
-```
- First signed joinClaim
- or admin fallback open
+<br/><br/><br/><br/>
+
+# Defi insurance
+
+## Insured tokens
+- added by time lock, no last minute change attacks
+- each insured token has a `maxCoverageBps` as max payout cap for this token, decided by admin. e.g. 80% meaning payout capped at 80% USD value before incidence
+- insured token payout is based on its underlying token. e.g. insured aUSDC depegs, payout will be in underlying USDC, paid in cover pool asset(e.g. wstETh).
+- if the underlying depegs instead of the insured token, user will get value based on depegged underlying, not worth it.
+
+## Claim lifecycle
+```text
+ First TEE-signed claim
+ or admin/timelock fallback
              │
              ▼
    ┌─────────────────────┐
-   │   CLAIM WINDOW 5d   │  Anyone can join
-   │    pools frozen     │  or cancel claims
+   │   CLAIM WINDOW 5d   │  join or cancel claims
+   │    pools frozen     │
    └─────────────────────┘
         │             │
    no live claims   live claims
         │             ▼
         │   ┌─────────────────────┐
-        │   │  SUBMISSION ≤ 3d    │
+        │   │  SUBMISSION ≤ 3d    │  TEE-signed Merkle root
         │   └─────────────────────┘
         │        │           │
         │      no root      root submitted
@@ -128,132 +192,147 @@ After the seven-day cooldown, an active incident sends the request into the wait
         │        │   │    DISPUTE 2d       │
         │        │   └─────────────────────┘
         │        │      │              │
-        │        │   no dispute     disputed
+        │        │   accepted       disputed
         │        │      │              ▼
         │        │      │    ┌───────────────────┐
         │        │      │    │ CORRECTION ≤ 3d   │
         │        │      │    └───────────────────┘
-        │        │      │       │              │
-        │        │      │   corrected      no correction
-        │        │      │       │              │
-        │        │      │       └──▶ fresh     │
-        │        │      │          dispute     │
-        │        │      ▼                      │
-        │        │   ┌─────────────────────┐   │
-        │        │   │    FINALIZE 4d      │   │
-        │        │   │ claim Merkle payout │   │
-        │        │   └─────────────────────┘   │
-        │        │      │              │       │
-        │        │  all finalized   window ends│
-        ▼        ▼      ▼              ▼       ▼
+        │        │      │       │             │
+        │        │      │   corrected     no correction
+        │        │      │       │             │
+        │        │      │       └─▶ fresh     │
+        │        │      │          dispute    │
+        │        │      ▼                     │
+        │        │   ┌─────────────────────┐  │
+        │        │   │    FINALIZE 4d      │  │
+        │        │   │ prove and withdraw  │  │
+        │        │   └─────────────────────┘  │
+        │        │      │              │      │
+        │        │  all finalized   deadline  │
+        ▼        ▼      ▼              ▼      ▼
    ┌─────────────────────────────────────────────┐
    │                  UNFREEZE                   │
    │             next incident may open          │
    └─────────────────────────────────────────────┘
 ```
+- any one with insured token can file a claim by escrow their insured token, first claimer needs to get TEE signed attestation price has dropped 20% around given block. This will freeze all Cover Pool withdraw.
+- claim for this token will be open for 5 days allows others to file claim, after no further claims allowed this insured token
+- anyone can submit TEE signed payout root. TEE computes claimers insurance score and their eligible payouts using [payout allocation](#payout-allocation). This algorithm is open sourced, anyone can run locally and check their results. This will also delist the insured token.
+- after root is submitted, admin can check and correct the root if incorrect (privilege during beta)
+- after that users have 4 days to finalize their claim payout. Miss this means no payout. Unfinalized claim insured tokens can be withdrawn.
+- Cover Pool unfreezes for withdraws
+- Only one incident can be active at a time
 
-- No live claims at claim-window end: unfreeze; no settlement needed.
-- No root by submission deadline: void and unfreeze.
-- Disputed root: pools remain frozen during correction. Corrected root gets a fresh dispute period; no correction means void.
-- Finalization: last claim can unfreeze early. If some or nobody finalizes, the four-day deadline unfreezes and unclaimed allocation stays in pools.
-- `closeIncident()` can terminate before finalization. Unresolved claimants recover escrow with `withdrawNonFinalizedClaim()` after close, void, correction timeout, or finalization expiry.
 
-Timing constants: claim `5d`, submission `3d`, dispute `2d`, correction `3d`, finalization `4d`. Only one incident can be active.
+## Boosters
+- NFTs that gives a 1% boost to users insurance score
+- can be used when filing a claim
 
-### Minimum claim escrow
 
-Every insured-token listing has its own non-zero `minClaimAmount`, denominated in that token's base units. `joinClaim` checks the balance delta actually received by `DefiInsurance`, not only the requested transfer amount. The timelock can retune the threshold with `setMinClaimAmount` only while no incident is active.
+## Eligibility and valuation
 
-This setting belongs to the insured token rather than an individual cover pool: a claim targets one insured-token incident and draws from the incident's snapshotted pool set. The threshold makes claimant-table spam capital-intensive, but does not impose a mathematical claim-count ceiling. Governance should choose a meaningful amount from token value/decimals and maximum-load settlement tests, not use a nominal one-unit default.
-
-## Claim allocation: capped geometric weighting
-
-### Decision
-
-Settlement uses both a claimant's covered economic need and the insurance score they choose to spend. Treating raw score as the sole proportional weight lets a high-score claim with a negligible payout cap dilute meaningful claims before its own payout is clipped. Treating claim size as the sole weight would ignore long-term participation. Capped geometric weighting gives both inputs equal multiplicative influence while preserving hard claim and pool limits.
-
-For each live claim `i`:
+Settlement reconstructs each live claim from `ClaimRegistered` and `ClaimCancelled` events. A claimant's eligible amount is:
 
 ```text
-C_i = floor(lossUsd_i * coverageBps / 10_000)       # maximum covered payout
-S_i = min(requestedScore_i, boostedUnspentScore_i)  # score chosen and available to spend
-W_i = floor(sqrt(C_i * S_i))                        # allocation weight
-B   = floor(poolUsd * maxCoverPoolPayoutBps / 10_000)
+eligibleAmount = min(
+  escrowReceived,
+  minimum insured-token balance over the pre-incident holding window
+)
 ```
 
-The target allocation is:
+The token-to-underlying TWAP ends at the pre-incident `referenceBlock`. The underlying/USD oracle is pinned to the claim-window-end block. Excess escrow above `eligibleAmount` is refunded during finalization.
+
+
+## Payout allocation
+
+Payouts use capped water-filling with geometric weights based on covered claim cap in USD and score spent.
+
+For each claim:
 
 ```text
+C_i = floor(preIncidentEligibleValueUsd * coverageBps / 10_000)
+S_i = min(requestedScore, boostedUnspentScore)
+W_i = floor(sqrt(C_i * S_i))
+B   = floor(totalCoverPoolUsd * maxCoverPoolPayoutBps / 10_000)
+
 P_i = min(C_i, lambda * W_i)
 sum(P_i) <= B
 ```
 
-`lambda` is the common clearing rate selected by deterministic capped water-filling. Integer divisions round down; resulting dust remains in the cover pools. The breaking payout-rule change introduced off-chain `CONFIG_VERSION = "4.0.0"`; per-insured-token minimum claims advanced it to `4.1.0`, and strict pinned-block oracle round validation advances it to `4.2.0`. The version is part of `configHash`, so builds with different settlement acceptance rules cannot share the same configuration commitment.
+`C_i` is the claim's absolute coverage cap. `S_i` is the score the claimant can and chooses to spend. The square root gives covered need and score equal multiplicative influence with diminishing returns to score. Zero covered need or zero score produces zero weight.
 
-`C_i` is not the raw submitted token amount. It is derived from `eligibleAmount`—the escrow capped by the claimant's qualifying pre-incident holding—valued in USD and multiplied by the configured coverage percentage.
+A deterministic capped water-filling calculation selects `lambda`. Claims that reach their cap are removed first; the remaining budget is redistributed by weight. Integer dust remains in the pools. Each payout is then split across the snapshotted cover pools in proportion to their USD value while respecting each pool's incident cap.
 
-### Why geometric weighting
+The settlement code builds one Merkle root over the exact claim set and payout rows. Any authorized TEE signer may sign it, anyone may submit it, and anyone may independently reproduce it. Detailed replay, allocation, oracle, and CLI behavior is documented in [`offchain/README.md`](offchain/README.md).
 
-- **Need and participation both matter:** equal scores with different covered losses produce different weights; equal covered losses with different scores also produce different weights.
-- **Diminishing score dominance:** multiplying score by four multiplies weight by two, rather than four. This matters because score is a cumulative token-block quantity and can be numerically much larger than a token balance.
-- **Unit-scale independence:** globally changing the denomination of all caps or all scores multiplies every weight by the same constant, leaving payout ratios unchanged apart from integer flooring.
-- **Zero-value resistance:** `C_i = 0` or `S_i = 0` gives `W_i = 0`; unusable score cannot dilute valid claims.
-- **Proportional split neutrality:** splitting both `C` and `S` proportionally across `k` identities preserves aggregate pre-rounding weight because `k * sqrt((C/k) * (S/k)) = sqrt(C * S)`.
-- **Hard solvency bounds:** no payout exceeds its covered-loss cap, and aggregate payout never exceeds the incident's LP-loss budget.
+<br/><br/><br/><br/>
 
-### Deterministic water-filling
+# Governance and trust assumptions
 
-The implementation never chooses an arbitrary claimant to recompute first:
+- Registry admin and timelock roles are privileged by design during beta. They control upgrades, topology, strategy admission and allocation, profit routing, pauses, insured-token parameters, and incident/root operations.
+- Beta mode can be ended permanently; after that, settlement correction is timelock-only.
+- Any authorized TEE signer can open or sign a settlement. Compromise of one signer is bounded by the dispute window, pool payout caps, and governance close/correction powers.
+- All TEE algorithms are open sourced, user can verify their insurance score, payout amount independently.
 
-1. Remove zero-cap and zero-weight claims from allocation.
-2. Sort remaining claims by ascending `C_i / W_i`, comparing exact bigint cross-products (`C_a * W_b` versus `C_b * W_a`) rather than floating-point division. Break exact ties by `claimId`.
-3. Track `remainingBudget` and `remainingWeight`.
-4. The lowest-ratio remaining claim is saturated when `remainingBudget * W_i >= C_i * remainingWeight`. Assign its cap, subtract its cap and weight, and continue.
-5. Once the lowest-ratio claim does not saturate, no later claim can saturate. Allocate the remaining budget pro-rata by weight and stop.
-6. Leave division dust in the pools; never award dust based on input or transaction order.
 
-Example with an `$80` incident budget:
+## Repository layout
 
-| Claim | Covered cap `C` | Score spent `S` | Weight `sqrt(C*S)` | Final payout |
-|---|---:|---:|---:|---:|
-| A | $10 | 90 | 30 | $10 |
-| B | $36 | 100 | 60 | $30 |
-| C | $64 | 100 | 80 | $40 |
+```text
+src/
+  Registry.sol                  shared access, pause, topology, and score state
+  USD8.sol                      stablecoin
+  Treasury.sol                  reserve, strategies, mint/redeem, and revenue
+  SingleAssetCoverPool.sol      one-asset staking and claim-loss pool
+  DefiInsurance.sol             insured tokens, incidents, escrow, and payouts
+  adapters/USD8SavingsAdapter.sol
+  strategies/ERC4626Strategy.sol
 
-A's initial weighted share exceeds `$10`, so A is capped first. Its unused share is redistributed across B and C in their `60:80` weight ratio. This arithmetic runs once inside the existing off-chain settlement computation and produces one root.
+offchain/
+  src/score.ts                  historical insurance-score calculation
+  src/compute.ts                settlement and payout allocation
+  src/chain.ts                  pinned chain reads and oracle validation
+  src/main.ts                   compute/verify CLI
+  README.md                     settlement implementation details
 
-Claim finalization remains optional. The claimant still files, sees the final offer, and may finalize or decline based on payout, score, booster, and gas economics. There is no additional claimant confirmation. Because the root is fixed, an offer declined after settlement is not redistributed; eliminating that residual no-show capacity would require another allocation phase and is deliberately outside this design.
+script/Deploy.s.sol             mainnet deployment and initial wiring
+test/                           Foundry tests
+offchain/test/                  Vitest settlement tests
+```
 
 ## Getting started
 
 ### Prerequisites
 
-- [Foundry](https://book.getfoundry.sh/getting-started/installation) (forge, cast, anvil)
+- [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `cast`, `anvil`)
+- Node.js and npm for the off-chain settlement package
 
-### Setup
+### Install and build
 
 ```bash
-git clone <repo-url>
-cd usd8core
+git clone https://github.com/Usd8-fi/usd8-core.git
+cd usd8-core
 forge install
-```
-
-### Build
-
-```bash
 forge build
+
+cd offchain
+npm ci
+npm run build
 ```
 
 ### Test
 
 ```bash
+# Solidity
 forge test
-```
 
-Verbose output:
+# Off-chain settlement
+cd offchain
+npm test
 
-```bash
-forge test -vv
+# Cross-language settlement integration
+npm run build
+cd ..
+RUN_INTEGRATION=1 forge test --ffi --match-path test/SettlementIntegration.t.sol -vv
 ```
 
 ### Format
@@ -270,12 +349,8 @@ forge coverage
 
 ## Security
 
-Each contract has a `@custom:security-contact rick@usd8.fi` natspec tag. Reports go to [rick@usd8.fi](mailto:rick@usd8.fi).
+Each contract has a `@custom:security-contact rick@usd8.fi` NatSpec tag. Security reports will go to [rick@usd8.fi](mailto:rick@usd8.fi) once public reporting opens.
 
 ## License
 
-Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE). The code is
-source-available: you may audit, modify, test, and make non-production use of it
-freely, but production/commercial use requires a commercial license from the
-Licensor until the **Change Date (2030-07-01)**, on which each version converts
-to the **MIT** license.
+Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE). The code is source-available: you may audit, modify, test, and make non-production use of it freely, but production or commercial use requires a commercial license from the Licensor until the **Change Date (2030-07-01)**. Each version converts to the **MIT License** on its Change Date.
