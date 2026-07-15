@@ -160,15 +160,18 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///                      getter; a thin adapter for anything exotic.
     /// @param underlyingConversionCallData  calldata for that staticcall (empty
     ///                      when underlyingConversionAddress == address(0)).
+    /// @param minClaimAmount Minimum escrow accepted by {joinClaim}, denominated
+    ///                      in this insured token's base units.
     struct InsuredToken {
         uint256 maxCoverageBps;
         address underlyingPriceOracle;
         address underlyingConversionAddress;
         bytes underlyingConversionCallData;
+        uint128 minClaimAmount;
     }
 
     /// @notice Per-insured-token config. maxCoverageBps == 0 is the not-listed
-    ///         signal. Auto-delisted the moment an incident opens on it.
+    ///         signal. Auto-delisted when a settlement root is committed for it.
     ///         Read via {getInsuredToken}.
     mapping(IERC20 insuredToken => InsuredToken) internal insuredTokens;
 
@@ -452,6 +455,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     // ─────────────────────────── Errors ──────────────────────────
 
     error ZeroAmount();
+    error ClaimBelowMinimum(IERC20 insuredToken, uint256 received, uint256 minimum);
+    error InvalidMinClaimAmount(uint256 given);
     error InvalidMaxCoverageBps(uint256 given, uint256 max);
     error InvalidReferenceBlock(uint64 referenceBlock);
     error TokenConflict();
@@ -490,6 +495,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
 
     event InsuredTokenAdded(IERC20 indexed insuredToken);
     event MaxCoverageBpsSet(IERC20 indexed insuredToken, uint256 maxCoverageBps);
+    event MinClaimAmountSet(IERC20 indexed insuredToken, uint128 minClaimAmount);
     event UnderlyingConversionSet(IERC20 indexed insuredToken, address conversionAddress, bytes conversionCallData);
     event UnderlyingPriceOracleSet(IERC20 indexed insuredToken, address underlyingPriceOracle);
     event InsuredTokenRemoved(IERC20 indexed insuredToken);
@@ -571,32 +577,39 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         already listed.
     /// @param insuredToken         Token to insure.
     /// @param _maxCoverageBps      κ in (0, 100%] (bps); the timelock picks it. e.g. 8000=80%.
+    /// @param _minClaimAmount      Non-zero minimum claim escrow in insured-token base units.
     /// @param underlyingPriceOracle  underlying→USD oracle (non-zero). Not the insured token. e.g. insure token is aUSDC, underlying is USDC, underlyingPriceOracle is for USDC.
     /// @param conversionAddress    token→underlying staticcall target (0 = identity). aUSDC -> USDC conversion.
     /// @param conversionCallData   calldata for that staticcall. depending on the conversionAddress, the fn name might be different, so we need conversionCallData.
     function addInsuredToken(
         IERC20 insuredToken,
         uint256 _maxCoverageBps,
+        uint128 _minClaimAmount,
         address underlyingPriceOracle,
         address conversionAddress,
         bytes calldata conversionCallData
     ) external onlyTimelock {
-        if (address(insuredToken) == address(0) || underlyingPriceOracle == address(0)) revert ZeroAddress();
+        if (address(insuredToken) == address(0) || underlyingPriceOracle == address(0)) {
+            revert ZeroAddress();
+        }
         if (registry().coverPool(insuredToken) != address(0)) revert TokenConflict();
         if (insuredTokens[insuredToken].maxCoverageBps != 0) revert InsuredTokenAlreadyApproved(insuredToken);
         if (_maxCoverageBps == 0 || _maxCoverageBps > BPS_DENOMINATOR) {
             revert InvalidMaxCoverageBps(_maxCoverageBps, BPS_DENOMINATOR);
         }
+        if (_minClaimAmount == 0) revert InvalidMinClaimAmount(_minClaimAmount);
 
         insuredTokens[insuredToken] = InsuredToken({
             maxCoverageBps: _maxCoverageBps,
             underlyingPriceOracle: underlyingPriceOracle,
             underlyingConversionAddress: conversionAddress,
-            underlyingConversionCallData: conversionCallData
+            underlyingConversionCallData: conversionCallData,
+            minClaimAmount: _minClaimAmount
         });
         insuredTokenList.push(insuredToken);
         emit InsuredTokenAdded(insuredToken);
         emit MaxCoverageBpsSet(insuredToken, _maxCoverageBps);
+        emit MinClaimAmountSet(insuredToken, _minClaimAmount);
         emit UnderlyingPriceOracleSet(insuredToken, underlyingPriceOracle);
         emit UnderlyingConversionSet(insuredToken, conversionAddress, conversionCallData);
     }
@@ -615,6 +628,20 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         }
         insuredTokens[insuredToken].maxCoverageBps = _maxCoverageBps;
         emit MaxCoverageBpsSet(insuredToken, _maxCoverageBps);
+    }
+
+    /// @notice Update an insured token's minimum claim escrow. Timelock only.
+    /// @param insuredToken Listed insured token to update.
+    /// @param _minClaimAmount New non-zero minimum, in insured-token base units.
+    function setMinClaimAmount(IERC20 insuredToken, uint128 _minClaimAmount)
+        external
+        onlyTimelock
+        notDuringIncident
+        onlyApprovedToken(insuredToken)
+    {
+        if (_minClaimAmount == 0) revert InvalidMinClaimAmount(_minClaimAmount);
+        insuredTokens[insuredToken].minClaimAmount = _minClaimAmount;
+        emit MinClaimAmountSet(insuredToken, _minClaimAmount);
     }
 
     /// @notice Update an insured token's token→underlying conversion recipe.
@@ -783,10 +810,11 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
     ///         emitted in {ClaimRegistered} for off-chain settlement to replay.
     ///         Admin/timelock can instead open claim-lessly via {openClaimIncident}.
     /// @param insuredToken        Token to claim on (and, on the first claim, open on).
-    /// @param insuredTokenAmount  Escrow for this claim.
+    /// @param insuredTokenAmount  Requested escrow for this claim. Actual tokens received
+    ///                            must meet this insured token's `minClaimAmount`.
     /// @param scoreToSpend        Usd8 History Score the claimant REQUESTS to spend — the payout
-    ///                            weight (share = your spent / all spent, capped at κ ×
-    ///                            loss). Only a request: the settler caps it to
+    ///                            geometric weight together with covered need. Only a
+    ///                            request: the settler caps it to
     ///                            `min(requested, available)`, so `type(uint256).max`
     ///                            means "spend all available" and can never overspend.
     ///                            Only emitted here (never stored/validated on-chain);
@@ -852,6 +880,8 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
 
         uint128 escrow = uint128(_pullToken(insuredToken, msg.sender, insuredTokenAmount));
         if (escrow == 0) revert ZeroAmount();
+        uint128 minimum = insuredTokens[insuredToken].minClaimAmount;
+        if (escrow < minimum) revert ClaimBelowMinimum(insuredToken, escrow, minimum);
         escrowedInsuredTokens[insuredToken] += escrow;
 
         claimId = nextClaimId++;
@@ -1439,7 +1469,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, RegistryManaged {
         return _activeIncidentId();
     }
 
-    /// @notice The full per-token config (κ, oracle, conversion recipe).
+    /// @notice The full per-token config (κ, minimum claim, oracle, conversion recipe).
     /// @param insuredToken  Insured token to query.
     function getInsuredToken(IERC20 insuredToken) external view returns (InsuredToken memory) {
         return insuredTokens[insuredToken];

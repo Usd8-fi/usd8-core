@@ -24,6 +24,23 @@ const BPS = 10_000n;
 // Hard-coded booster policy, mirrors DefiInsurance.BOOSTER_BOOST_BPS: each
 // committed booster unit adds +1% to the insurance-score multiplier.
 const BOOSTER_BOOST_BPS = 100n;
+
+/** Floor square root for non-negative bigint values. */
+function sqrtFloor(value: bigint): bigint {
+  if (value < 0n) throw new Error("square root of negative value");
+  if (value < 2n) return value;
+
+  // Start at a power of two above sqrt(value), avoiding a linear-in-bit-length
+  // sequence of halvings for large cumulative token-block scores.
+  const bitLength = BigInt(value.toString(2).length);
+  let previous = 1n << ((bitLength + 1n) >> 1n);
+  let next = (previous + value / previous) >> 1n;
+  while (next < previous) {
+    previous = next;
+    next = (next + value / next) >> 1n;
+  }
+  return previous;
+}
 export interface SettledRow {
   claimId: bigint;
   user: `0x${string}`;
@@ -32,8 +49,8 @@ export interface SettledRow {
   lossUsd: bigint; // 1e18
   grossEarnedScore: bigint; // raw lifetime score at referenceBlock, before spent-score subtraction and booster
   earnedScore: bigint; // score available to spend this claim = (raw lifetime − spent) × booster multiplier
-  scoreSpent: bigint; // min(requested, available) — the payout weight, recorded via ScoreSpent
-  payoutUsd: bigint; // 1e18, post-κ, post-share
+  scoreSpent: bigint; // min(requested, available) — geometric-weight input, recorded via ScoreSpent
+  payoutUsd: bigint; // 1e18, post-coverage-cap and capped-geometric allocation
   amounts: bigint[]; // aligned to the registered pool list (one scalar per pool)
 }
 
@@ -176,30 +193,54 @@ export async function settle(
   for (let i = 0; i < opts.poolOrder.length; i++) {
     poolUsd += (opts.poolBalances[i] * opts.poolAssetUsd1e18[i]) / 10n ** BigInt(opts.poolAssetDecimals[i]);
   }
-  // Payout weight is the SPENT score (not earned): claimants apportion by what
-  // they choose to spend this incident.
-  const totalSpent = rows.reduce((a, r) => a + (r.lossUsd > 0n ? r.scoreSpent : 0n), 0n);
+  // Per-incident payout budget. Because every claim is split pro-rata across the
+  // same pool mix below, this aggregate cap also keeps each pool at or below its
+  // Registry.maxCoverPoolPayoutBps limit.
+  const maxTotalUsd = (poolUsd * opts.maxCoverPoolPayoutBps) / BPS;
 
-  // payoutUsd = min(spent-share × poolUsd, κ × lossUsd).
-  for (const r of rows) {
-    if (r.lossUsd === 0n || totalSpent === 0n) {
-      r.payoutUsd = 0n;
-      continue;
-    }
-    const share = (r.scoreSpent * poolUsd) / totalSpent;
-    const cap = (r.lossUsd * cfg.coverageBps) / BPS;
-    r.payoutUsd = share < cap ? share : cap;
+  // Capped geometric weighting gives covered need and spent score equal
+  // multiplicative influence: weight = floor(sqrt(claimCapUsd * scoreSpent)).
+  // Global units cancel because only weight ratios are used. A zero cap or zero
+  // score produces zero weight, so unusable score cannot dilute valid claims.
+  const weighted = rows.map((row) => {
+    const cap = (row.lossUsd * cfg.coverageBps) / BPS;
+    return { row, cap, weight: sqrtFloor(cap * row.scoreSpent) };
+  });
+  for (const claim of weighted) claim.row.payoutUsd = 0n;
+
+  // Solve payout_i = min(cap_i, lambda * weight_i) without floating point.
+  // Sorting by cap/weight identifies claims that saturate first. Cross-products
+  // preserve exact bigint ordering; claimId is only a deterministic tie-breaker.
+  const active = weighted
+    .filter((claim) => claim.cap > 0n && claim.weight > 0n)
+    .sort((a, b) => {
+      const left = a.cap * b.weight;
+      const right = b.cap * a.weight;
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return a.row.claimId < b.row.claimId ? -1 : a.row.claimId > b.row.claimId ? 1 : 0;
+    });
+
+  let remainingBudget = maxTotalUsd;
+  let remainingWeight = active.reduce((sum, claim) => sum + claim.weight, 0n);
+  let firstUnsaturated = 0;
+  for (; firstUnsaturated < active.length && remainingWeight > 0n; firstUnsaturated++) {
+    const claim = active[firstUnsaturated];
+    // The lowest remaining cap/weight claim saturates iff its proportional
+    // allocation reaches its cap. Compare by multiplication to avoid division.
+    if (remainingBudget * claim.weight < claim.cap * remainingWeight) break;
+    claim.row.payoutUsd = claim.cap;
+    remainingBudget -= claim.cap;
+    remainingWeight -= claim.weight;
   }
 
-  // Per-incident LP-loss cap (Registry.maxCoverPoolPayoutBps). Payouts are apportioned
-  // pro-rata to each pool's balance, so capping the aggregate USD payout at
-  // poolUsd × bps caps every pool at balance × bps — matching each pool's on-chain
-  // maxPayoutPerIncident, which settleIncident checks poolPayouts against. Haircut
-  // all claims uniformly if the raw total would exceed it.
-  const maxTotalUsd = (poolUsd * opts.maxCoverPoolPayoutBps) / BPS;
-  const rawTotalUsd = rows.reduce((a, r) => a + r.payoutUsd, 0n);
-  if (rawTotalUsd > maxTotalUsd && rawTotalUsd > 0n) {
-    for (const r of rows) r.payoutUsd = (r.payoutUsd * maxTotalUsd) / rawTotalUsd;
+  // No remaining claim reaches its cap, so distribute the remaining budget by
+  // geometric weight. Integer-division dust deliberately stays in the pools.
+  if (remainingBudget > 0n && remainingWeight > 0n) {
+    for (let i = firstUnsaturated; i < active.length; i++) {
+      const claim = active[i];
+      claim.row.payoutUsd = (remainingBudget * claim.weight) / remainingWeight;
+    }
   }
 
   // Split each claim's payout per pool, pro-rata to the pool mix; sum per pool.

@@ -7,11 +7,14 @@
 
 import { keccak256, stringToHex } from "viem";
 
-export const CONFIG_VERSION = "3.1.0";
+// 4.0.0 introduced capped geometric payout-root semantics.
+// 4.1.0 added per-insured-token minimum claim enforcement and the matching ABI.
+// 4.2.0 rejects future-dated, reversed, and superseded oracle rounds.
+export const CONFIG_VERSION = "4.2.0";
 
 // Max age (seconds) a Chainlink feed's answer may have, measured at the pinned
 // block, before settlement treats it as stale and refuses to value against it
-// (audit C5). Conservative default (24h) covering long-heartbeat USD feeds; tune
+// (audit L-02). Conservative default (24h) covering long-heartbeat USD feeds; tune
 // down per-feed if all configured oracles have tighter heartbeats. A stale feed
 // throws → no root is produced → the incident voids (escrow recoverable) rather
 // than settling on a frozen price the dispute window can't self-correct.

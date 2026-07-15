@@ -77,7 +77,7 @@ contract SettlementIntegrationTest is Test {
         vm.startPrank(admin);
         registry.addPool(address(pool));
         registry.setDefiInsurance(address(defi));
-        defi.addInsuredToken(IERC20(address(lp)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(lp)), 8000, 1e18, FEED, address(0), "");
         defi.setTeeSigner(vm.addr(TEE_PK), true);
         vm.stopPrank();
 

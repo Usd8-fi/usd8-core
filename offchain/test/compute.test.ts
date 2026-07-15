@@ -43,6 +43,7 @@ import type { IncidentConfig, InputEvent } from "../src/chain.js";
 beforeEach(() => vi.clearAllMocks());
 
 const WAD = 10n ** 18n;
+const ALICE = "0x000000000000000000000000000000000000a11c" as const;
 const BOB = "0x000000000000000000000000000000000000b0b0" as const;
 const CAROL = "0x000000000000000000000000000000000000ca50" as const;
 const INS = "0x0000000000000000000000000000000000001115" as const;
@@ -73,6 +74,7 @@ function baseOpts(assetBalance: bigint) {
     referenceBlock: 100n,
     windowEndBlock: 110n,
     poolOrder: [ASSET] as `0x${string}`[],
+    poolAddrs: [ASSET] as `0x${string}`[],
     poolBalances: [assetBalance],
     poolAssetUsd1e18: [WAD], // $1 per asset token
     poolAssetDecimals: [18],
@@ -94,36 +96,127 @@ describe("settle — payout math", () => {
     h.integrals.set(CAROL.toLowerCase(), 40n);
   }
 
-  it("scarce pool → payouts bound by score share, sum to the pool", async () => {
+  it("uses both covered need and spent score, while zero-cap score has zero allocation weight", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.integrals.set(BOB.toLowerCase(), 100n);
+    h.integrals.set(CAROL.toLowerCase(), 100n);
+    h.integrals.set(ALICE.toLowerCase(), 2_000_000n);
+
+    const geometricEvents = [
+      reg(1n, BOB, 45n * WAD, 100n), // claim cap = $36; sqrt(36e18 × 100) = 60e9
+      reg(2n, CAROL, 80n * WAD, 100n), // claim cap = $64; sqrt(64e18 × 100) = 80e9
+      reg(3n, ALICE, 1n, 2_000_000n), // claim cap floors to zero, so weight must be zero
+    ];
+
+    const s = await settle({} as any, 1n, cfg, geometricEvents, baseOpts(70n * WAD));
+
+    // Equal score does not mean equal payout: covered need also contributes to weight.
+    // The zero-cap/high-score row cannot dilute either meaningful claimant.
+    expect(s.rows.map((r) => r.payoutUsd)).toEqual([30n * WAD, 40n * WAD, 0n]);
+    expect(s.poolPayouts).toEqual([70n * WAD]);
+  });
+
+  it("redistributes a saturated claim's unused geometric share without exceeding any claim cap", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.integrals.set(ALICE.toLowerCase(), 90n);
+    h.integrals.set(BOB.toLowerCase(), 100n);
+    h.integrals.set(CAROL.toLowerCase(), 100n);
+
+    const cappedEvents = [
+      reg(1n, ALICE, (25n * WAD) / 2n, 90n), // cap $10, geometric weight 30e9
+      reg(2n, BOB, 45n * WAD, 100n), // cap $36, geometric weight 60e9
+      reg(3n, CAROL, 80n * WAD, 100n), // cap $64, geometric weight 80e9
+    ];
+
+    const s = await settle({} as any, 1n, cfg, cappedEvents, baseOpts(80n * WAD));
+
+    // Alice's initial geometric share is above her $10 cap. The unused amount is
+    // recomputed across Bob and Carol at their 60:80 weight ratio.
+    expect(s.rows.map((r) => r.payoutUsd)).toEqual([10n * WAD, 30n * WAD, 40n * WAD]);
+    expect(s.poolPayouts).toEqual([80n * WAD]);
+  });
+
+  it("produces the same payout per claim regardless of claimant-table order", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.integrals.set(ALICE.toLowerCase(), 90n);
+    h.integrals.set(BOB.toLowerCase(), 100n);
+    h.integrals.set(CAROL.toLowerCase(), 100n);
+    const ordered = [
+      reg(1n, ALICE, (25n * WAD) / 2n, 90n),
+      reg(2n, BOB, 45n * WAD, 100n),
+      reg(3n, CAROL, 80n * WAD, 100n),
+    ];
+
+    const forward = await settle({} as any, 1n, cfg, ordered, baseOpts(80n * WAD));
+    const reversed = await settle({} as any, 1n, cfg, [...ordered].reverse(), baseOpts(80n * WAD));
+    const byClaimId = (rows: typeof forward.rows) =>
+      [...rows]
+        .sort((a, b) => (a.claimId < b.claimId ? -1 : a.claimId > b.claimId ? 1 : 0))
+        .map((row) => [row.claimId, row.payoutUsd]);
+
+    expect(byClaimId(reversed.rows)).toEqual(byClaimId(forward.rows));
+  });
+
+  it("is neutral to proportional splitting of both covered need and spent score", async () => {
+    h.integrals.clear();
+    h.minBalances.clear();
+    h.integrals.set(BOB.toLowerCase(), 100n);
+    const single = await settle(
+      {} as any,
+      1n,
+      cfg,
+      [reg(1n, BOB, 100n * WAD, 100n)],
+      baseOpts(40n * WAD)
+    );
+
+    h.integrals.set(BOB.toLowerCase(), 50n);
+    h.integrals.set(CAROL.toLowerCase(), 50n);
+    const split = await settle(
+      {} as any,
+      1n,
+      cfg,
+      [reg(1n, BOB, 50n * WAD, 50n), reg(2n, CAROL, 50n * WAD, 50n)],
+      baseOpts(40n * WAD)
+    );
+
+    expect(single.rows[0].payoutUsd).toBe(40n * WAD);
+    expect(split.rows.map((row) => row.payoutUsd)).toEqual([20n * WAD, 20n * WAD]);
+  });
+
+  it("scarce pool → equal-need payouts use the square root of spent score", async () => {
     setEarned();
-    // poolUsd = $100, totalSpent = 100 ⇒ share = scoreSpent (per $1). Below κ·loss=$80? no:
-    // bob share $60 < $80 cap, carol $40 < $80 ⇒ both share-bound.
+    // Both caps are $80, so covered need is equal and the weights differ only by
+    // sqrt(scoreSpent). Integer division leaves one wei of deterministic dust.
     const s = await settle({} as any, 1n, cfg, events, baseOpts(100n * WAD));
 
     expect(s.rows.map((r) => r.scoreSpent)).toEqual([60n, 40n]);
     expect(s.rows.map((r) => r.eligibleAmount)).toEqual([100n * WAD, 100n * WAD]);
     expect(s.rows.map((r) => r.lossUsd)).toEqual([100n * WAD, 100n * WAD]);
     expect(s.rows.map((r) => r.earnedScore)).toEqual([60n, 40n]);
-    expect(s.rows.map((r) => r.payoutUsd)).toEqual([60n * WAD, 40n * WAD]);
-    expect(s.rows.map((r) => r.amounts)).toEqual([[60n * WAD], [40n * WAD]]);
-    // whole pool distributed
-    expect(s.rows.reduce((a, r) => a + r.amounts[0], 0n)).toEqual(100n * WAD);
-    expect(s.poolPayouts).toEqual([100n * WAD]);
+    const expected = [55_051_025_721_816_600_736n, 44_948_974_278_183_399_263n];
+    expect(s.rows.map((r) => r.payoutUsd)).toEqual(expected);
+    expect(s.rows.map((r) => r.amounts)).toEqual(expected.map((amount) => [amount]));
+    expect(s.rows.reduce((a, r) => a + r.amounts[0], 0n)).toEqual(100n * WAD - 1n);
+    expect(s.poolPayouts).toEqual([100n * WAD - 1n]);
   });
 
-  it("per-incident cap haircuts payouts and sets poolPayouts within the cap", async () => {
+  it("uses the per-incident LP-loss cap as the geometric allocation budget", async () => {
     setEarned();
-    // Scarce pool ($100) would pay $60/$40 = the whole pool, but a 80% cap limits
-    // the incident to $80 total; both claims are haircut pro-rata (×80/100).
+    // The 80% pool cap makes $80 the water-filling budget from the outset.
     const s = await settle({} as any, 1n, cfg, events, { ...baseOpts(100n * WAD), maxCoverPoolPayoutBps: 8000n });
-    expect(s.rows.map((r) => r.payoutUsd)).toEqual([48n * WAD, 32n * WAD]);
-    expect(s.rows.map((r) => r.amounts)).toEqual([[48n * WAD], [32n * WAD]]);
-    expect(s.poolPayouts).toEqual([80n * WAD]); // = balance × 80%, the on-chain cap
+    const expected = [44_040_820_577_453_280_589n, 35_959_179_422_546_719_410n];
+    expect(s.rows.map((r) => r.payoutUsd)).toEqual(expected);
+    expect(s.rows.map((r) => r.amounts)).toEqual(expected.map((amount) => [amount]));
+    expect(s.poolPayouts).toEqual([80n * WAD - 1n]); // one wei dust stays in the pool
   });
 
   it("abundant pool → payouts bound by κ·loss cap", async () => {
     setEarned();
-    // poolUsd = $10,000 ⇒ each score share dwarfs the $80 cap.
+    // The $10,000 incident budget exceeds the $160 aggregate covered need, so
+    // water-filling saturates both claims at their $80 caps.
     const s = await settle({} as any, 1n, cfg, events, baseOpts(10_000n * WAD));
     expect(s.rows.map((r) => r.payoutUsd)).toEqual([80n * WAD, 80n * WAD]); // 80% of $100
     expect(s.rows.map((r) => r.amounts)).toEqual([[80n * WAD], [80n * WAD]]);

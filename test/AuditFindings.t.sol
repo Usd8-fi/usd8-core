@@ -110,7 +110,7 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         FreezeProbeToken tok = new FreezeProbeToken(registry);
         tok.setDefi(address(defi));
         vm.prank(admin);
-        defi.addInsuredToken(IERC20(address(tok)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(tok)), 8000, MIN_CLAIM, FEED, address(0), "");
 
         _stake(alice, 100e6); // pool capital to pay from
 

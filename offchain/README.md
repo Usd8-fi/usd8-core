@@ -44,13 +44,30 @@ export const CONFIG = {
 };
 ```
 
-Set `RPC_URL` to any **archive** node for mainnet (archive is required — the
-tool reads historical state at the incident's window-end block; its chain id is
-verified against 1 at startup):
+Set `DRPC_KEY` for the production dRPC Ethereum endpoint. The key is sent in
+the `Drpc-Key` HTTP header to dRPC's documented
+`https://lb.drpc.org/ogrpc?network=ethereum` endpoint, never embedded in the URL
+or printed. dRPC archive access is required because settlement reads historical
+state:
 
 ```bash
-export RPC_URL="https://…"
+export DRPC_KEY="..."
 ```
+
+For local recomputation with another archive provider, set `RPC_URL` without a
+`DRPC_KEY`. If both are set, the key is sent only when `RPC_URL` uses an exact
+trusted dRPC HTTPS host (`lb.drpc.org` or `lb.drpc.live`); every other host is
+rejected before any request, and HTTP redirects are disabled so the header cannot
+cross origins:
+
+```bash
+export RPC_URL="https://..."
+unset DRPC_KEY
+```
+
+The RPC chain id is verified against Ethereum mainnet (`1`) at startup. Log
+queries use bounded ranges, recursively bisect full pages, and now also bisect
+explicit timeout/range/result-size errors. A single-block ambiguity fails closed.
 
 ## Run
 
@@ -70,6 +87,13 @@ canonical, address-sorted `(user, grossEarnedScore)` rows and their
 `settlementInputHash`; this is the per-incident input commitment included in
 the TEE's EIP-712 signature.
 
+Each insured token also carries a non-zero `minClaimAmount` in token base
+units. The contract enforces it against the escrow actually received before a
+claim enters the event stream, so the off-chain settler never needs to filter
+sub-minimum claims. This is an economic anti-spam bound, not a hard claimant-
+count cap; production thresholds should be selected from token value/decimals
+and maximum-load tests.
+
 ## What it computes (all from chain state)
 
 1. **Rebuild the claimant table** by replaying `ClaimRegistered` /
@@ -80,23 +104,71 @@ the TEE's EIP-712 signature.
    window ending at the incident's `referenceBlock`, times the underlying's
    USD price at the window-end block.
 3. **Per claim**: the continuous **minimum balance** of the insured token held
-   over `[referenceBlock − holdingMargin, joinBlock − 1]` (which also dedupes
-   across claimants), capped at the escrow → eligible amount → `lossUsd`. The
-   window runs up to the block *before* the claim's `joinClaim` (which escrows
-   the token out of the wallet), so the escrow itself never reduces it, yet the
-   claimant must have held continuously from before the incident right up to
-   filing. The loss is still **priced** at the pre-incident `referenceBlock`.
+   over `[referenceBlock − holdingMargin, referenceBlock]`, capped at the escrow
+   → `eligibleAmount` → `lossUsd`. The holding window is entirely pre-incident:
+   it proves prior exposure and ignores transfers after `referenceBlock`.
+   `joinClaim` escrows the submitted amount later; finalization forfeits only the
+   eligible portion and refunds any excess escrow. Loss remains priced at the
+   pre-incident `referenceBlock`.
 4. **Score**: each holder's earned insurance score **as of `referenceBlock`**
    (token·block integral of the scored tokens, plus committed boosters — capped
    at the claimant's min booster balance over `[joinBlock, windowEnd]`), minus
    already-spent score summed from `ScoreSpent` logs (pinned before `openBlock`),
-   capped to what the claim requested → `scoreSpent` (the payout weight). Pinning
-   to `referenceBlock` stops anyone farming fresh score during the claim window.
-5. **Payout**: `min(scoreShare × poolUsd, κ × lossUsd)`, split per pool
-   pro-rata to the pool mix, aligned to `Registry.pools()` at `openBlock`.
-6. **Merkle root**: OZ `StandardMerkleTree` over
+   capped to what the claim requested → `scoreSpent`. This is one input to the
+   geometric allocation weight, not the sole payout weight. Pinning to
+   `referenceBlock` stops anyone farming fresh score during the claim window.
+5. **Covered need**: `claimCapUsd = floor(κ × lossUsd)`. This is both an input
+   to allocation and the absolute maximum that claim can receive.
+6. **Capped geometric allocation**: calculate
+   `weight = floor(sqrt(claimCapUsd × scoreSpent))`, then solve
+   `payoutUsd = min(claimCapUsd, lambda × weight)` against the incident LP-loss
+   budget using deterministic water-filling. Split each payout per pool pro-rata
+   to the pool mix aligned to `Registry.pools()` at `openBlock`.
+7. **Merkle root**: OZ `StandardMerkleTree` over
    `(incidentId, claimId, user, amounts, scoreSpent, eligibleAmount)` — the exact leaf
    encoding `finalizeClaim` verifies with `bytes32[] proof`.
+
+### Capped geometric allocation
+
+The allocation intentionally combines two quantities with different units:
+covered need (`C`) and score chosen for this incident (`S`). Only relative
+weights matter, so their absolute unit scales cancel apart from integer flooring:
+
+```text
+C_i = floor(lossUsd_i * coverageBps / 10_000)
+S_i = min(requestedScore_i, boostedUnspentScore_i)
+W_i = floor(sqrt(C_i * S_i))
+B   = floor(poolUsd * maxCoverPoolPayoutBps / 10_000)
+P_i = min(C_i, lambda * W_i)
+```
+
+The breaking allocator change introduced `CONFIG_VERSION = "4.0.0"`.
+Per-insured-token minimum claims use `4.1.0`; strict oracle-round validation uses
+`4.2.0`. The version is part of `configHash`, preventing builds with different
+settlement acceptance rules from carrying the same configuration commitment.
+
+The square root gives need and score equal influence in log space and diminishing
+returns to accumulated score. Four times the spent score gives twice the weight.
+A zero cap or zero score gives zero weight. Splitting `C` and `S` proportionally
+across identities preserves aggregate weight before rounding.
+
+To determine `lambda` without floating point or input-order dependence,
+`compute.ts` sorts positive-weight claims by `C_i / W_i`. It compares ratios by
+exact bigint cross-products and uses `claimId` only to break exact ties. Starting
+with the full budget and weight, a claim is saturated when:
+
+```text
+remainingBudget * W_i >= C_i * remainingWeight
+```
+
+A saturated claim receives `C_i`; its cap and weight are removed, and computation
+continues. Once the lowest remaining ratio does not saturate, all remaining
+claims receive their pro-rata weighted amount. Division dust stays in the pools.
+This is `O(n log n)` and produces one settlement root—there is no extra claimant
+step. Finalization remains optional; a declined fixed-root offer is not
+redistributed after settlement.
+
+The root README contains the policy rationale and worked example.
 
 Phase 1 obtains gross score through `RpcScoreSource`, which preserves the exact
 raw historical-RPC replay. The payout computation depends only on the
@@ -109,6 +181,22 @@ the underlying oracle, the scored-token set) are read from contract state at the
 incident's `openBlock`, not hard-coded here — so two people running this at
 different times get the identical root. Only the per-asset pool-valuation feeds
 (`assetUsdFeed`) live in `config.ts`.
+
+### Oracle validity at the pinned block
+
+Every Chainlink-style price read fails closed unless the round has a positive
+answer and satisfies:
+
+```text
+0 < startedAt <= updatedAt <= pinnedBlock.timestamp
+answeredInRound >= roundId
+pinnedBlock.timestamp - updatedAt <= MAX_ORACLE_STALENESS
+```
+
+The feed address, feed implementation/class, decimals, and heartbeat must still
+be validated before activation. `MAX_ORACLE_STALENESS` is committed through
+`configHash`; an invalid or stale round produces no settlement root rather than
+silently pricing a claim from an impossible or outdated timestamp.
 
 ## Tests
 

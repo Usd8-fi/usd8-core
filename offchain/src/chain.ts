@@ -11,7 +11,7 @@ export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as cons
 // reading these at the incident's openBlock (see {incidentConfigOf}).
 export const DEFI_ABI = parseAbi([
   "function incidents(uint256) view returns (address insuredToken, uint64 claimWindowEndTime, bytes32 root, uint256 unresolved, uint64 rootSubmittedAt, uint64 referenceBlock, uint64 openBlock, uint8 status, uint64 disputedAt, bytes32 claimSetHash)",
-  "function getInsuredToken(address) view returns ((uint256 maxCoverageBps, address underlyingPriceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData))",
+  "function getInsuredToken(address) view returns ((uint256 maxCoverageBps, address underlyingPriceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData, uint128 minClaimAmount))",
   "function settlementParams() view returns (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks)",
 ]);
 
@@ -80,8 +80,37 @@ export interface IncidentConfig {
   scoredTokens: ScoredToken[];
 }
 
-export function makeClient(rpcUrl: string): PublicClient {
-  return createPublicClient({ transport: http(rpcUrl, { retryCount: 5 }) });
+const TRUSTED_DRPC_HOSTS = new Set(["lb.drpc.org", "lb.drpc.live"]);
+
+export function makeClient(rpcUrl: string, drpcKey?: string): PublicClient {
+  if (drpcKey) {
+    let endpoint: URL;
+    try {
+      endpoint = new URL(rpcUrl);
+    } catch {
+      throw new Error("refusing to send DRPC_KEY: RPC URL is invalid");
+    }
+    if (
+      endpoint.protocol !== "https:" ||
+      !TRUSTED_DRPC_HOSTS.has(endpoint.hostname) ||
+      (endpoint.port !== "" && endpoint.port !== "443") ||
+      endpoint.username !== "" ||
+      endpoint.password !== ""
+    ) {
+      throw new Error(`refusing to send DRPC_KEY to untrusted RPC endpoint ${endpoint.origin}`);
+    }
+  }
+  return createPublicClient({
+    transport: http(rpcUrl, {
+      retryCount: 5,
+      // JSON-RPC endpoints should not redirect. Failing redirects also prevents
+      // Drpc-Key from being forwarded to a different origin by fetch.
+      fetchOptions: {
+        redirect: "error",
+        ...(drpcKey ? { headers: { "Drpc-Key": drpcKey } } : {}),
+      },
+    }),
+  });
 }
 
 /** One register-or-cancel event, in true chain order. */
@@ -133,7 +162,26 @@ export async function getLogsChunked(
 }
 
 async function getLogsBisect(client: PublicClient, q: LogQuery, fromBlock: bigint, toBlock: bigint): Promise<any[]> {
-  const logs = (await client.getLogs({ ...q, fromBlock, toBlock } as any)) as any[];
+  let logs: any[];
+  try {
+    logs = (await client.getLogs({ ...q, fromBlock, toBlock } as any)) as any[];
+  } catch (error) {
+    // dRPC and other providers reject expensive eth_getLogs ranges with an
+    // explicit timeout/range/result-size error. Treat that as pagination
+    // feedback and bisect; auth, malformed-query, and unrelated failures remain
+    // fatal rather than causing an unbounded retry tree.
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const rangeLimited = /\b408\b|request timeout|timed?\s*out|query duration|block range|range (?:is )?too (?:large|wide)|too many results|result(?:s| set)? (?:size|limit)|response (?:size|too large)/i.test(
+      message
+    );
+    if (!rangeLimited || fromBlock === toBlock) throw error;
+
+    const mid = fromBlock + (toBlock - fromBlock) / 2n;
+    const lo = await getLogsBisect(client, q, fromBlock, mid);
+    const hi = await getLogsBisect(client, q, mid + 1n, toBlock);
+    return [...lo, ...hi];
+  }
+
   // Under the cap → provably complete (cap is ≤ the provider's real limit).
   if (logs.length < LOG_RESULT_CAP) return logs;
   // A full page might have been silently capped. Split and retry to page it all in.
@@ -219,7 +267,13 @@ export async function incidentConfigOf(
     functionName: "getInsuredToken",
     args: [insuredToken],
     blockNumber: openBlock,
-  })) as { maxCoverageBps: bigint; underlyingPriceOracle: `0x${string}`; underlyingConversionAddress: `0x${string}`; underlyingConversionCallData: `0x${string}` };
+  })) as {
+    maxCoverageBps: bigint;
+    underlyingPriceOracle: `0x${string}`;
+    underlyingConversionAddress: `0x${string}`;
+    underlyingConversionCallData: `0x${string}`;
+    minClaimAmount: bigint;
+  };
 
   const [twapLookbackBlocks, holdingMarginBlocks, sampleStepBlocks] = (await client.readContract({
     address: CONFIG.defiInsurance,
@@ -228,9 +282,10 @@ export async function incidentConfigOf(
     blockNumber: openBlock,
   })) as readonly [bigint, bigint, bigint];
 
-  // Every token ever scored, then each one's append-only rate timeline — all pinned
-  // at openBlock. earnedScoreOf integrates each segment at its OWN rate, so a past
-  // rate change never re-prices already-accrued score. Decimals are also pinned so a
+  // The Registry is the canonical source for scored-token rates: there are no local
+  // USD8/sUSD8 rate constants here. Read every token and its append-only timeline at
+  // openBlock. earnedScoreOf integrates each segment at its OWN rate, so a past rate
+  // change never re-prices already-accrued score. Decimals are also pinned so a
   // non-18-dec token's integral normalizes to the shared 18-dec basis (F6).
   const tokenList = (await client.readContract({
     address: CONFIG.registry,
@@ -378,12 +433,11 @@ export async function ratioAt(
  * USD price from a Chainlink-style oracle at `blockNumber`, normalized to 1e18.
  * Reads the oracle's own `decimals()` and pins the block so the value is
  * reproducible. Rejects a non-positive answer, an incomplete round
- * (startedAt/updatedAt == 0), and a feed staler than {MAX_ORACLE_STALENESS} at the
- * pinned block. (answeredInRound is intentionally NOT checked — deprecated on
- * modern OCR feeds; updatedAt is the correct freshness signal.)
+ * (startedAt/updatedAt == 0 or reversed), a future-dated update, a superseded
+ * round, and a feed staler than {MAX_ORACLE_STALENESS} at the pinned block.
  */
 export async function priceUsd1e18(client: PublicClient, oracle: `0x${string}`, blockNumber: bigint): Promise<bigint> {
-  const [, answer, startedAt, updatedAt] = (await client.readContract({
+  const [roundId, answer, startedAt, updatedAt, answeredInRound] = (await client.readContract({
     address: oracle,
     abi: FEED_ABI,
     functionName: "latestRoundData",
@@ -393,8 +447,17 @@ export async function priceUsd1e18(client: PublicClient, oracle: `0x${string}`, 
   // Round completeness + staleness: compare the feed's last-update time to the
   // pinned block's own timestamp (both deterministic, so every honest recompute agrees).
   if (startedAt === 0n || updatedAt === 0n) throw new Error(`oracle ${oracle} round incomplete`);
+  if (startedAt > updatedAt) {
+    throw new Error(`oracle ${oracle} startedAt ${startedAt} is after updatedAt ${updatedAt}`);
+  }
+  if (answeredInRound < roundId) {
+    throw new Error(`oracle ${oracle} answeredInRound ${answeredInRound} is older than roundId ${roundId}`);
+  }
   const blockTs = (await client.getBlock({ blockNumber })).timestamp;
-  if (blockTs > updatedAt && blockTs - updatedAt > MAX_ORACLE_STALENESS) {
+  if (updatedAt > blockTs) {
+    throw new Error(`oracle ${oracle} updatedAt ${updatedAt} is later than pinned block ts ${blockTs}`);
+  }
+  if (blockTs - updatedAt > MAX_ORACLE_STALENESS) {
     throw new Error(`oracle ${oracle} stale: updatedAt ${updatedAt}, block ts ${blockTs} (> ${MAX_ORACLE_STALENESS}s)`);
   }
   const dec = BigInt(

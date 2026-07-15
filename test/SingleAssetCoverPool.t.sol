@@ -42,6 +42,7 @@ contract SingleAssetCoverPoolTest is Test {
 
     uint64 constant DURATION = 7 days;
     address constant FEED = address(0xFEED); // dummy USD feed (off-chain only, unused on-chain)
+    uint128 constant MIN_CLAIM = 10e18; // insured-token base units
     uint256 constant VS = 1_000; // virtual-share multiplier (10 ** _decimalsOffset(), offset = 3)
 
     function setUp() public {
@@ -69,8 +70,8 @@ contract SingleAssetCoverPoolTest is Test {
         registry.addPool(address(pool));
         registry.setBoosterNFT(address(booster));
         registry.setDefiInsurance(address(defi));
-        defi.addInsuredToken(IERC20(address(lp1)), 8000, FEED, address(0), "");
-        defi.addInsuredToken(IERC20(address(lp2)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(lp1)), 8000, MIN_CLAIM, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(lp2)), 8000, MIN_CLAIM * 2, FEED, address(0), "");
         defi.setTeeSigner(vm.addr(TEE_PK), true); // settlement is TEE-signature-gated
         vm.stopPrank();
     }
@@ -338,12 +339,12 @@ contract SingleAssetCoverPoolTest is Test {
     function test_AddInsuredTokenRejectsStakeAsset() public {
         vm.prank(admin);
         vm.expectRevert(DefiInsurance.TokenConflict.selector);
-        defi.addInsuredToken(IERC20(address(usdc)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(usdc)), 8000, MIN_CLAIM, FEED, address(0), "");
     }
 
     function test_AddInsuredTokenAcceptsUSD8() public {
         vm.prank(admin);
-        defi.addInsuredToken(IERC20(address(usd8)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(usd8)), 8000, MIN_CLAIM, FEED, address(0), "");
         assertEq(defi.getInsuredToken(IERC20(address(usd8))).maxCoverageBps, 8000);
     }
 
@@ -351,7 +352,7 @@ contract SingleAssetCoverPoolTest is Test {
     ///      and signs the open; alice then claims. No on-chain trigger/adapter.
     function test_USD8BackingLossTriggersIncident() public {
         vm.startPrank(admin);
-        defi.addInsuredToken(IERC20(address(usd8)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(usd8)), 8000, MIN_CLAIM, FEED, address(0), "");
         usd8.mint(alice, 100e18);
         vm.stopPrank();
         vm.prank(alice);
@@ -383,7 +384,7 @@ contract SingleAssetCoverPoolTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(DefiInsurance.InsuredTokenAlreadyApproved.selector, IERC20(address(lp1)))
         );
-        defi.addInsuredToken(IERC20(address(lp1)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(lp1)), 8000, MIN_CLAIM, FEED, address(0), "");
     }
 
     // ════════════════════ Settlement config ════════════════════
@@ -391,19 +392,27 @@ contract SingleAssetCoverPoolTest is Test {
     function test_AddInsuredTokenStoresConfig() public view {
         DefiInsurance.InsuredToken memory it = defi.getInsuredToken(IERC20(address(lp1)));
         assertEq(it.maxCoverageBps, 8000);
+        assertEq(it.minClaimAmount, MIN_CLAIM);
         assertEq(it.underlyingPriceOracle, FEED);
         assertEq(it.underlyingConversionAddress, address(0)); // identity
+    }
+
+    function test_MinClaimAmountIsPerInsuredToken() public view {
+        assertEq(defi.getInsuredToken(IERC20(address(lp1))).minClaimAmount, MIN_CLAIM);
+        assertEq(defi.getInsuredToken(IERC20(address(lp2))).minClaimAmount, MIN_CLAIM * 2);
     }
 
     function test_AddInsuredTokenRejectsBadArgs() public {
         MockERC20 lp3 = new MockERC20("LP3", "LP3", 18);
         vm.startPrank(admin);
         vm.expectRevert(RegistryManaged.ZeroAddress.selector); // zero price oracle
-        defi.addInsuredToken(IERC20(address(lp3)), 8000, address(0), address(0), "");
+        defi.addInsuredToken(IERC20(address(lp3)), 8000, MIN_CLAIM, address(0), address(0), "");
         vm.expectRevert(
             abi.encodeWithSelector(DefiInsurance.InvalidMaxCoverageBps.selector, uint256(0), uint256(10_000))
         );
-        defi.addInsuredToken(IERC20(address(lp3)), 0, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(lp3)), 0, MIN_CLAIM, FEED, address(0), "");
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.InvalidMinClaimAmount.selector, uint256(0)));
+        defi.addInsuredToken(IERC20(address(lp3)), 8000, 0, FEED, address(0), "");
         vm.stopPrank();
     }
 
@@ -419,9 +428,20 @@ contract SingleAssetCoverPoolTest is Test {
         // And re-listing sets a fresh recipe.
         vm.startPrank(admin);
         defi.removeInsuredToken(IERC20(address(lp1)));
-        defi.addInsuredToken(IERC20(address(lp1)), 8000, FEED, address(0x5678), cd);
+        defi.addInsuredToken(IERC20(address(lp1)), 8000, MIN_CLAIM, FEED, address(0x5678), cd);
         vm.stopPrank();
         assertEq(defi.getInsuredToken(IERC20(address(lp1))).underlyingConversionAddress, address(0x5678));
+    }
+
+    function test_MinClaimAmountUpdatable() public {
+        uint128 updatedMinimum = 25e18;
+        vm.prank(admin);
+        defi.setMinClaimAmount(IERC20(address(lp1)), updatedMinimum);
+        assertEq(defi.getInsuredToken(IERC20(address(lp1))).minClaimAmount, updatedMinimum);
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.InvalidMinClaimAmount.selector, uint256(0)));
+        defi.setMinClaimAmount(IERC20(address(lp1)), 0);
     }
 
     function test_ScoredTokenRateTimeline() public {
@@ -481,6 +501,8 @@ contract SingleAssetCoverPoolTest is Test {
         vm.startPrank(admin);
         vm.expectRevert(DefiInsurance.IncidentsActive.selector);
         defi.setMaxCoverageBps(IERC20(address(lp1)), 5000);
+        vm.expectRevert(DefiInsurance.IncidentsActive.selector);
+        defi.setMinClaimAmount(IERC20(address(lp1)), 25e18);
         vm.expectRevert(DefiInsurance.IncidentsActive.selector);
         defi.setUnderlyingPriceOracle(IERC20(address(lp1)), FEED);
         vm.expectRevert(DefiInsurance.IncidentsActive.selector);
@@ -835,6 +857,46 @@ contract SingleAssetCoverPoolTest is Test {
         assertEq(defi.nextIncidentId(), 2);
     }
 
+    function test_JoinRejectsClaimBelowInsuredTokenMinimum() public {
+        vm.prank(admin);
+        defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
+
+        uint128 amount = MIN_CLAIM - 1;
+        lp1.mint(bob, amount);
+        vm.startPrank(bob);
+        lp1.approve(address(defi), amount);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DefiInsurance.ClaimBelowMinimum.selector, IERC20(address(lp1)), uint256(amount), uint256(MIN_CLAIM)
+            )
+        );
+        defi.joinClaim(IERC20(address(lp1)), amount, 0, 0, 0, "");
+        vm.stopPrank();
+    }
+
+    function test_JoinMinimumUsesActualReceivedAmount() public {
+        MockFeeToken feeToken = new MockFeeToken(100); // sends 99% of requested amount
+        uint128 minimum = 100e18;
+        vm.startPrank(admin);
+        defi.addInsuredToken(IERC20(address(feeToken)), 8000, minimum, FEED, address(0), "");
+        defi.openClaimIncident(IERC20(address(feeToken)), uint64(block.number - 1));
+        vm.stopPrank();
+
+        feeToken.mint(bob, minimum);
+        vm.startPrank(bob);
+        feeToken.approve(address(defi), minimum);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DefiInsurance.ClaimBelowMinimum.selector, IERC20(address(feeToken)), uint256(99e18), uint256(minimum)
+            )
+        );
+        defi.joinClaim(IERC20(address(feeToken)), minimum, 0, 0, 0, "");
+        vm.stopPrank();
+
+        assertEq(feeToken.balanceOf(address(defi)), 0);
+        assertEq(feeToken.balanceOf(bob), minimum);
+    }
+
     function test_OpenIncidentUnapprovedTokenReverts() public {
         MockERC20 lp3 = new MockERC20("LP3", "LP3", 18);
         vm.prank(admin);
@@ -1001,7 +1063,7 @@ contract SingleAssetCoverPoolTest is Test {
 
         // Delisted by settlement: governance must re-list before a new incident.
         vm.prank(admin);
-        defi.addInsuredToken(IERC20(address(lp1)), 8000, FEED, address(0), "");
+        defi.addInsuredToken(IERC20(address(lp1)), 8000, MIN_CLAIM, FEED, address(0), "");
         uint256 cid = _registerClaim(carol, lp1, 30e18);
         (, uint256 incidentId,,,,) = defi.claims(cid);
         assertEq(incidentId, 2);

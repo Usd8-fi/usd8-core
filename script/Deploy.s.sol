@@ -27,7 +27,8 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 /// @title  Deploy
 /// @notice Deployer: Registry, USD8 (proxy + impl), Treasury (UUPS proxy + impl,
-///         with two USDC yield strategies — Aave + Morpho), Morpho Vault V2 sUSD8 with a custom idle/profit adapter,
+///         with two USDC yield strategies — Aave + Morpho), an official Morpho
+///         Vault V2 savings share token (symbol `sUSD8`) with a custom idle/profit adapter,
 ///         a wstETH SingleAssetCoverPool
 ///         behind an UpgradeableBeacon (the capital base), and DefiInsurance (the
 ///         single payout module). Scored tokens (USD8, sUSD8) and the booster are
@@ -38,9 +39,11 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///         (minDelay {TIMELOCK_MIN_DELAY}; sole proposer/canceller
 ///         {DEFAULT_ADMIN}; open execution; self-administered — admin param
 ///         address(0), so delay/role changes go through its own delayed
-///         proposals). The admin role stays the {DEFAULT_ADMIN} EOA for the
-///         fast deny-only levers (pause, disputeIncident, closeIncident) —
-///         migrate it to a Safe before real user volume. All deploy parameters
+///         proposals). The Registry admin role stays with {DEFAULT_ADMIN} during
+///         beta and is explicitly privileged: it can operate pauses, profit routing,
+///         strategy allocations, and incident/root controls. This is an accepted
+///         trust assumption; migrate it to a monitored Safe before real user volume.
+///         All deploy parameters
 ///         (admin, vault addresses, rates) are hardcoded constants below —
 ///         edit them in-place for a different network/signer.
 ///
@@ -80,10 +83,23 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///     Before calling, verify the new timelock is a live, correctly-owned
 ///     address/contract — on every contract. (admin is recoverable by the
 ///     timelock; the timelock itself is not.)
+///
+///  6. PRIVILEGED BETA ROLES ARE TRUSTED. DEFAULT_ADMIN proposes/cancels timelock
+///     operations and retains immediate operational powers. Monitor every action,
+///     use a Safe before meaningful TVL, and permanently end beta shortcuts when
+///     governance is ready. Do not describe this role as deny-only.
 /// ═════════════════════════════════════════════════════════════════════
 contract DeployScript is Script {
-    /// @notice Governance EOA: the Registry admin (fast deny-only levers) and the
-    ///         TimelockController's sole proposer/canceller.
+    error WrongChainId(uint256 actual, uint256 expected);
+
+    uint256 public constant ETHEREUM_MAINNET_CHAIN_ID = 1;
+    /// @notice Savings receives no launch revenue while dead seed shares dominate
+    ///         supply. Governance may raise this after meaningful organic TVL exists.
+    uint256 public constant INITIAL_SAVINGS_PROFIT_WEIGHT = 0;
+
+    /// @notice Privileged beta governance EOA: Registry admin and the
+    ///         TimelockController's sole proposer/canceller. Accepted trust assumption;
+    ///         migrate to a monitored Safe before meaningful TVL.
     address constant DEFAULT_ADMIN = 0xB2E999D531D45a9115dA7706adFc651999f3c1F1;
 
     /// @notice TimelockController minDelay. MUST stay strictly under
@@ -155,6 +171,9 @@ contract DeployScript is Script {
     }
 
     function run() external {
+        if (block.chainid != ETHEREUM_MAINNET_CHAIN_ID) {
+            revert WrongChainId(block.chainid, ETHEREUM_MAINNET_CHAIN_ID);
+        }
         vm.startBroadcast();
         Deployed memory d = _deployAndWire(msg.sender);
         _handOffRoles(d, msg.sender, DEFAULT_ADMIN);
@@ -263,16 +282,25 @@ contract DeployScript is Script {
 
         d.registry.addPool(address(d.wstethPool));
 
-        // Scored tokens + booster live on the Registry. sUSD8 earns 10× plain USD8;
-        // scoring starts now (the first setScoredToken effective at this block).
+        // Scored tokens + booster live on the Registry. USD8 earns 10× sUSD8
+        // (approximately 1.0 vs 0.1 score per whole token per day). Scoring starts
+        // now; these first setScoredToken calls create the canonical onchain rate
+        // histories that the offchain settlement computation reads at openBlock.
         d.registry.setScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE);
         d.registry.setScoredToken(IERC20(address(d.savings)), SUSD8_SCORE_RATE);
         d.registry.setBoosterNFT(USD8_BOOSTER);
 
-        // Route Treasury profit equally to sUSD8 and the cover pool. Both use explicit
-        // accounting hooks: the adapter checkpoints Morpho before pulling profit so
-        // pre-donation elapsed time cannot be recognized instantly.
-        d.treasury.setProfitReceiver(d.savingsAdapter, 1, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
+        // Register Morpho savings at zero launch weight: the irrecoverable seed
+        // shares must not own pre-TVL Treasury revenue. Governance can re-weight
+        // the adapter after meaningful organic deposits dilute the seed fraction.
+        // The adapter mode is preconfigured correctly for that later activation.
+        d.treasury
+            .setProfitReceiver(
+                d.savingsAdapter,
+                INITIAL_SAVINGS_PROFIT_WEIGHT,
+                Treasury.RevenueDistributionMode.ReceiveProfitDistribution
+            );
+        // Until savings is activated, all recurring Treasury revenue funds cover LPs.
         d.treasury
             .setProfitReceiver(address(d.wstethPool), 1, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
 
@@ -331,7 +359,7 @@ contract DeployScript is Script {
         console2.log("Implementation:    ", d.treasuryImpl);
         console2.log("Proxy:             ", address(d.treasury));
         console2.log("");
-        console2.log("=== Morpho Vault V2 sUSD8 ===");
+        console2.log("=== Morpho Vault V2 savings (share symbol sUSD8) ===");
         console2.log("Canonical factory: ", MORPHO_VAULT_V2_FACTORY);
         console2.log("Vault/share token: ", address(d.savings));
         console2.log("Savings adapter:   ", d.savingsAdapter);
@@ -350,7 +378,7 @@ contract DeployScript is Script {
         console2.log("=== DefiInsurance ===");
         console2.log("Address:           ", address(d.defiInsurance));
         console2.log("");
-        console2.log("=== Admin (fast deny-only levers) ===");
+        console2.log("=== Privileged beta admin (accepted trust assumption) ===");
         console2.log("Address:           ", admin);
     }
 }

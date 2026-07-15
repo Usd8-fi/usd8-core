@@ -9,8 +9,9 @@
 // Everything is read from chain state — there are no trusted inputs. The
 // per-incident config is reconstructed from contract state at the incident's
 // openBlock; pool balances/prices at the window-end block; the spent-score
-// ledger from ScoreSpent logs. Point RPC_URL at any archive node for the
-// relevant chain; see config.ts for the addresses and per-asset USD feeds.
+// ledger from ScoreSpent logs. Set DRPC_KEY for the default authenticated dRPC
+// Ethereum archive endpoint, or point RPC_URL at another archive node; see
+// config.ts for the addresses and per-asset USD feeds.
 
 import {
   makeClient,
@@ -34,16 +35,25 @@ import { RpcScoreSource } from "./score.js";
 // mirrors DefiInsurance.BOOSTER_ID.
 const BOOSTER_ID = 1n;
 
-function rpc(): string {
-  const u = process.env.RPC_URL;
-  if (!u) throw new Error("RPC_URL not set — point it at an archive node for the configured chain");
-  return u;
+const DRPC_ETHEREUM_URL = "https://lb.drpc.org/ogrpc?network=ethereum";
+
+function rpc(): { url: string; drpcKey?: string } {
+  const drpcKey = process.env.DRPC_KEY?.trim() || undefined;
+  const configuredUrl = process.env.RPC_URL?.trim() || undefined;
+  const url = configuredUrl ?? (drpcKey ? DRPC_ETHEREUM_URL : undefined);
+  if (!url) {
+    throw new Error(
+      "RPC not configured — set DRPC_KEY for dRPC Ethereum, or RPC_URL for another mainnet archive node"
+    );
+  }
+  return { url, drpcKey };
 }
 
 /** Recompute the full settlement for `incidentId`, and return the root the
  *  admin already submitted on-chain (0x0 if none yet) alongside it. */
 async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onchainRoot: `0x${string}` }> {
-  const client = makeClient(rpc());
+  const connection = rpc();
+  const client = makeClient(connection.url, connection.drpcKey);
 
   // Guard against pointing the tool at the wrong RPC: addresses can collide on a
   // fork/testnet and silently produce a misleading root.
