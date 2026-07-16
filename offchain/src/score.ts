@@ -1,8 +1,8 @@
-// Insurance-score sources. Phase 1 deliberately keeps the existing raw-RPC
-// replay as the canonical verifier while decoupling settlement math from how a
-// claimant's gross score is obtained. A future indexed/snapshot source only has
-// to implement {ScoreSource}; it must return the same pre-spend, pre-booster
-// gross score for the incident's pinned reference block.
+// Insurance-score sources. Raw RPC replay remains the canonical independent
+// verifier while settlement math is decoupled from how a claimant's gross score
+// is obtained. CheckpointScoreSource implements the same contract from an
+// authenticated global Transfer index and must return the identical pre-spend,
+// pre-booster gross score at the incident's pinned reference block.
 
 import type { PublicClient } from "viem";
 import { WAD, tokenBlockIntegral, type IncidentConfig } from "./chain.js";

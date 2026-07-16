@@ -17,6 +17,11 @@ docs/
 .DS_Store
 **/.DS_Store
 
-# Off-chain settlement package
+# Off-chain settlement packages
 offchain/node_modules/
 offchain/dist/
+offchain-rust/target/
+offchain-rust/**/__pycache__/
+offchain-rust/**/*.pyc
+offchain-rust/state/
+offchain-rust/artifacts/

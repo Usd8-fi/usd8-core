@@ -30,12 +30,16 @@ vi.mock("../src/chain.js", async (importOriginal) => {
 
 import * as chain from "../src/chain.js";
 import {
+  assertClaimSetMatches,
+  claimSetHashOf,
   settle,
   earnedScoreOf,
   settlementInputHashOf,
+  proofsFor,
   settlementTree,
   settlementTypedData,
   LEAF_ENCODING,
+  type Settlement,
 } from "../src/compute.js";
 import { RpcScoreSource } from "../src/score.js";
 import type { IncidentConfig, InputEvent } from "../src/chain.js";
@@ -441,6 +445,17 @@ describe("settlementTree / proofs", () => {
     }
   });
 
+  it("emits every claim proof in one bulk pass", () => {
+    const settlement = { incidentId: 1n, rows } as unknown as Settlement;
+    const proofs = proofsFor(settlement);
+    const tree = settlementTree(1n, rows);
+
+    expect([...proofs.keys()]).toEqual([1n, 2n]);
+    for (const [i, value] of tree.entries()) {
+      expect(proofs.get((value as unknown as any[])[1] as bigint)).toEqual(tree.getProof(i));
+    }
+  });
+
   it("root is deterministic and changes with amounts, scoreSpent, or eligible", () => {
     const base = settlementTree(1n, rows).root;
     expect(settlementTree(1n, rows).root).toEqual(base);
@@ -566,5 +581,22 @@ describe("earnedScoreOf — decimal normalization (F6)", () => {
     // A 6-dec token's raw integral must scale up by 1e12 vs an 18-dec token's, so
     // the same *whole-token* holding scores the same regardless of token decimals.
     expect(await at(6)).toBe((await at(18)) * 10n ** 12n);
+  });
+});
+
+describe("assertClaimSetMatches", () => {
+  it("rejects a replayed claim-set hash that differs from on-chain state", () => {
+    const events = [reg(1n, BOB, 100n * WAD, 60n)];
+    const wrongHash = `0x${"0".repeat(64)}` as const;
+
+    expect(() => assertClaimSetMatches(events, 1n, wrongHash)).toThrow("claim-set hash mismatch");
+  });
+
+  it("rejects a replayed live-claim count that differs from on-chain unresolved", () => {
+    const events = [reg(1n, BOB, 100n * WAD, 60n)];
+
+    expect(() => assertClaimSetMatches(events, 2n, claimSetHashOf(events))).toThrow(
+      "unresolved claim count mismatch"
+    );
   });
 });

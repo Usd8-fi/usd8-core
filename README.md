@@ -263,7 +263,7 @@ sum(P_i) <= B
 
 A deterministic capped water-filling calculation selects `lambda`. Claims that reach their cap are removed first; the remaining budget is redistributed by weight. Integer dust remains in the pools. Each payout is then split across the snapshotted cover pools in proportion to their USD value while respecting each pool's incident cap.
 
-The settlement code builds one Merkle root over the exact claim set and payout rows. Any authorized TEE signer may sign it, anyone may submit it, and anyone may independently reproduce it. Detailed replay, allocation, oracle, and CLI behavior is documented in [`offchain/README.md`](offchain/README.md).
+The settlement code builds one Merkle root over the exact claim set and payout rows. Any authorized TEE signer may sign it, anyone may submit it, and anyone may independently reproduce it. The Rust production runtime and operations are documented in [`offchain-rust/README.md`](offchain-rust/README.md); [`offchain/README.md`](offchain/README.md) documents the temporary TypeScript differential oracle.
 
 <br/><br/><br/><br/>
 
@@ -287,12 +287,13 @@ src/
   adapters/USD8SavingsAdapter.sol
   strategies/ERC4626Strategy.sol
 
-offchain/
-  src/score.ts                  historical insurance-score calculation
-  src/compute.ts                settlement and payout allocation
-  src/chain.ts                  pinned chain reads and oracle validation
-  src/main.ts                   compute/verify CLI
-  README.md                     settlement implementation details
+offchain-rust/
+  src/                          production settlement runtime and FFI
+  README.md                     operations, trust model, and recovery
+
+offchain/                       TypeScript CI/shadow oracle; not production
+  src/compute.ts                independent settlement oracle
+  src/chain.ts                  independent pinned-read oracle
 
 script/Deploy.s.sol             mainnet deployment and initial wiring
 test/                           Foundry tests
@@ -304,7 +305,8 @@ offchain/test/                  Vitest settlement tests
 ### Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `cast`, `anvil`)
-- Node.js and npm for the off-chain settlement package
+- Rust 1.91.1 for the production settlement runtime
+- Node.js 22.22.3 and npm only for differential-oracle tests
 
 ### Install and build
 
@@ -314,8 +316,12 @@ cd usd8-core
 forge install
 forge build
 
-cd offchain
-npm ci
+cd offchain-rust
+cargo build --release --locked
+
+# Optional: build the TypeScript differential oracle.
+cd ../offchain
+npm ci --include=dev
 npm run build
 ```
 
@@ -325,14 +331,20 @@ npm run build
 # Solidity
 forge test
 
-# Off-chain settlement
-cd offchain
+# Rust production runtime
+cd offchain-rust
+cargo test --locked
+cargo build --release --locked
+
+# TypeScript differential oracle
+cd ../offchain
 npm test
 
-# Cross-language settlement integration
+# Both contract-integration lanes
 npm run build
 cd ..
-RUN_INTEGRATION=1 forge test --ffi --match-path test/SettlementIntegration.t.sol -vv
+RUN_INTEGRATION=1 USE_RUST_FFI=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
+RUN_INTEGRATION=1 USE_RUST_FFI=0 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 ```
 
 ### Format

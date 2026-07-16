@@ -1,5 +1,16 @@
 import { describe, it, expect } from "vitest";
-import { getLogsChunked, makeClient, priceUsd1e18 } from "../src/chain.js";
+import {
+  assertBlockAnchorsUnchanged,
+  assertContractCodeAt,
+  finalizedSettlementAnchors,
+  getLogsChunked,
+  makeClient,
+  minBalanceOver,
+  priceUsd1e18,
+  ratioAt,
+  rpcMetricsOf,
+  tokenBlockIntegral,
+} from "../src/chain.js";
 import { LOG_RESULT_CAP, MAX_LOG_RANGE, MAX_ORACLE_STALENESS } from "../src/config.js";
 
 const CAP = Number(LOG_RESULT_CAP);
@@ -25,8 +36,14 @@ function truncatingClient(logs: { blockNumber: bigint; logIndex: number }[], cap
 const key = (l: { blockNumber: bigint; logIndex: number }) => `${l.blockNumber}:${l.logIndex}`;
 const Q = { address: "0x0000000000000000000000000000000000000001" as const, event: {} };
 const ORACLE = "0x0000000000000000000000000000000000000002" as const;
+const blockHash = (n: bigint) => `0x${n.toString(16).padStart(64, "0")}` as `0x${string}`;
 
 describe("makeClient — authenticated single dRPC endpoint", () => {
+  it("rejects an invalid transport timeout", () => {
+    expect(() => makeClient("https://rpc.example", undefined, 0)).toThrow(/timeout/);
+    expect(() => makeClient("https://rpc.example", undefined, 1.5)).toThrow(/timeout/);
+  });
+
   it.each([
     "https://arbitrary.example",
     "http://lb.drpc.org/ogrpc?network=ethereum",
@@ -61,9 +78,117 @@ describe("makeClient — authenticated single dRPC endpoint", () => {
       expect(receivedUrl).toBe(endpoint);
       expect(receivedUrl).not.toContain("test-drpc-key");
       expect(receivedRedirect).toBe("error");
+      expect(rpcMetricsOf(client)).toMatchObject({
+        rpcRequests: 1,
+        transportRequests: 1,
+        transportResponses: 1,
+        transportRetries: 0,
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("counts transport retries separately from logical RPC calls", async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async (input, init) => {
+      attempts++;
+      if (attempts === 1) return new Response("temporary", { status: 500 });
+      const request = new Request(input, init);
+      const body = JSON.parse(await request.text()) as { id: number };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: "0x1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const client = makeClient("https://rpc.example", undefined);
+      await expect(client.getChainId()).resolves.toBe(1);
+      expect(rpcMetricsOf(client)).toMatchObject({
+        rpcRequests: 1,
+        transportRequests: 2,
+        transportResponses: 2,
+        transportRetries: 1,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("finalized settlement anchors", () => {
+  it("finds the last in-window block under the finalized head and records every anchor hash", async () => {
+    const client = {
+      getBlock: async ({ blockNumber, blockTag }: { blockNumber?: bigint; blockTag?: string }) => {
+        const number = blockTag === "finalized" ? 10n : blockNumber!;
+        return { number, timestamp: number * 12n, hash: blockHash(number) };
+      },
+    } as any;
+
+    const anchors = await finalizedSettlementAnchors(client, 3n, 4n, 65n);
+
+    expect(anchors.reference).toEqual({ number: 3n, timestamp: 36n, hash: blockHash(3n) });
+    expect(anchors.open).toEqual({ number: 4n, timestamp: 48n, hash: blockHash(4n) });
+    expect(anchors.windowEnd).toEqual({ number: 5n, timestamp: 60n, hash: blockHash(5n) });
+    expect(anchors.finalizedHead).toEqual({ number: 10n, timestamp: 120n, hash: blockHash(10n) });
+  });
+
+  it("fails closed when an anchor hash changes before output", async () => {
+    const hashes = new Map<bigint, `0x${string}`>();
+    const client = {
+      getBlock: async ({ blockNumber, blockTag }: { blockNumber?: bigint; blockTag?: string }) => {
+        const number = blockTag === "finalized" ? 10n : blockNumber!;
+        return { number, timestamp: number * 12n, hash: hashes.get(number) ?? blockHash(number) };
+      },
+    } as any;
+    const anchors = await finalizedSettlementAnchors(client, 3n, 4n, 65n);
+    hashes.set(5n, `0x${"ff".repeat(32)}`);
+
+    await expect(assertBlockAnchorsUnchanged(client, anchors)).rejects.toThrow(/anchor hash changed.*windowEnd/);
+  });
+
+  it("refuses to compute before the claim-window boundary is finalized", async () => {
+    const client = {
+      getBlock: async ({ blockNumber, blockTag }: { blockNumber?: bigint; blockTag?: string }) => {
+        const number = blockTag === "finalized" ? 5n : blockNumber!;
+        return { number, timestamp: number * 12n, hash: blockHash(number) };
+      },
+    } as any;
+
+    await expect(finalizedSettlementAnchors(client, 3n, 4n, 65n)).rejects.toThrow(/claim window is not finalized/);
+  });
+});
+
+describe("contract-code bootstrap checks", () => {
+  it("accepts deployed code and rejects EOAs or empty historical addresses", async () => {
+    const deployed = { getBytecode: async () => "0x6000" } as any;
+    const empty = { getBytecode: async () => "0x" } as any;
+
+    await expect(assertContractCodeAt(deployed, Q.address, "Registry", 10n)).resolves.toBeUndefined();
+    await expect(assertContractCodeAt(empty, Q.address, "Registry", 10n)).rejects.toThrow(/Registry.*no bytecode.*10/);
+  });
+});
+
+describe("ratioAt — conversion returndata validation", () => {
+  const conversion = "0x0000000000000000000000000000000000000003" as const;
+  const callData = "0x12345678" as const;
+
+  it.each([
+    ["empty", undefined],
+    ["short", "0x01"],
+    ["long", `0x${"01".repeat(33)}`],
+    ["zero", `0x${"00".repeat(32)}`],
+  ])("fails closed on %s conversion returndata", async (_name, data) => {
+    const client = { call: async () => ({ data }) } as any;
+    await expect(ratioAt(client, conversion, callData, 10n)).rejects.toThrow(/conversion.*return|non-positive/i);
+  });
+
+  it("decodes one ABI uint256", async () => {
+    const data = `0x${(2n * 10n ** 18n).toString(16).padStart(64, "0")}` as const;
+    const client = { call: async () => ({ data }) } as any;
+    await expect(ratioAt(client, conversion, callData, 10n)).resolves.toBe(2n * 10n ** 18n);
   });
 });
 
@@ -99,6 +224,12 @@ describe("getLogsChunked — M-01 truncation safety", () => {
     expect(got.length).toBe(n);
     expect(new Set(got.map(key)).size).toBe(n); // no drops, no dupes
     expect(client.requests.length).toBeGreaterThan(1); // bisection happened
+    expect(rpcMetricsOf(client)).toMatchObject({
+      logRequests: client.requests.length,
+      logBisections: expect.any(Number),
+      logErrors: 0,
+    });
+    expect(rpcMetricsOf(client).logBisections).toBeGreaterThan(0);
   });
 
   it("FAILS CLOSED when a single block returns a full (possibly truncated) page", async () => {
@@ -196,5 +327,25 @@ describe("priceUsd1e18 — L-02 pinned-block round validity", () => {
     const blockTs = 100_000n;
     const client = oracleClient({ updatedAt: blockTs - MAX_ORACLE_STALENESS - 1n, blockTs });
     await expect(priceUsd1e18(client, ORACLE, 123n)).rejects.toThrow(/stale/);
+  });
+});
+
+describe("ERC-20 balance replay — L-02 semantic safety", () => {
+  const hiddenBalanceChangeClient = () =>
+    ({
+      readContract: async ({ blockNumber }: { blockNumber: bigint }) => (blockNumber === 10n ? 100n : 110n),
+      getLogs: async () => [],
+    }) as any;
+
+  it("fails closed when eligibility balance changes without a Transfer event", async () => {
+    await expect(minBalanceOver(hiddenBalanceChangeClient(), Q.address, ORACLE, 10n, 20n)).rejects.toThrow(
+      /unsupported token balance semantics/
+    );
+  });
+
+  it("fails closed when score balance changes without a Transfer event", async () => {
+    await expect(tokenBlockIntegral(hiddenBalanceChangeClient(), Q.address, ORACLE, 10n, 20n)).rejects.toThrow(
+      /unsupported token balance semantics/
+    );
   });
 });

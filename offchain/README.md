@@ -1,11 +1,13 @@
-# USD8 — off-chain settlement computation
+# USD8 — TypeScript settlement differential oracle
 
-When a covered DeFi incident is opened, this computation produces the
-claim-payout **merkle root**. In production it runs inside a TEE whose key
-signs the result (EIP-712 `Settlement`, see `settlementTypedData` in
-`compute.ts`), so anyone can submit it on-chain
-(`DefiInsurance.settleIncident`) — the sole settlement path. The tool is fully
-open-source and deterministic.
+> **Migration status:** this Node package is retained only for CI differential
+> tests and temporary shadow verification. Production uses the Rust runtime in
+> [`../offchain-rust`](../offchain-rust/README.md). Do not deploy this package as
+> the signer runtime.
+
+This package independently reproduces the claim-payout **merkle root** and
+EIP-712 `Settlement` digest. It remains open-source and deterministic so Rust
+outputs can be checked against a separately implemented oracle.
 
 There is **no trusted operator and no special hardware**. Everything the
 computation needs is read from chain state (the per-incident config,
@@ -18,13 +20,13 @@ claim set; pool balances and prices), so **anyone can run it locally** to:
   submitted on-chain matches. If it doesn't, the root is wrong and can be
   disputed within the dispute window.
 
-## Install
+## Install the oracle
 
-Requires Node.js 20+.
+Requires Node.js 22.22.3 (the version pinned in CI and package metadata).
 
 ```bash
 cd offchain
-npm install
+npm ci --include=dev
 npm run build      # compiles src/ → dist/
 ```
 
@@ -44,7 +46,7 @@ export const CONFIG = {
 };
 ```
 
-Set `DRPC_KEY` for the production dRPC Ethereum endpoint. The key is sent in
+Set `DRPC_KEY` for a live oracle shadow against dRPC Ethereum. The key is sent in
 the `Drpc-Key` HTTP header to dRPC's documented
 `https://lb.drpc.org/ogrpc?network=ethereum` endpoint, never embedded in the URL
 or printed. dRPC archive access is required because settlement reads historical
@@ -65,11 +67,36 @@ export RPC_URL="https://..."
 unset DRPC_KEY
 ```
 
-The RPC chain id is verified against Ethereum mainnet (`1`) at startup. Log
+The RPC chain id is verified against Ethereum mainnet (`1`) at startup. Registry,
+DefiInsurance, pools, and configured price feeds must contain bytecode at their
+pinned historical blocks. Log
 queries use bounded ranges, recursively bisect full pages, and now also bisect
-explicit timeout/range/result-size errors. A single-block ambiguity fails closed.
+explicit timeout/range/result-size errors. HTTP requests have a 30-second timeout;
+claimant reads use at most eight concurrent requests. A single-block ambiguity
+fails closed.
 
-## Run
+### Optional authenticated score checkpoint
+
+Raw historical replay remains the default independent verifier. The oracle can
+index each scored token's global `Transfer` stream once and advance it at later
+finalized reference blocks:
+
+```bash
+export SCORE_CHECKPOINT_PATH="/sealed-state/usd8-score-index.json"
+# Inject from KMS/TEE secret state. Exactly 32 bytes encoded as 64 hex characters.
+export SCORE_CHECKPOINT_HMAC_KEY="..."
+```
+
+Both variables are required together. Checkpoints are atomically replaced,
+process-locked, HMAC-authenticated, bound to chain id and block hash, and rejected
+if token decimals or rate history diverge. The HMAC key is never printed or
+persisted. Checkpoint cursors advance monotonically; unset both variables and use
+raw mode when verifying an older incident whose reference block precedes the
+stored cursor. After a process crash, remove a leftover `.lock` file only after
+confirming no indexer process is still running. Keep raw mode for independent
+recomputation.
+
+## Run the oracle
 
 ```bash
 # Verify the admin's submitted root for incident 1 (the common case):
@@ -85,7 +112,10 @@ npm run compute 1
 claimant passes to `DefiInsurance.finalizeClaim`. It also publishes the
 canonical, address-sorted `(user, grossEarnedScore)` rows and their
 `settlementInputHash`; this is the per-incident input commitment included in
-the TEE's EIP-712 signature.
+the TEE's EIP-712 signature. Output also records finalized reference/open/window
+block hashes; score-source metadata; logical RPC requests; HTTP attempts,
+responses, and retries; log bisections/errors/peak concurrency/elapsed time; and
+spent-score read count/concurrency/elapsed time.
 
 Each insured token also carries a non-zero `minClaimAmount` in token base
 units. The contract enforces it against the escrow actually received before a
@@ -110,11 +140,12 @@ and maximum-load tests.
    `joinClaim` escrows the submitted amount later; finalization forfeits only the
    eligible portion and refunds any excess escrow. Loss remains priced at the
    pre-incident `referenceBlock`.
-4. **Score**: each holder's earned insurance score **as of `referenceBlock`**
-   (token·block integral of the scored tokens, plus committed boosters — capped
-   at the claimant's min booster balance over `[joinBlock, windowEnd]`), minus
-   already-spent score summed from `ScoreSpent` logs (pinned before `openBlock`),
-   capped to what the claim requested → `scoreSpent`. This is one input to the
+4. **Score**: each holder's gross earned insurance score **as of `referenceBlock`**
+   (token·block integral of the scored tokens), minus cumulative spent score read
+   from `Registry.scoreSpent` at the end of `openBlock`; then committed boosters
+   multiply only the unspent remainder and are capped at the claimant's minimum
+   booster balance over `[joinBlock, windowEnd]`. The requested amount is capped
+   to that availability → `scoreSpent`. This is one input to the
    geometric allocation weight, not the sole payout weight. Pinning to
    `referenceBlock` stops anyone farming fresh score during the claim window.
 5. **Covered need**: `claimCapUsd = floor(κ × lossUsd)`. This is both an input
@@ -144,8 +175,10 @@ P_i = min(C_i, lambda * W_i)
 
 The breaking allocator change introduced `CONFIG_VERSION = "4.0.0"`.
 Per-insured-token minimum claims use `4.1.0`; strict oracle-round validation uses
-`4.2.0`. The version is part of `configHash`, preventing builds with different
-settlement acceptance rules from carrying the same configuration commitment.
+`4.2.0`; replay-consistency checks use `4.3.0`; finalized anchors and authenticated
+score checkpoints use `4.4.0`; booster-policy commitments use `4.5.0`. The version is part of
+`configHash`, preventing builds with different settlement acceptance rules from carrying the same
+configuration commitment.
 
 The square root gives need and score equal influence in log space and diminishing
 returns to accumulated score. Four times the spent score gives twice the weight.
@@ -170,11 +203,11 @@ redistributed after settlement.
 
 The root README contains the policy rationale and worked example.
 
-Phase 1 obtains gross score through `RpcScoreSource`, which preserves the exact
-raw historical-RPC replay. The payout computation depends only on the
-`ScoreSource` interface, so a future indexed snapshot can replace the transport
-without changing score arithmetic, payout math, or the canonical signed input
-rows.
+Gross score uses `RpcScoreSource` by default. `CheckpointScoreSource` produces
+the same numerator arithmetic from a persistent global Transfer index, including
+one final WAD division across all tokens and no extra decimal rounding at
+checkpoint boundaries. Both feed the same `ScoreSource` interface, payout math,
+and canonical signed input rows.
 
 All tunable parameters (coverage κ, TWAP/holding windows, the conversion recipe,
 the underlying oracle, the scored-token set) are read from contract state at the
@@ -203,16 +236,18 @@ silently pricing a claim from an impossible or outdated timestamp.
 Two layers:
 
 ```bash
-# 1. Unit tests — the settlement algorithm (payout math, score/booster cap,
-#    merkle encoding) over stubbed chain reads. Fast, no RPC.
-npm test
+# 1. Unit + ABI-parity tests — settlement math, RPC/index safety,
+#    merkle encoding, and handwritten ABI semantics. Fast and no live RPC,
+#    but ABI parity needs fresh Foundry artifacts.
+cd .. && forge build
+cd offchain && npm test
 
-# 2. Cross-language integration — drives a real incident in Foundry, then uses
-#    THIS package (via FFI) to produce the root / proofs and proves they
-#    settle and pay each claimant exactly the off-chain amounts. Requires the
-#    build artifacts and is opt-in:
+# 2. Cross-language integration — Rust is primary; this package is the explicit
+#    independent oracle lane. Both must drive the same contract outcomes:
 npm run build
-cd .. && RUN_INTEGRATION=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
+cd ..
+RUN_INTEGRATION=1 USE_RUST_FFI=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
+RUN_INTEGRATION=1 USE_RUST_FFI=0 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 ```
 
 The integration test is skipped by a plain `forge test` (no `--ffi`, no env), so
@@ -225,6 +260,9 @@ src/config.ts    contract addresses + per-asset USD feeds (the only thing to edi
 src/chain.ts     read-only RPC helpers (events, prices, balances, config)
 src/compute.ts   the settlement algorithm (pure, given the chain reads)
 src/score.ts     ScoreSource abstraction + Phase-1 raw-RPC implementation
+src/checkpointScore.ts authenticated persistent global Transfer score index
+src/runtime.ts   bounded claimant reads + checkpoint environment parsing
+src/abiParity.ts semantic parity check against Foundry artifacts
 src/ffi.ts       FFI bridge used by the Foundry integration test
 src/main.ts      the compute / verify CLI
 test/            Vitest unit tests

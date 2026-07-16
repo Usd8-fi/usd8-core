@@ -1,0 +1,101 @@
+{
+  "date": "2026-07-15",
+  "dataset": {
+    "chainId": 1,
+    "source": "Ethereum mainnet via dRPC archive JSON-RPC",
+    "startBlock": 24886575,
+    "startTimestamp": 1776272471,
+    "startBlockHash": "0xe608b4ba12e41b12a6bacf955be14a32961fc537085eb72c1a512dc059e694f5",
+    "endBlock": 25539412,
+    "endTimestamp": 1784134871,
+    "endBlockHash": "0xeacd58840402275233f55e866fcce3832e684aa70915953793b880f6a85ca3a0",
+    "blockSpan": 652837,
+    "candidateDiscovery": {
+      "sampledBlocks": 91,
+      "sampledTransferLogs": 18095,
+      "uniqueActiveAddresses": 17341,
+      "selection": "SHA-256-seeded ordering, retain addresses with eth_getCode(endBlock) == 0x",
+      "addressesCodeChecked": 1500,
+      "selectedEoas": 1000,
+      "limitation": "Candidate discovery sampled 91 evenly spaced blocks; it did not enumerate every globally active address. Complete histories were then fetched for every selected address."
+    },
+    "historyCollection": {
+      "semantics": "balanceOf(startBlock) plus complete USDC/USDT Transfer replay over (startBlock,endBlock], integrated over [startBlock,endBlock)",
+      "usdcUniqueLogs": 717665,
+      "usdtUniqueLogs": 1187480,
+      "archiveEndBalanceChecks": 2000,
+      "archiveEndBalanceMismatches": 0,
+      "resultCapFailClosed": 20000
+    },
+    "scoreModel": {
+      "usdcAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "usdcProxyRole": "USD8",
+      "usdcDecimals": 6,
+      "usdcRatePerTokenBlockWad": "138888888888889",
+      "usdtAddress": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "usdtProxyRole": "sUSD8",
+      "usdtDecimals": 6,
+      "usdtRatePerTokenBlockWad": "13888888888889",
+      "rounding": "sum all scaled token-integral times rate numerators, then floor-divide by 1e18 once",
+      "positiveScoreUsers": 966,
+      "zeroScoreUsers": 34,
+      "medianScoreRaw": "2369263712837116176331",
+      "p90ScoreRaw": "6865134093700136424171835",
+      "maxScoreRaw": "2794676951920477150575715657"
+    },
+    "syntheticClaims": {
+      "count": 1000,
+      "amountMethod": "100 + first 8 bytes of SHA-256(address) modulo 9901 whole USD, represented with 18 decimals",
+      "minimumUsd": 115,
+      "medianUsd": 4975,
+      "maximumUsd": 9987,
+      "totalUsd": 4991894,
+      "poolBudgetUsd": 998378,
+      "spentScore": 0,
+      "booster": 0,
+      "eligibility": "minHeld equals synthetic escrow amount"
+    },
+    "historyArtifact": {
+      "path": "real-usdc-usdt-history-2026-04-15_2026-07-15.json",
+      "bytes": 816790,
+      "sha256": "0f49267fe7db18214d663a6247c596aba2b592491491f6d9ed48a9d23a73744f"
+    },
+    "fixtureArtifact": {
+      "path": "fixtures/real-usdc-usdt-1000.json",
+      "bytes": 364332,
+      "sha256": "14ebc532d34d75031f9731f165074b32879ae2b49131d3e7b177a6a546d28c8d"
+    }
+  },
+  "parity": {
+    "matched": true,
+    "claims": 1000,
+    "root": "0x4216cbef89ae8ea2a7b5231d10fb00d68e9a624e71af40ceada40896c54f1eb4",
+    "compared": "all rows, pool payouts, claim-set hash, settlement-input hash, root, and every proof"
+  },
+  "warm": {
+    "iterationsPerSample": 10,
+    "samples": 7,
+    "warmupIterations": 3,
+    "typescriptMedianNs": 513368783.3,
+    "rustMedianNs": 4599750,
+    "speedup": 111.60797506386217,
+    "typescriptSamplesNs": [507962729.1, 515641687.5, 507937825, 515169833.4, 513368783.3, 513076508.3, 531603325],
+    "rustSamplesNs": [4645454.2, 4691458.3, 4517766.6, 4500950, 4599750, 4519370.8, 4621262.5]
+  },
+  "cold": {
+    "samples": 7,
+    "typescriptMedianMs": 589.670083,
+    "rustMedianMs": 11.31616699999995,
+    "speedup": 52.10864093822604,
+    "typescriptSamplesMs": [601.331375, 583.5951249999999, 589.670083, 592.4663749999997, 591.1348329999996, 586.432292, 585.1097089999998],
+    "rustSamplesMs": [11.193667000000005, 11.452416999999969, 11.177832999999964, 11.001459000000068, 11.45812500000011, 11.31616699999995, 11.782874999999876]
+  },
+  "peakRss": {
+    "typescriptBytes": 113475584,
+    "typescriptMiB": 108.21875,
+    "rustBytes": 6914048,
+    "rustMiB": 6.59375,
+    "typescriptToRustRatio": 16.412322274881518
+  },
+  "scope": "Historical score input is real USDC/USDT mainnet balance history for the selected cohort. Claim loss amounts, score-spend choice, eligibility balances, booster values, and cover-pool budget remain synthetic."
+}

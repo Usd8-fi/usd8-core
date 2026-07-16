@@ -1,7 +1,14 @@
 // All chain reads. Plain read-only RPC calls against a public archive node.
 
-import { createPublicClient, http, parseAbi, parseAbiItem, type PublicClient } from "viem";
-import { CONFIG, MAX_ORACLE_STALENESS, MAX_LOG_RANGE, LOG_RESULT_CAP } from "./config.js";
+import {
+  createPublicClient,
+  decodeAbiParameters,
+  http,
+  parseAbi,
+  parseAbiItem,
+  type PublicClient,
+} from "viem";
+import { CONFIG, DEFAULT_RPC_TIMEOUT_MS, MAX_ORACLE_STALENESS, MAX_LOG_RANGE, LOG_RESULT_CAP } from "./config.js";
 
 export const WAD = 10n ** 18n;
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
@@ -82,7 +89,10 @@ export interface IncidentConfig {
 
 const TRUSTED_DRPC_HOSTS = new Set(["lb.drpc.org", "lb.drpc.live"]);
 
-export function makeClient(rpcUrl: string, drpcKey?: string): PublicClient {
+export function makeClient(rpcUrl: string, drpcKey?: string, timeoutMs = DEFAULT_RPC_TIMEOUT_MS): PublicClient {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`RPC timeout must be a positive integer, got ${timeoutMs}`);
+  }
   if (drpcKey) {
     let endpoint: URL;
     try {
@@ -100,17 +110,53 @@ export function makeClient(rpcUrl: string, drpcKey?: string): PublicClient {
       throw new Error(`refusing to send DRPC_KEY to untrusted RPC endpoint ${endpoint.origin}`);
     }
   }
-  return createPublicClient({
-    transport: http(rpcUrl, {
-      retryCount: 5,
-      // JSON-RPC endpoints should not redirect. Failing redirects also prevents
-      // Drpc-Key from being forwarded to a different origin by fetch.
-      fetchOptions: {
-        redirect: "error",
-        ...(drpcKey ? { headers: { "Drpc-Key": drpcKey } } : {}),
-      },
-    }),
+  const metrics = freshRpcMetrics();
+  const baseTransport = http(rpcUrl, {
+    retryCount: 5,
+    timeout: timeoutMs,
+    onFetchRequest: () => {
+      metrics.transportRequests++;
+    },
+    onFetchResponse: () => {
+      metrics.transportResponses++;
+    },
+    // JSON-RPC endpoints should not redirect. Failing redirects also prevents
+    // Drpc-Key from being forwarded to a different origin by fetch.
+    fetchOptions: {
+      redirect: "error",
+      ...(drpcKey ? { headers: { "Drpc-Key": drpcKey } } : {}),
+    },
   });
+  const instrumentedTransport: typeof baseTransport = (options) => {
+    const transport = baseTransport(options);
+    return {
+      ...transport,
+      request: async (request, requestOptions) => {
+        metrics.rpcRequests++;
+        try {
+          return await transport.request(request, requestOptions);
+        } finally {
+          metrics.transportRetries = Math.max(0, metrics.transportRequests - metrics.rpcRequests);
+        }
+      },
+    };
+  };
+  const client = createPublicClient({ transport: instrumentedTransport });
+  RPC_METRICS.set(client as object, metrics);
+  return client;
+}
+
+/** Confirm a configured address is a contract at the exact historical anchor. */
+export async function assertContractCodeAt(
+  client: PublicClient,
+  address: `0x${string}`,
+  label: string,
+  blockNumber: bigint
+): Promise<void> {
+  const bytecode = await client.getBytecode({ address, blockNumber });
+  if (!bytecode || bytecode === "0x") {
+    throw new Error(`${label} ${address} has no bytecode at block ${blockNumber}`);
+  }
 }
 
 /** One register-or-cancel event, in true chain order. */
@@ -147,6 +193,54 @@ function orderLogs<T extends { blockNumber: bigint; logIndex: number }>(a: T, b:
 // sign a possibly-truncated result.
 type LogQuery = { address: `0x${string}`; event: unknown; args?: Record<string, unknown> };
 
+export interface RpcMetrics {
+  rpcRequests: number;
+  transportRequests: number;
+  transportResponses: number;
+  transportRetries: number;
+  logRequests: number;
+  logBisections: number;
+  logErrors: number;
+  logMaxActive: number;
+  logElapsedMs: number;
+}
+
+interface MutableRpcMetrics extends RpcMetrics {
+  active: number;
+}
+
+const RPC_METRICS = new WeakMap<object, MutableRpcMetrics>();
+
+function freshRpcMetrics(): MutableRpcMetrics {
+  return {
+    rpcRequests: 0,
+    transportRequests: 0,
+    transportResponses: 0,
+    transportRetries: 0,
+    logRequests: 0,
+    logBisections: 0,
+    logErrors: 0,
+    logMaxActive: 0,
+    logElapsedMs: 0,
+    active: 0,
+  };
+}
+
+function mutableRpcMetrics(client: PublicClient): MutableRpcMetrics {
+  let metrics = RPC_METRICS.get(client as object);
+  if (!metrics) {
+    metrics = freshRpcMetrics();
+    RPC_METRICS.set(client as object, metrics);
+  }
+  return metrics;
+}
+
+/** Snapshot of logical, transport-level, and historical-log RPC work. */
+export function rpcMetricsOf(client: PublicClient): RpcMetrics {
+  const { active: _active, ...snapshot } = mutableRpcMetrics(client);
+  return snapshot;
+}
+
 export async function getLogsChunked(
   client: PublicClient,
   q: LogQuery,
@@ -162,20 +256,38 @@ export async function getLogsChunked(
 }
 
 async function getLogsBisect(client: PublicClient, q: LogQuery, fromBlock: bigint, toBlock: bigint): Promise<any[]> {
-  let logs: any[];
+  const metrics = mutableRpcMetrics(client);
+  metrics.logRequests++;
+  metrics.active++;
+  metrics.logMaxActive = Math.max(metrics.logMaxActive, metrics.active);
+  const started = performance.now();
+
+  let logs: any[] = [];
+  let requestFailed = false;
+  let requestError: unknown;
   try {
     logs = (await client.getLogs({ ...q, fromBlock, toBlock } as any)) as any[];
   } catch (error) {
+    requestFailed = true;
+    requestError = error;
+    metrics.logErrors++;
+  } finally {
+    metrics.active--;
+    metrics.logElapsedMs += performance.now() - started;
+  }
+
+  if (requestFailed) {
     // dRPC and other providers reject expensive eth_getLogs ranges with an
     // explicit timeout/range/result-size error. Treat that as pagination
     // feedback and bisect; auth, malformed-query, and unrelated failures remain
     // fatal rather than causing an unbounded retry tree.
-    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const message = requestError instanceof Error ? `${requestError.name}: ${requestError.message}` : String(requestError);
     const rangeLimited = /\b408\b|request timeout|timed?\s*out|query duration|block range|range (?:is )?too (?:large|wide)|too many results|result(?:s| set)? (?:size|limit)|response (?:size|too large)/i.test(
       message
     );
-    if (!rangeLimited || fromBlock === toBlock) throw error;
+    if (!rangeLimited || fromBlock === toBlock) throw requestError;
 
+    metrics.logBisections++;
     const mid = fromBlock + (toBlock - fromBlock) / 2n;
     const lo = await getLogsBisect(client, q, fromBlock, mid);
     const hi = await getLogsBisect(client, q, mid + 1n, toBlock);
@@ -186,6 +298,7 @@ async function getLogsBisect(client: PublicClient, q: LogQuery, fromBlock: bigin
   if (logs.length < LOG_RESULT_CAP) return logs;
   // A full page might have been silently capped. Split and retry to page it all in.
   if (fromBlock < toBlock) {
+    metrics.logBisections++;
     const mid = fromBlock + (toBlock - fromBlock) / 2n;
     const lo = await getLogsBisect(client, q, fromBlock, mid);
     const hi = await getLogsBisect(client, q, mid + 1n, toBlock);
@@ -398,11 +511,19 @@ export async function spentScoreOf(client: PublicClient, user: `0x${string}`, bl
  * All settlement reads anchor on deterministic blocks (openBlock, window-end) so
  * the computation is reproducible by anyone at any later time.
  */
-export async function blockAtOrBeforeTimestamp(client: PublicClient, ts: bigint): Promise<bigint> {
+export async function blockAtOrBeforeTimestamp(
+  client: PublicClient,
+  ts: bigint,
+  upperBound?: bigint
+): Promise<bigint> {
   let lo = 1n;
-  let hi = await client.getBlockNumber();
+  let hi = upperBound ?? (await client.getBlockNumber());
   if ((await client.getBlock({ blockNumber: hi })).timestamp < ts) {
-    throw new Error(`timestamp ${ts} is in the future`);
+    throw new Error(
+      upperBound === undefined
+        ? `timestamp ${ts} is in the future`
+        : `timestamp ${ts} is later than finalized block ${hi}`
+    );
   }
   while (lo < hi) {
     const mid = (lo + hi + 1n) / 2n; // upper mid: converge toward the MAX in-window block
@@ -411,6 +532,74 @@ export async function blockAtOrBeforeTimestamp(client: PublicClient, ts: bigint)
     else hi = mid - 1n;
   }
   return lo;
+}
+
+export interface BlockAnchor {
+  number: bigint;
+  timestamp: bigint;
+  hash: `0x${string}`;
+}
+
+export interface SettlementAnchors {
+  reference: BlockAnchor;
+  open: BlockAnchor;
+  windowEnd: BlockAnchor;
+  finalizedHead: BlockAnchor;
+}
+
+async function readBlockAnchor(client: PublicClient, blockNumber: bigint): Promise<BlockAnchor> {
+  const block = await client.getBlock({ blockNumber });
+  if (block.number === null || block.hash === null) throw new Error(`block ${blockNumber} is missing number or hash`);
+  return { number: block.number, timestamp: block.timestamp, hash: block.hash };
+}
+
+/** Resolve every settlement block under Ethereum's finalized head. No root is
+ * computed while the claim-window boundary can still be reorged. */
+export async function finalizedSettlementAnchors(
+  client: PublicClient,
+  referenceBlock: bigint,
+  openBlock: bigint,
+  windowEndTimestamp: bigint
+): Promise<SettlementAnchors> {
+  const finalized = await client.getBlock({ blockTag: "finalized" });
+  if (finalized.number === null || finalized.hash === null) throw new Error("finalized head is missing number or hash");
+  if (finalized.timestamp < windowEndTimestamp) {
+    throw new Error(
+      `claim window is not finalized: deadline ${windowEndTimestamp}, finalized head ${finalized.number} timestamp ${finalized.timestamp}`
+    );
+  }
+  if (referenceBlock > finalized.number || openBlock > finalized.number) {
+    throw new Error(
+      `settlement anchor is not finalized: reference ${referenceBlock}, open ${openBlock}, finalized head ${finalized.number}`
+    );
+  }
+
+  const windowEndBlock = await blockAtOrBeforeTimestamp(client, windowEndTimestamp, finalized.number);
+  const [reference, open, windowEnd] = await Promise.all([
+    readBlockAnchor(client, referenceBlock),
+    readBlockAnchor(client, openBlock),
+    readBlockAnchor(client, windowEndBlock),
+  ]);
+  return {
+    reference,
+    open,
+    windowEnd,
+    finalizedHead: { number: finalized.number, timestamp: finalized.timestamp, hash: finalized.hash },
+  };
+}
+
+/** Re-read anchors after all RPC work. Any hash mutation makes the result unsafe
+ * to emit or sign, even when the block numbers still exist. */
+export async function assertBlockAnchorsUnchanged(
+  client: PublicClient,
+  anchors: SettlementAnchors
+): Promise<void> {
+  for (const [name, expected] of Object.entries(anchors) as [keyof SettlementAnchors, BlockAnchor][]) {
+    const actual = await readBlockAnchor(client, expected.number);
+    if (actual.hash.toLowerCase() !== expected.hash.toLowerCase()) {
+      throw new Error(`anchor hash changed for ${name} block ${expected.number}: ${expected.hash} -> ${actual.hash}`);
+    }
+  }
 }
 
 /**
@@ -426,7 +615,12 @@ export async function ratioAt(
 ): Promise<bigint> {
   if (conversionAddress === ZERO_ADDRESS) return WAD;
   const res = await client.call({ to: conversionAddress, data: conversionCallData, blockNumber });
-  return BigInt(res.data ?? "0x0");
+  if (res.data === undefined || res.data.length !== 66) {
+    throw new Error(`conversion ${conversionAddress} returned malformed uint256 data`);
+  }
+  const [ratio] = decodeAbiParameters([{ type: "uint256" }], res.data);
+  if (ratio === 0n) throw new Error(`conversion ${conversionAddress} returned non-positive ratio`);
+  return ratio;
 }
 
 /**
@@ -495,6 +689,35 @@ export async function balanceOfAt(
 }
 
 /**
+ * L-02 supported-token contract for historical balance replay. A supported
+ * ERC-20 changes `balanceOf` only through canonical `Transfer` events whose
+ * `value` equals the actual balance delta. Rebasing/reflection/elastic balances,
+ * hidden hook accounting, and proxy upgrades that violate that rule are not
+ * supported. Reconcile the replayed endpoint with historical `balanceOf` and
+ * fail closed on divergence; governance must only allowlist tokens satisfying
+ * this semantic contract for insurance eligibility or score accrual.
+ *
+ * This endpoint check catches persistent hidden changes. A temporary unlogged
+ * change that fully reverses before `toBlock` is inherently unprovable from
+ * ERC-20 logs and remains outside the supported-token contract.
+ */
+async function assertErc20ReplayEnd(
+  client: PublicClient,
+  token: `0x${string}`,
+  who: `0x${string}`,
+  toBlock: bigint,
+  replayedBalance: bigint
+): Promise<void> {
+  const actualBalance = await balanceOfAt(client, token, who, toBlock);
+  if (replayedBalance !== actualBalance) {
+    throw new Error(
+      `unsupported token balance semantics for ${token}: Transfer replay ended at ${replayedBalance}, ` +
+        `balanceOf(${who}) at block ${toBlock} is ${actualBalance}`
+    );
+  }
+}
+
+/**
  * Merge outflow (from == who) and inflow (to == who) Transfer logs into net
  * balance deltas, summed per unique (blockNumber, logIndex), then sorted. Netting
  * by log id is what makes SELF-transfers correct: a `Transfer(who, who, V)` log is
@@ -541,6 +764,7 @@ export async function minBalanceOver(
     bal += e.delta;
     if (bal < min) min = bal;
   }
+  await assertErc20ReplayEnd(client, token, who, toBlock, bal);
   return min;
 }
 
@@ -632,5 +856,6 @@ export async function tokenBlockIntegral(
     bal += e.delta;
   }
   acc += bal * (toBlock - cursor);
+  await assertErc20ReplayEnd(client, token, who, toBlock, bal);
   return acc;
 }

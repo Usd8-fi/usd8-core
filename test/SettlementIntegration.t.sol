@@ -22,15 +22,16 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockERC1155} from "./mocks/MockERC1155.sol";
 
 /// Cross-language end-to-end check: drive a real incident on-chain, then use the
-/// off-chain TypeScript settlement code (via FFI) to produce the merkle root and
-/// per-claim proofs — and prove they settle and pay each claimant exactly the
-/// off-chain amounts.
+/// Rust settlement runtime (via FFI) to produce the merkle root and per-claim
+/// proofs — and prove they settle and pay each claimant exactly those amounts.
+/// Set USE_RUST_FFI=0 to exercise the temporary TypeScript oracle instead.
 ///
 /// Opt-in (keeps the default forge test green and FFI-free):
-///   cd offchain && npm run build
+///   cargo build --release --locked --manifest-path offchain-rust/Cargo.toml
 ///   RUN_INTEGRATION=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 contract SettlementIntegrationTest is Test {
     string constant FFI = "offchain/dist/ffi.js";
+    string constant RUST_FFI = "offchain-rust/target/release/usd8-settlement";
 
     MockERC20 usdc; // pool stake asset (payout currency)
     MockERC20 lp; // insured token
@@ -202,11 +203,12 @@ contract SettlementIntegrationTest is Test {
         assertEq(usdc.balanceOf(carol), carolPay, "carol payout != off-chain amount");
     }
 
-    /// @dev Golden-vector check: the off-chain viem EIP-712 settlement digest must
+    /// @dev Golden-vector check: the selected FFI EIP-712 settlement digest must
     ///      equal the contract's _hashTypedDataV4 digest byte-for-byte, over 0/1/N
     ///      pools (H-01). Covers the whole digest — domain separator, typehash,
     ///      poolPayouts array encoding, and the `pools` packed-address hash — not
-    ///      just the Merkle root. `solc` is the authority; viem must reproduce it.
+    ///      just the Merkle root. `solc` is the authority; both Rust and the
+    ///      TypeScript oracle must reproduce it.
     function test_OffchainDigestMatchesOnchain() public {
         if (!vm.envOr("RUN_INTEGRATION", false)) {
             vm.skip(true);
@@ -331,8 +333,13 @@ contract SettlementIntegrationTest is Test {
     function _ffi(string memory cmd, bytes memory payload, string memory arg) internal returns (bytes memory) {
         uint256 n = bytes(arg).length == 0 ? 4 : 5;
         string[] memory c = new string[](n);
-        c[0] = "node";
-        c[1] = FFI;
+        if (vm.envOr("USE_RUST_FFI", true)) {
+            c[0] = RUST_FFI;
+            c[1] = "ffi";
+        } else {
+            c[0] = "node";
+            c[1] = FFI;
+        }
         c[2] = cmd;
         c[3] = vm.toString(payload);
         if (n == 5) c[4] = arg;

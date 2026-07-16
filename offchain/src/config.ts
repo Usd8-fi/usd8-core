@@ -5,12 +5,21 @@
 // lives on-chain and is read as of each incident's openBlock, so the settlement
 // is reproducible from chain state alone. Version it.
 
-import { keccak256, stringToHex } from "viem";
+import { isAddress, keccak256, stringToHex } from "viem";
 
 // 4.0.0 introduced capped geometric payout-root semantics.
 // 4.1.0 added per-insured-token minimum claim enforcement and the matching ABI.
 // 4.2.0 rejects future-dated, reversed, and superseded oracle rounds.
-export const CONFIG_VERSION = "4.2.0";
+// 4.3.0 fails closed on claim-set and ERC-20 balance-replay mismatches.
+// 4.4.0 requires finalized settlement anchors and supports authenticated exact score checkpoints.
+// 4.5.0 binds the booster token ID and score multiplier policy into configHash.
+export const CONFIG_VERSION = "4.5.0";
+
+// Settlement policy mirrored from DefiInsurance's public constants. Kept here as
+// the single TypeScript source used by computation, RPC orchestration, and the
+// signed config commitment.
+export const BOOSTER_ID = 1n;
+export const BOOSTER_BOOST_BPS = 100n;
 
 // Max age (seconds) a Chainlink feed's answer may have, measured at the pinned
 // block, before settlement treats it as stale and refuses to value against it
@@ -34,6 +43,11 @@ export const MAX_ORACLE_STALENESS = 86_400n;
 // (Blockscout-compatible); raise only to a value proven ≤ the real provider cap.
 export const MAX_LOG_RANGE = 1_000n; // blocks per eth_getLogs request
 export const LOG_RESULT_CAP = 1_000; // results per request treated as "possibly truncated"
+
+// Operational RPC controls. These do not affect settlement math or configHash:
+// they only bound provider load and stop hung HTTP requests.
+export const DEFAULT_RPC_CONCURRENCY = 8;
+export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
 
 // USD8 deploys to Ethereum mainnet only. Locked here (not configurable) so the
 // tool can never be pointed at a fork/testnet with colliding addresses; the
@@ -65,6 +79,27 @@ export const CONFIG: Config = {
   },
 };
 
+const ZERO_CONFIG_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+function assertConfiguredAddress(value: string, label: string): void {
+  if (!isAddress(value)) throw new Error(`invalid ${label} address: ${value}`);
+  if (value.toLowerCase() === ZERO_CONFIG_ADDRESS) throw new Error(`${label} address is zero`);
+}
+
+/** Fail before RPC work if deployment pointers are placeholders or malformed. */
+export function assertBootstrapConfig(config: Config = CONFIG): void {
+  assertConfiguredAddress(config.registry, "registry");
+  assertConfiguredAddress(config.defiInsurance, "defiInsurance");
+  if (config.registry.toLowerCase() === config.defiInsurance.toLowerCase()) {
+    throw new Error("registry and defiInsurance addresses must differ");
+  }
+  for (const [asset, feed] of Object.entries(config.assetUsdFeed)) {
+    if (asset !== asset.toLowerCase()) throw new Error(`assetUsdFeed key must be lowercase: ${asset}`);
+    assertConfiguredAddress(asset, "pool asset");
+    assertConfiguredAddress(feed, `USD feed for ${asset}`);
+  }
+}
+
 /** The USD feed for a pool asset, or throw if unconfigured. */
 export function assetUsdFeedOf(asset: `0x${string}`): `0x${string}` {
   const feed = CONFIG.assetUsdFeed[asset.toLowerCase()];
@@ -93,6 +128,8 @@ export function configHash(): `0x${string}` {
         chainId: CHAIN_ID,
         registry: CONFIG.registry.toLowerCase(),
         defiInsurance: CONFIG.defiInsurance.toLowerCase(),
+        boosterId: BOOSTER_ID.toString(),
+        boosterBoostBps: BOOSTER_BOOST_BPS.toString(),
         assetUsdFeed: feeds,
         maxOracleStaleness: MAX_ORACLE_STALENESS.toString(),
         maxLogRange: MAX_LOG_RANGE.toString(),

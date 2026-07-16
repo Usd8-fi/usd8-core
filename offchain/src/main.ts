@@ -8,16 +8,18 @@
 //
 // Everything is read from chain state — there are no trusted inputs. The
 // per-incident config is reconstructed from contract state at the incident's
-// openBlock; pool balances/prices at the window-end block; the spent-score
-// ledger from ScoreSpent logs. Set DRPC_KEY for the default authenticated dRPC
+// openBlock; pool balances/prices at the window-end block; and cumulative spent
+// score from Registry state. Set DRPC_KEY for the default authenticated dRPC
 // Ethereum archive endpoint, or point RPC_URL at another archive node; see
 // config.ts for the addresses and per-asset USD feeds.
 
 import {
   makeClient,
   DEFI_ABI,
+  assertContractCodeAt,
   readInputEvents,
-  blockAtOrBeforeTimestamp,
+  assertBlockAnchorsUnchanged,
+  finalizedSettlementAnchors,
   incidentConfigOf,
   poolsAt,
   poolTotalAssetsAt,
@@ -26,14 +28,35 @@ import {
   spentScoreOf,
   priceUsd1e18,
   decimalsOf,
+  rpcMetricsOf,
+  type RpcMetrics,
+  type SettlementAnchors,
 } from "./chain.js";
-import { CONFIG, CONFIG_VERSION, CHAIN_ID, assetUsdFeedOf, configHash } from "./config.js";
-import { canonicalSettlementInputRows, settle, proofFor, type Settlement } from "./compute.js";
-import { RpcScoreSource } from "./score.js";
-
-// The only booster token id in use (USD8Booster tier: id 1 = the 1% booster);
-// mirrors DefiInsurance.BOOSTER_ID.
-const BOOSTER_ID = 1n;
+import {
+  CONFIG,
+  CONFIG_VERSION,
+  BOOSTER_ID,
+  CHAIN_ID,
+  DEFAULT_RPC_CONCURRENCY,
+  assertBootstrapConfig,
+  assetUsdFeedOf,
+  configHash,
+} from "./config.js";
+import {
+  assertClaimSetMatches,
+  canonicalSettlementInputRows,
+  settle,
+  proofsFor,
+  type Settlement,
+} from "./compute.js";
+import { RpcScoreSource, type ScoreSource } from "./score.js";
+import { CheckpointScoreSource, type CheckpointScoreMetadata } from "./checkpointScore.js";
+import {
+  assertFinalizedIncidentFields,
+  readScoreCheckpointOptions,
+  readSpentScores,
+  type SpentReadMetrics,
+} from "./runtime.js";
 
 const DRPC_ETHEREUM_URL = "https://lb.drpc.org/ogrpc?network=ethereum";
 
@@ -51,7 +74,17 @@ function rpc(): { url: string; drpcKey?: string } {
 
 /** Recompute the full settlement for `incidentId`, and return the root the
  *  admin already submitted on-chain (0x0 if none yet) alongside it. */
-async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onchainRoot: `0x${string}` }> {
+interface RunMetadata {
+  anchors: SettlementAnchors;
+  rpc: RpcMetrics;
+  scoreSource: CheckpointScoreMetadata | { kind: "raw-rpc"; asOfBlock: bigint };
+  spentReads: SpentReadMetrics;
+}
+
+async function buildSettlement(
+  incidentId: bigint
+): Promise<{ s: Settlement; onchainRoot: `0x${string}`; metadata: RunMetadata }> {
+  assertBootstrapConfig();
   const connection = rpc();
   const client = makeClient(connection.url, connection.drpcKey);
 
@@ -71,7 +104,6 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
 
   const insuredToken = inc[0];
   const windowEnd = inc[1];
-  const onchainRoot = inc[2];
   const referenceBlock = inc[5]; // pre-incident block (HWM block or admin-pinned)
   const openBlock = inc[6]; // block the incident opened at — config/topology anchor
 
@@ -80,17 +112,67 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   // window-end block (LAST block with timestamp <= claimWindowEndTime — the last
   // in-window block; pool balances + prices + booster holdings). Every read pins
   // one of these, so the settlement is identical no matter when it is (re)computed.
-  const windowEndBlock = await blockAtOrBeforeTimestamp(client, windowEnd);
+  const anchors = await finalizedSettlementAnchors(client, referenceBlock, openBlock, windowEnd);
+  const windowEndBlock = anchors.windowEnd.number;
+  const finalizedIncident = (await client.readContract({
+    address: CONFIG.defiInsurance,
+    abi: DEFI_ABI,
+    functionName: "incidents",
+    args: [incidentId],
+    blockNumber: anchors.finalizedHead.number,
+  })) as typeof inc;
+  assertFinalizedIncidentFields(
+    { insuredToken, windowEnd, referenceBlock, openBlock },
+    {
+      insuredToken: finalizedIncident[0],
+      windowEnd: finalizedIncident[1],
+      referenceBlock: finalizedIncident[5],
+      openBlock: finalizedIncident[6],
+    }
+  );
+  await Promise.all([
+    assertContractCodeAt(client, CONFIG.registry, "Registry", openBlock),
+    assertContractCodeAt(client, CONFIG.defiInsurance, "DefiInsurance", openBlock),
+  ]);
 
-  // Register/cancel event stream in true chain order → the live claimant table.
-  const events = await readInputEvents(client, incidentId, openBlock, windowEndBlock);
+  // Replay logs and read the incident at the exact claim-window boundary. Using
+  // historical state avoids false mismatches after later claim finalizations
+  // decrement the live `unresolved` counter.
+  const [events, incidentAtWindowEnd] = await Promise.all([
+    readInputEvents(client, incidentId, openBlock, windowEndBlock),
+    client.readContract({
+      address: CONFIG.defiInsurance,
+      abi: DEFI_ABI,
+      functionName: "incidents",
+      args: [incidentId],
+      blockNumber: windowEndBlock,
+    }) as Promise<typeof inc>,
+  ]);
+  assertClaimSetMatches(events, incidentAtWindowEnd[3], incidentAtWindowEnd[9]);
 
   // Per-incident settlement config, reconstructed from contract state at openBlock.
   const cfg = await incidentConfigOf(client, insuredToken, openBlock);
-  // Phase 1 deliberately uses the exact raw-RPC score replay as the canonical
-  // source. Settlement consumes only the source interface, so a future indexed
-  // snapshot can replace this without changing payout math or signed inputs.
-  const scoreSource = new RpcScoreSource(client, cfg, referenceBlock);
+  // Raw replay remains the default verifier. Operators may opt into the exact
+  // global Transfer checkpoint using a KMS-injected HMAC key; settlement math
+  // and settlementInputHash remain identical under either source.
+  const checkpoint = readScoreCheckpointOptions(process.env);
+  let scoreSource: ScoreSource;
+  let scoreSourceMetadata: RunMetadata["scoreSource"];
+  if (checkpoint) {
+    const indexed = await CheckpointScoreSource.open(
+      client,
+      cfg,
+      referenceBlock,
+      checkpoint.path,
+      CHAIN_ID,
+      checkpoint.integrityKey
+    );
+    scoreSource = indexed;
+    scoreSourceMetadata = indexed.metadata;
+  } else {
+    scoreSource = new RpcScoreSource(client, cfg, referenceBlock);
+    scoreSourceMetadata = { kind: "raw-rpc", asOfBlock: referenceBlock };
+  }
   // Decimals pinned to the incident's snapshot blocks (M-05): an upgradeable
   // token changing decimals must never alter an old incident's recomputation.
   const insuredDecimals = await decimalsOf(client, insuredToken, openBlock);
@@ -105,8 +187,13 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   const poolAssetUsd1e18: bigint[] = [];
   const poolAssetDecimals: number[] = [];
   for (let i = 0; i < poolAddrs.length; i++) {
+    const feed = assetUsdFeedOf(assets[i]);
+    await Promise.all([
+      assertContractCodeAt(client, poolAddrs[i], `cover pool ${i}`, openBlock),
+      assertContractCodeAt(client, feed, `USD feed for ${assets[i]}`, windowEndBlock),
+    ]);
     poolBalances.push(await poolTotalAssetsAt(client, poolAddrs[i], windowEndBlock));
-    poolAssetUsd1e18.push(await priceUsd1e18(client, assetUsdFeedOf(assets[i]), windowEndBlock));
+    poolAssetUsd1e18.push(await priceUsd1e18(client, feed, windowEndBlock));
     poolAssetDecimals.push(await decimalsOf(client, assets[i], windowEndBlock));
   }
 
@@ -125,14 +212,13 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
   // its own opening block, so this snapshot never includes the incident being
   // settled. Intentionally a LATER cutoff than earned (referenceBlock): earned is
   // capped pre-incident to stop farming; spent must catch every prior commitment.
-  const spentMap = new Map<string, bigint>();
-  const claimants = [...new Set(events.filter((e) => e.kind === "register").map((e) => e.user.toLowerCase()))];
-  await Promise.all(
-    claimants.map(async (u) => {
-      spentMap.set(u, await spentScoreOf(client, u as `0x${string}`, openBlock));
-    })
+  const claimants = events.filter((e) => e.kind === "register").map((e) => e.user);
+  const spentReads = await readSpentScores(
+    claimants,
+    DEFAULT_RPC_CONCURRENCY,
+    async (user) => await spentScoreOf(client, user, openBlock)
   );
-  const spentOf = (user: `0x${string}`) => spentMap.get(user.toLowerCase()) ?? 0n;
+  const spentOf = (user: `0x${string}`) => spentReads.values.get(user.toLowerCase()) ?? 0n;
 
   const s = await settle(client, incidentId, cfg, events, {
     insuredToken,
@@ -150,10 +236,26 @@ async function buildSettlement(incidentId: bigint): Promise<{ s: Settlement; onc
     spentOf,
     maxCoverPoolPayoutBps,
   });
-  return { s, onchainRoot };
+  // The root may be submitted while a long historical computation is running.
+  // Re-read it after deterministic computation so `verify` compares against
+  // current chain state rather than startup. Then make the anchor assertion the
+  // final RPC work before returning or printing an artifact.
+  const latestIncident = (await client.readContract({
+    address: CONFIG.defiInsurance,
+    abi: DEFI_ABI,
+    functionName: "incidents",
+    args: [incidentId],
+  })) as typeof inc;
+  await assertBlockAnchorsUnchanged(client, anchors);
+  return {
+    s,
+    onchainRoot: latestIncident[2],
+    metadata: { anchors, rpc: rpcMetricsOf(client), scoreSource: scoreSourceMetadata, spentReads: spentReads.metrics },
+  };
 }
 
-function printSettlement(s: Settlement, withProofs: boolean) {
+function printSettlement(s: Settlement, metadata: RunMetadata, withProofs: boolean) {
+  const proofs = withProofs ? proofsFor(s) : undefined;
   const out = {
     configVersion: CONFIG_VERSION,
     // The commitments the settlement signature binds (M-04 / M-06): what the TEE
@@ -168,6 +270,27 @@ function printSettlement(s: Settlement, withProofs: boolean) {
       grossEarnedScore: r.grossEarnedScore.toString(),
     })),
     chainId: CHAIN_ID,
+    blockAnchors: Object.fromEntries(
+      Object.entries(metadata.anchors).map(([name, anchor]) => [
+        name,
+        { number: anchor.number.toString(), timestamp: anchor.timestamp.toString(), hash: anchor.hash },
+      ])
+    ),
+    rpcMetrics: {
+      historicalLogs: metadata.rpc,
+      spentReads: metadata.spentReads,
+    },
+    scoreSource:
+      metadata.scoreSource.kind === "raw-rpc"
+        ? { kind: metadata.scoreSource.kind, asOfBlock: metadata.scoreSource.asOfBlock.toString() }
+        : {
+            kind: metadata.scoreSource.kind,
+            path: metadata.scoreSource.path,
+            asOfBlock: metadata.scoreSource.asOfBlock.toString(),
+            asOfBlockHash: metadata.scoreSource.asOfBlockHash,
+            indexedTransfers: metadata.scoreSource.indexedTransfers,
+            indexedTokens: metadata.scoreSource.indexedTokens,
+          },
     registry: CONFIG.registry,
     defiInsurance: CONFIG.defiInsurance,
     incidentId: s.incidentId.toString(),
@@ -188,7 +311,7 @@ function printSettlement(s: Settlement, withProofs: boolean) {
       payoutUsd: r.payoutUsd.toString(),
       amounts: r.amounts.map((a) => a.toString()),
       // The exact (amounts, scoreSpent, proof) a claimant passes to finalizeClaim.
-      ...(withProofs ? { proof: proofFor(s, r.claimId) } : {}),
+      ...(proofs ? { proof: proofs.get(r.claimId)! } : {}),
     })),
   };
   console.log(JSON.stringify(out, null, 2));
@@ -201,15 +324,15 @@ async function main() {
     process.exit(2);
   }
   const incidentId = BigInt(arg);
-  const { s, onchainRoot } = await buildSettlement(incidentId);
+  const { s, onchainRoot, metadata } = await buildSettlement(incidentId);
 
   if (mode === "compute") {
-    printSettlement(s, true);
+    printSettlement(s, metadata, true);
     return;
   }
 
   // verify: compare the independent recompute to the root the admin submitted.
-  printSettlement(s, false);
+  printSettlement(s, metadata, false);
   const match = onchainRoot.toLowerCase() === s.root.toLowerCase();
   console.error(`computed root: ${s.root}`);
   console.error(`on-chain root: ${onchainRoot}`);

@@ -1,0 +1,10 @@
+[advisories]
+# Unmaintained, not vulnerable. `derivative` is only in Alloy's optional ark-ff
+# lock graph and is absent from `cargo tree --target all`. `paste` and
+# `proc-macro-error2` are compile-time dependencies of latest alloy 1.6.0.
+# Remove each exception when Alloy removes the dependency.
+ignore = [
+  "RUSTSEC-2024-0388",
+  "RUSTSEC-2024-0436",
+  "RUSTSEC-2026-0173",
+]

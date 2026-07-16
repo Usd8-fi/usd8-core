@@ -15,15 +15,13 @@ import {
   type InputEvent,
 } from "./chain.js";
 import type { GrossScoreProvider } from "./score.js";
+import { BOOSTER_BOOST_BPS } from "./config.js";
 
 // Backward-compatible export for callers/tests that use the raw-RPC score
 // helper directly. Settlement itself consumes an injected gross-score provider.
 export { earnedScoreOf } from "./score.js";
 
 const BPS = 10_000n;
-// Hard-coded booster policy, mirrors DefiInsurance.BOOSTER_BOOST_BPS: each
-// committed booster unit adds +1% to the insurance-score multiplier.
-const BOOSTER_BOOST_BPS = 100n;
 
 /** Floor square root for non-negative bigint values. */
 function sqrtFloor(value: bigint): bigint {
@@ -298,6 +296,19 @@ export function proofFor(s: Settlement, claimId: bigint): `0x${string}`[] {
   throw new Error(`claim ${claimId} not in settlement`);
 }
 
+/** Build every claim proof from one tree. Use this when serializing a complete
+ * settlement; rebuilding the tree once per row is quadratic in claimant count. */
+export function proofsFor(s: Settlement): Map<bigint, `0x${string}`[]> {
+  const tree = settlementTree(s.incidentId, s.rows);
+  const proofs = new Map<bigint, `0x${string}`[]>();
+  for (const [i, value] of tree.entries()) {
+    const claimId = (value as unknown as any[])[1] as bigint;
+    if (proofs.has(claimId)) throw new Error(`duplicate claim ${claimId} in settlement`);
+    proofs.set(claimId, tree.getProof(i) as `0x${string}`[]);
+  }
+  return proofs;
+}
+
 /**
  * Replay the incident's register/cancel events (chain order) into the same
  * rolling claim-set commitment the contract maintains in Incident.claimSetHash
@@ -319,6 +330,28 @@ export function claimSetHashOf(events: InputEvent[]): `0x${string}` {
         : keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "uint256" }], [h, e.claimId]));
   }
   return h;
+}
+
+/** Fail closed if the RPC-replayed claim set differs from the incident commitment. */
+export function assertClaimSetMatches(
+  events: InputEvent[],
+  onchainUnresolved: bigint,
+  onchainClaimSetHash: `0x${string}`
+): void {
+  const replayedHash = claimSetHashOf(events);
+  if (replayedHash.toLowerCase() !== onchainClaimSetHash.toLowerCase()) {
+    throw new Error(`claim-set hash mismatch: replayed ${replayedHash}, on-chain ${onchainClaimSetHash}`);
+  }
+
+  const cancelled = new Set(events.filter((event) => event.kind === "cancel").map((event) => event.claimId));
+  const replayedUnresolved = BigInt(
+    events.filter((event) => event.kind === "register" && !cancelled.has(event.claimId)).length
+  );
+  if (replayedUnresolved !== onchainUnresolved) {
+    throw new Error(
+      `unresolved claim count mismatch: replayed ${replayedUnresolved}, on-chain ${onchainUnresolved}`
+    );
+  }
 }
 
 export interface SettlementInputRow {

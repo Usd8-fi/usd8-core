@@ -17,13 +17,35 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
           submodules: recursive
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.5.1
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: offchain/package-lock.json
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.91.1
+          components: rustfmt, clippy
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Install off-chain dependencies
+        working-directory: offchain
+        run: npm ci --include=dev
 
       - name: Show Forge version
         run: forge --version
@@ -34,5 +56,68 @@ jobs:
       - name: Run Forge build
         run: forge build --sizes
 
+      - name: Build off-chain settlement
+        working-directory: offchain
+        run: npm run build
+
+      - name: Run TypeScript oracle and ABI-parity tests
+        working-directory: offchain
+        run: npm test
+
+      - name: Audit TypeScript oracle dependencies
+        working-directory: offchain
+        run: npm audit --audit-level=high
+
+      - name: Check Rust formatting
+        working-directory: offchain-rust
+        run: cargo fmt --check
+
+      - name: Lint Rust
+        working-directory: offchain-rust
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test Rust settlement runtime
+        working-directory: offchain-rust
+        run: cargo test --locked
+
+      - name: Build Rust settlement runtime
+        working-directory: offchain-rust
+        run: cargo build --release --locked
+
+      - name: Audit Rust dependencies
+        working-directory: offchain-rust
+        run: cargo audit --deny warnings
+
+      - name: Run TypeScript ↔ Rust differential fixtures
+        working-directory: offchain-rust
+        run: |
+          node bench/compare.mjs fixtures/small.json
+          node bench/compare.mjs fixtures/matrix.json
+          node bench/compare.mjs fixtures/real-usdc-usdt-1000.json
+
+      - name: Test real-history helpers and benchmark scripts
+        working-directory: offchain-rust
+        run: |
+          python3 -m unittest bench/test_real_history.py -v
+          for file in bench/*.mjs; do node --check "$file"; done
+
       - name: Run Forge tests
-        run: forge test -vvv
+        run: forge test --no-match-path test/SettlementIntegration.t.sol -vvv
+
+      - name: Run Solidity ↔ Rust FFI parity tests
+        env:
+          RUN_INTEGRATION: "1"
+          USE_RUST_FFI: "1"
+        run: forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vvv
+
+      - name: Run Solidity ↔ TypeScript oracle FFI tests
+        env:
+          RUN_INTEGRATION: "1"
+          USE_RUST_FFI: "0"
+        run: forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vvv
+
+      - name: Check generated-file hygiene
+        run: |
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"

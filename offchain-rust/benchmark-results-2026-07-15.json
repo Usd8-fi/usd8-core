@@ -1,0 +1,107 @@
+{
+  "date": "2026-07-15",
+  "environment": {
+    "os": "macOS 26.5.2 (25F84)",
+    "architecture": "arm64",
+    "cpu": "Apple M4",
+    "logicalCpus": 10,
+    "memoryBytes": 25769803776,
+    "node": "v22.22.3",
+    "v8": "12.4.254.21-node.56",
+    "rustc": "1.91.1 (ed61e7d7e 2025-11-07)",
+    "cargo": "1.91.1 (ea2d97820 2025-10-10)"
+  },
+  "parity": {
+    "fields": [
+      "rows",
+      "poolPayouts",
+      "claimSetHash",
+      "settlementInputHash",
+      "root",
+      "proofs"
+    ],
+    "fixtures": [
+      { "claims": 2, "root": "0xd0fe6133bddec8bbf138286152b065bd734bc58185e3f4029bf86c94ca1ba160" },
+      { "claims": 3, "root": "0xd5363c5ec989c4205926c0107db0746971b96c232fdc33f4286c6415ea96b4ac" },
+      { "claims": 100, "root": "0xc66027bdb848de4d0e4bfa4bc7be4ee13297b6944e7e65d314bd6f603c0eb9ba" },
+      { "claims": 1000, "root": "0x66f9e6f7c1381f0255ab520a780b5b545cc377dae3c91530cd19a967b4ad6920" },
+      { "claims": 10000, "root": "0xe3b0ffe1ec55c306d70a74a3e400d48d4943903b14583a4df34fd780e4356ce7" }
+    ]
+  },
+  "warm": [
+    {
+      "claims": 100,
+      "iterations": 50,
+      "samples": 7,
+      "warmupIterations": 10,
+      "typescriptMedianNs": 48055715,
+      "rustMedianNs": 291609.18,
+      "speedup": 164.79493203883362,
+      "typescriptSamplesNs": [47137122.5, 48055715, 47657268.34, 47766425, 48432973.34, 48122494.18, 48458832.5],
+      "rustSamplesNs": [294894.16, 303415, 286670, 290675.82, 292138.34, 290747.5, 291609.18]
+    },
+    {
+      "claims": 1000,
+      "iterations": 10,
+      "samples": 7,
+      "warmupIterations": 3,
+      "typescriptMedianNs": 511957712.5,
+      "rustMedianNs": 3426229.2,
+      "speedup": 149.42307785480315,
+      "typescriptSamplesNs": [512364887.5, 506336391.6, 514922612.5, 510742233.4, 510098679.2, 511957712.5, 516027187.5],
+      "rustSamplesNs": [3405366.7, 3485220.8, 3426229.2, 3536979.2, 3612412.5, 3380787.5, 3410041.6]
+    },
+    {
+      "claims": 10000,
+      "iterations": 3,
+      "samples": 5,
+      "warmupIterations": 1,
+      "typescriptMedianNs": 5542554277.666667,
+      "rustMedianNs": 41231055.666666664,
+      "speedup": 134.42668852516326,
+      "typescriptSamplesNs": [5600102666.666667, 5541320666.666667, 5525806180.333333, 5633643069.666667, 5542554277.666667],
+      "rustSamplesNs": [41231055.666666664, 39713263.666666664, 42974180.333333336, 40965625, 42527625]
+    }
+  ],
+  "cold": [
+    {
+      "claims": 2,
+      "samples": 11,
+      "typescriptMedianMs": 121.102084,
+      "rustMedianMs": 2.204292,
+      "speedup": 54.939220393671
+    },
+    {
+      "claims": 100,
+      "samples": 11,
+      "typescriptMedianMs": 169.072125,
+      "rustMedianMs": 2.989667,
+      "speedup": 56.552159487995475
+    },
+    {
+      "claims": 1000,
+      "samples": 7,
+      "typescriptMedianMs": 586.43375,
+      "rustMedianMs": 9.429458,
+      "speedup": 62.19167103772061
+    }
+  ],
+  "peakRssBytes": [
+    { "claims": 2, "typescript": 77922304, "rust": 1867776 },
+    { "claims": 10000, "typescript": 229310464, "rust": 57901056 }
+  ],
+  "artifact": {
+    "rustReleaseBinaryBytes": 622272,
+    "rustLockedPackages": 30,
+    "cargoAuditVulnerabilities": 0,
+    "cargoAuditWarnings": 0,
+    "nodeBinaryBytes": 112915776,
+    "typescriptDistDuKiB": 116,
+    "productionNodeModulesDuKiB": 113648
+  },
+  "methodology": {
+    "warm": "Fixture parse/normalization and process startup excluded; warm-up runs inside each measured process; allocation, commitments, Merkle root, and all proofs included; JSON serialization excluded.",
+    "cold": "Process startup, fixture parse, one compute, and JSON serialization included.",
+    "network": "No network or disk checkpoint I/O. TypeScript uses the real settle/proofsFor implementation with an in-memory deterministic chain client; Rust consumes equivalent resolved inputs."
+  }
+}
