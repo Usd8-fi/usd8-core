@@ -67,6 +67,8 @@ pub fn verify_run(run: &SettlementRun, config: &BootstrapConfig) -> Result<(), A
             user: row.user,
             amounts: row.amounts.clone(),
             score_spent: row.score_spent.clone(),
+            booster_amount_used: row.booster_amount_used.clone(),
+            boosted_score: row.boosted_score.clone(),
             eligible_amount: row.eligible_amount.clone(),
         })
         .collect::<Vec<_>>();
@@ -123,8 +125,7 @@ pub fn verify_run(run: &SettlementRun, config: &BootstrapConfig) -> Result<(), A
         pool_payouts: run.output.pool_payouts.clone(),
         pool_addrs: run.pool_addrs.clone(),
         claim_set: run.output.claim_set_hash.clone(),
-        config_hash: run.config_hash.clone(),
-        settlement_input_hash: run.output.settlement_input_hash.clone(),
+        tee_pcr_hash: run.tee_pcr_hash.clone(),
     })
     .map_err(|error| ArtifactError::Compute(error.to_string()))?;
     if !digest.eq_ignore_ascii_case(&run.digest) {

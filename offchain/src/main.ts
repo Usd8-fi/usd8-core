@@ -24,6 +24,7 @@ import {
   poolsAt,
   poolTotalAssetsAt,
   boosterNftAt,
+  incidentTeePcrHashAt,
   maxCoverPoolPayoutBpsAt,
   spentScoreOf,
   priceUsd1e18,
@@ -76,6 +77,7 @@ function rpc(): { url: string; drpcKey?: string } {
  *  admin already submitted on-chain (0x0 if none yet) alongside it. */
 interface RunMetadata {
   anchors: SettlementAnchors;
+  teePcrHash: `0x${string}`;
   rpc: RpcMetrics;
   scoreSource: CheckpointScoreMetadata | { kind: "raw-rpc"; asOfBlock: bigint };
   spentReads: SpentReadMetrics;
@@ -134,6 +136,7 @@ async function buildSettlement(
     assertContractCodeAt(client, CONFIG.registry, "Registry", openBlock),
     assertContractCodeAt(client, CONFIG.defiInsurance, "DefiInsurance", openBlock),
   ]);
+  const teePcrHash = await incidentTeePcrHashAt(client, incidentId, openBlock);
 
   // Replay logs and read the incident at the exact claim-window boundary. Using
   // historical state avoids false mismatches after later claim finalizations
@@ -250,7 +253,13 @@ async function buildSettlement(
   return {
     s,
     onchainRoot: latestIncident[2],
-    metadata: { anchors, rpc: rpcMetricsOf(client), scoreSource: scoreSourceMetadata, spentReads: spentReads.metrics },
+    metadata: {
+      anchors,
+      teePcrHash,
+      rpc: rpcMetricsOf(client),
+      scoreSource: scoreSourceMetadata,
+      spentReads: spentReads.metrics,
+    },
   };
 }
 
@@ -258,9 +267,9 @@ function printSettlement(s: Settlement, metadata: RunMetadata, withProofs: boole
   const proofs = withProofs ? proofsFor(s) : undefined;
   const out = {
     configVersion: CONFIG_VERSION,
-    // The commitments the settlement signature binds (M-04 / M-06): what the TEE
-    // signs alongside the root, and what a disputer checks a standing root against.
+    // Reproducibility metadata plus the commitments bound by the settlement digest.
     configHash: configHash(),
+    teePcrHash: metadata.teePcrHash,
     claimSetHash: s.claimSetHash,
     settlementInputHash: s.settlementInputHash,
     // Canonical preimage of settlementInputHash: one live row per user, sorted
@@ -308,9 +317,12 @@ function printSettlement(s: Settlement, metadata: RunMetadata, withProofs: boole
       grossEarnedScore: r.grossEarnedScore.toString(),
       earnedScore: r.earnedScore.toString(),
       scoreSpent: r.scoreSpent.toString(),
+      boosterAmountUsed: r.boosterAmountUsed.toString(),
+      boostedScore: r.boostedScore.toString(),
       payoutUsd: r.payoutUsd.toString(),
       amounts: r.amounts.map((a) => a.toString()),
-      // The exact (amounts, scoreSpent, proof) a claimant passes to finalizeClaim.
+      // Exact finalizeClaim values: amounts, raw scoreSpent, boosterAmountUsed,
+      // boostedScore, eligibleAmount, and proof.
       ...(proofs ? { proof: proofs.get(r.claimId)! } : {}),
     })),
   };

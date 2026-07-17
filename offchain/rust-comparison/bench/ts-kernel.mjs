@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { proofsFor, settle } from "../../offchain/dist/compute.js";
+import { proofsFor, settle } from "../../dist/compute.js";
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 const ORACLE = "0x000000000000000000000000000000000000044c";
@@ -30,6 +30,8 @@ function outputOf(settlement) {
       grossEarnedScore: row.grossEarnedScore.toString(),
       earnedScore: row.earnedScore.toString(),
       scoreSpent: row.scoreSpent.toString(),
+      boosterAmountUsed: row.boosterAmountUsed.toString(),
+      boostedScore: row.boostedScore.toString(),
       payoutUsd: row.payoutUsd.toString(),
       amounts: row.amounts.map(String),
     })),

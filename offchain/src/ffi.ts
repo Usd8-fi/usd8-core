@@ -7,7 +7,8 @@
 // the SAME payload, abi.encode'd by Foundry:
 //
 //   (uint256 incidentId, uint256[] claimIds, address[] users,
-//    uint256[][] amounts, uint256[] scoreSpents, uint256[] eligibles)
+//    uint256[][] amounts, uint256[] scoreSpents, uint256[] boosterAmountsUsed,
+//    uint256[] boostedScores, uint256[] eligibles)
 //
 // where amounts[i] aligns to the registered pool list. Output is abi-encoded
 // hex so Foundry can decode it with abi.decode. Commands:
@@ -24,7 +25,7 @@
 //   digest            → payload abi.encode(uint256 chainId, address verifyingContract,
 //                       uint256 incidentId, bytes32 root, uint256 unresolved,
 //                       uint256[] poolPayouts, address[] poolAddrs, bytes32 claimSet,
-//                       bytes32 configHash, bytes32 settlementInputHash); prints
+//                       bytes32 teePcrHash); prints
 //                       abi.encode(bytes32) of the EIP-712 settlement digest.
 //   claimset          → payload abi.encode(uint8[] kinds (0=register, 1=cancel),
 //                       uint256[] claimIds, address[] users, uint256[] escrows,
@@ -45,7 +46,7 @@ function emit(type: string, value: unknown): void {
 }
 
 if (cmd === "root" || cmd === "proof") {
-  const [incidentId, ids, users, amounts, spents, eligibles] = decodeAbiParameters(
+  const [incidentId, ids, users, amounts, spents, boosterAmountsUsed, boosteds, eligibles] = decodeAbiParameters(
     [
       { type: "uint256" },
       { type: "uint256[]" },
@@ -53,14 +54,18 @@ if (cmd === "root" || cmd === "proof") {
       { type: "uint256[][]" },
       { type: "uint256[]" },
       { type: "uint256[]" },
+      { type: "uint256[]" },
+      { type: "uint256[]" },
     ],
     hex
-  ) as [bigint, bigint[], `0x${string}`[], bigint[][], bigint[], bigint[]];
+  ) as [bigint, bigint[], `0x${string}`[], bigint[][], bigint[], bigint[], bigint[], bigint[]];
   const rows = ids.map((id, i) => ({
     claimId: id,
     user: users[i],
     amounts: [...amounts[i]],
     scoreSpent: spents[i],
+    boosterAmountUsed: boosterAmountsUsed[i],
+    boostedScore: boosteds[i],
     eligibleAmount: eligibles[i],
   }));
   const tree = settlementTree(incidentId, rows);
@@ -82,8 +87,7 @@ if (cmd === "root" || cmd === "proof") {
     poolPayouts,
     poolAddrs,
     claimSet,
-    configHash,
-    settlementInputHash,
+    teePcrHash,
   ] = decodeAbiParameters(
     [
       { type: "uint256" },
@@ -93,7 +97,6 @@ if (cmd === "root" || cmd === "proof") {
       { type: "uint256" },
       { type: "uint256[]" },
       { type: "address[]" },
-      { type: "bytes32" },
       { type: "bytes32" },
       { type: "bytes32" },
     ],
@@ -108,7 +111,6 @@ if (cmd === "root" || cmd === "proof") {
     `0x${string}`[],
     `0x${string}`,
     `0x${string}`,
-    `0x${string}`,
   ];
   const typedData = settlementTypedData(
     Number(chainId),
@@ -116,8 +118,7 @@ if (cmd === "root" || cmd === "proof") {
     { incidentId, root, poolPayouts: [...poolPayouts], poolAddrs: [...poolAddrs] },
     unresolved,
     claimSet,
-    configHash,
-    settlementInputHash
+    teePcrHash
   );
   emit("bytes32", hashTypedData(typedData));
 } else if (cmd === "claimset") {

@@ -80,6 +80,14 @@ jobs:
         working-directory: offchain-rust
         run: cargo test --locked
 
+      - name: Verify Rust package is standalone
+        run: |
+          mkdir -p "$RUNNER_TEMP/usd8-rust-standalone"
+          git archive HEAD offchain-rust | tar -x -C "$RUNNER_TEMP/usd8-rust-standalone"
+          cd "$RUNNER_TEMP/usd8-rust-standalone/offchain-rust"
+          cargo test --locked
+          cargo build --release --locked
+
       - name: Build Rust settlement runtime
         working-directory: offchain-rust
         run: cargo build --release --locked
@@ -89,17 +97,19 @@ jobs:
         run: cargo audit --deny warnings
 
       - name: Run TypeScript ↔ Rust differential fixtures
-        working-directory: offchain-rust
+        working-directory: offchain
         run: |
-          node bench/compare.mjs fixtures/small.json
-          node bench/compare.mjs fixtures/matrix.json
-          node bench/compare.mjs fixtures/real-usdc-usdt-1000.json
+          node rust-comparison/bench/compare.mjs ../offchain-rust/fixtures/small.json
+          node rust-comparison/bench/compare.mjs ../offchain-rust/fixtures/matrix.json
+          node rust-comparison/bench/compare.mjs ../offchain-rust/fixtures/real-usdc-usdt-1000.json
 
-      - name: Test real-history helpers and benchmark scripts
+      - name: Test standalone real-history helpers
         working-directory: offchain-rust
-        run: |
-          python3 -m unittest bench/test_real_history.py -v
-          for file in bench/*.mjs; do node --check "$file"; done
+        run: python3 -m unittest bench/test_real_history.py -v
+
+      - name: Check differential comparison scripts
+        working-directory: offchain
+        run: for file in rust-comparison/bench/*.mjs; do node --check "$file"; done
 
       - name: Run Forge tests
         run: forge test --no-match-path test/SettlementIntegration.t.sol -vvv

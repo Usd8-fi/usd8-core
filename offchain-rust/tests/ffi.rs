@@ -24,6 +24,8 @@ fn ffi_root_and_proof_round_trip_abi_payloads() {
             vec![bob, carol],
             vec![vec![U256::from(90)], vec![U256::from(60)]],
             vec![U256::from(60), U256::from(40)],
+            vec![U256::from(2), U256::from(0)],
+            vec![U256::from(61), U256::from(40)],
             vec![U256::from(100), U256::from(100)],
         )
             .abi_encode_params(),
@@ -34,6 +36,8 @@ fn ffi_root_and_proof_round_trip_abi_payloads() {
             user: Address::from_bytes(bob.into_array()),
             amounts: vec![BigUint::from(90u8)],
             score_spent: BigUint::from(60u8),
+            booster_amount_used: BigUint::from(2u8),
+            boosted_score: BigUint::from(61u8),
             eligible_amount: BigUint::from(100u8),
         },
         MerkleRow {
@@ -41,6 +45,8 @@ fn ffi_root_and_proof_round_trip_abi_payloads() {
             user: Address::from_bytes(carol.into_array()),
             amounts: vec![BigUint::from(60u8)],
             score_spent: BigUint::from(40u8),
+            booster_amount_used: BigUint::from(0u8),
+            boosted_score: BigUint::from(40u8),
             eligible_amount: BigUint::from(100u8),
         },
     ];

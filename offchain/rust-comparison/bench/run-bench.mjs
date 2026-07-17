@@ -18,7 +18,7 @@ if (
   console.error("usage: node run-bench.mjs <fixture.json> [iterations>=2] [samples>=3] [warmup>=1]");
   process.exit(2);
 }
-const rust = resolve(here, "../target/release/usd8-settlement");
+const rust = resolve(here, "../../../offchain-rust/target/release/usd8-settlement");
 const ts = resolve(here, "ts-kernel.mjs");
 const options = { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 };
 

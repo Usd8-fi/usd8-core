@@ -6,10 +6,10 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 ## Contents
 
 - [Protocol overview](#protocol-overview)
-- [Treasury and USD8](#treasury-and-usd8)
+- [USD8 and Treasury](#usd8-and-treasury)
 - [Insurance score](#insurance-score)
 - [Cover pools](#cover-pools)
-- [Claims and settlement](#claims-and-settlement)
+- [Defi insurance](#defi-insurance)
 - [Governance and trust assumptions](#governance-and-trust-assumptions)
 - [Repository layout](#repository-layout)
 - [Getting started](#getting-started)
@@ -48,7 +48,7 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 | Component | Role |
 |---|---|
 | [`Registry`](src/Registry.sol) | UUPS access-control, pause, topology, pool, payout-module, scored-token, booster, and incident-freeze hub. |
-| [`USD8`](src/USD8.sol) | UUPS ERC-20 stablecoin. Only its permanently configured Treasury may mint or burn it. |
+| [`USD8`](src/USD8.sol) | UUPS ERC-20 stablecoin. Only its timelock-configured Treasury may mint or burn it. |
 | [`Treasury`](src/Treasury.sol) | Mints USD8 against USDC, manages the USDC reserve and approved strategies, harvests surplus, and routes USD8 revenue. |
 | Morpho Vault V2 savings | Official Morpho Vault V2 share token with symbol `sUSD8`, backed by [`USD8SavingsAdapter`](src/adapters/USD8SavingsAdapter.sol). There is no custom sUSD8 vault contract. |
 | [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) | One ERC-4626 staking pool per cover asset. Stakers earn USD8 rewards and accept claim-loss risk. |
@@ -117,9 +117,12 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 4626 vaults with high APY yield but high risk to cover losses
 
 ## Deposit and withdraw
-- anyone can deposit
-- withdraw is subjected to a 7 day cool down(while still earning APY), followed by a 2 day withdraw window. If not withdrawn, the funds are back into the pool.
-- if there is a live claim incident before the 7 day cool down ends, the withdraw will be delayed till the incident ends
+- anyone can deposit while no claim incident is active
+- exit is share-denominated: `requestRedeem` escrows the requested shares immediately, stops their USD8 rewards, and cannot be cancelled
+- requests mature in three-day batches after a seven-day minimum cooldown, so the wait is 7–10 days; once settled, the shares are burned and their asset value is reserved for `completeRedeem` with no expiry
+- anyone can call `settleMaturedExitEpochs(maxEpochs)` repeatedly to process ended epochs in caller-sized batches
+- if an incident opens before the request matures, the exit is held until the incident resolves and receives the same loss as the other pool capital
+- if the request matures before an incident opens, its assets are reserved before the incident snapshot and remain claimable during that incident
 
 
 ```text
@@ -129,26 +132,23 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
  ┌──────────────┐
  │  Cover Pool  │──── claim yield ───▶ USD8
  └──────┬───────┘
-        │ request withdraw
+        │ withdraw
         ▼
- ┌──────────────┐
- │ 7d cooldown  │  funds still earn rewards and absorb losses
- └──────┬───────┘
-        ▼
-  incident active?
-      │       │
-     no      yes
-      │       │
-      ▼       ▼
- ┌─────────┐ ┌──────────────────┐
- │ 2d exit │ │ wait for incident│
- │ window  │ │ to finish        │
- └────┬────┘ └────────┬─────────┘
-      │               │ fresh 2d exit window
-      └───────┬───────┘
-              │ completeRedeem
-              ▼
-          assets out
+ ┌───────────────────┐
+ │ escrowed exit     │  still absorbing losses
+ │ 7–10d exit wait   │
+ └─────────┬─────────┘
+           ▼
+ incident opened before exit epoch?
+      │                     │
+     no                    yes
+      │                     │
+      │            wait till incident ends
+      │                     │
+      └──────────┬──────────┘
+                 │
+                 ▼
+        complete withdraw
 ```
 
 ## High APY
@@ -171,19 +171,18 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 
 ## Claim lifecycle
 ```text
- First TEE-signed claim
- or admin/timelock fallback
+         File Claim (requires TEE sig)
              │
              ▼
    ┌─────────────────────┐
-   │   CLAIM WINDOW 5d   │  join or cancel claims
-   │    pools frozen     │
+   │   CLAIM WINDOW 5d   │  anyone can file or
+   │    pools frozen     │    cancel claim
    └─────────────────────┘
         │             │
-   no live claims   live claims
+    no claims    with claims
         │             ▼
         │   ┌─────────────────────┐
-        │   │  SUBMISSION ≤ 3d    │  TEE-signed Merkle root
+        │   │  SUBMISSION ≤ 3d    │  Anyone can submit TEE-signed Merkle root
         │   └─────────────────────┘
         │        │           │
         │      no root      root submitted
@@ -192,7 +191,7 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
         │        │   │    DISPUTE 2d       │
         │        │   └─────────────────────┘
         │        │      │              │
-        │        │   accepted       disputed
+        │        │   accepted       disputed (admin only during beta)
         │        │      │              ▼
         │        │      │    ┌───────────────────┐
         │        │      │    │ CORRECTION ≤ 3d   │
@@ -211,11 +210,11 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
         │        │  all finalized   deadline  │
         ▼        ▼      ▼              ▼      ▼
    ┌─────────────────────────────────────────────┐
-   │                  UNFREEZE                   │
+   │              UNFREEZE Cover Pools           │
    │             next incident may open          │
    └─────────────────────────────────────────────┘
 ```
-- any one with insured token can file a claim by escrow their insured token, first claimer needs to get TEE signed attestation price has dropped 20% around given block. This will freeze all Cover Pool withdraw.
+- any one with insured token can file a claim by escrow their insured token, first claimer needs to get TEE signed attestation price has dropped 20% around given block. This freezes Cover Pool deposits and settlement of exits that were not already reserved; new exit requests remain loss-exposed.
 - claim for this token will be open for 5 days allows others to file claim, after no further claims allowed this insured token
 - anyone can submit TEE signed payout root. TEE computes claimers insurance score and their eligible payouts using [payout allocation](#payout-allocation). This algorithm is open sourced, anyone can run locally and check their results. This will also delist the insured token.
 - after root is submitted, admin can check and correct the root if incorrect (privilege during beta)
@@ -245,21 +244,21 @@ The token-to-underlying TWAP ends at the pre-incident `referenceBlock`. The unde
 
 ## Payout allocation
 
-Payouts use capped water-filling with geometric weights based on covered claim cap in USD and score spent.
+Payouts use capped water-filling with geometric weights based on covered claim cap in USD and booster-adjusted payout score. Raw score accounting remains separate.
 
 For each claim:
 
 ```text
 C_i = floor(preIncidentEligibleValueUsd * coverageBps / 10_000)
-S_i = min(requestedScore, boostedUnspentScore)
+R_i = min(requestedRawScore, rawUnspentScore)
+S_i = floor(R_i * (10_000 + boosterAmountUsed_i * boosterBoostBps) / 10_000)
 W_i = floor(sqrt(C_i * S_i))
 B   = floor(totalCoverPoolUsd * maxCoverPoolPayoutBps / 10_000)
-
 P_i = min(C_i, lambda * W_i)
 sum(P_i) <= B
 ```
 
-`C_i` is the claim's absolute coverage cap. `S_i` is the score the claimant can and chooses to spend. The square root gives covered need and score equal multiplicative influence with diminishing returns to score. Zero covered need or zero score produces zero weight.
+Only `R_i` is recorded as spent in the Registry. `S_i` is committed in the Merkle leaf and used only for payout allocation. `C_i` is the claim's absolute coverage cap. The square root gives covered need and boosted score equal multiplicative influence with diminishing returns. Zero covered need or zero boosted score produces zero weight.
 
 A deterministic capped water-filling calculation selects `lambda`. Claims that reach their cap are removed first; the remaining budget is redistributed by weight. Integer dust remains in the pools. Each payout is then split across the snapshotted cover pools in proportion to their USD value while respecting each pool's incident cap.
 
@@ -295,7 +294,9 @@ offchain/                       TypeScript CI/shadow oracle; not production
   src/compute.ts                independent settlement oracle
   src/chain.ts                  independent pinned-read oracle
 
-script/Deploy.s.sol             mainnet deployment and initial wiring
+script/
+  01_DeployTimelock.s.sol       step 1: governance timelock
+  02_DeployUSD8System.s.sol     step 2: mainnet system and initial wiring
 test/                           Foundry tests
 offchain/test/                  Vitest settlement tests
 ```
@@ -324,6 +325,28 @@ cd ../offchain
 npm ci --include=dev
 npm run build
 ```
+
+### Mainnet deployment order
+
+```bash
+# Keep the Etherscan key in the ignored local .env or shell environment.
+source .env
+
+# 1. Deploy and verify the standalone governance timelock.
+forge script script/01_DeployTimelock.s.sol:DeployTimelockScript \
+  --rpc-url "$ETH_RPC_URL" --broadcast --verify \
+  --etherscan-api-key "$ETHERSCAN_API_KEY"
+
+# Copy the verified address printed by step 1.
+export TIMELOCK_ADDRESS=0x...
+
+# 2. Deploy, wire, and verify the USD8 system.
+forge script script/02_DeployUSD8System.s.sol:DeployUSD8SystemScript \
+  --rpc-url "$ETH_RPC_URL" --broadcast --verify \
+  --etherscan-api-key "$ETHERSCAN_API_KEY"
+```
+
+If broadcast succeeds but verification is interrupted, rerun the corresponding command with `--resume --verify`; do not broadcast a new deployment. Step 2 validates that the timelock address contains contract code and checks its 24-hour delay, proposer/canceller, open executor, and self-admin role before broadcasting. The deploying account must also hold the configured USDC seed amount.
 
 ### Test
 

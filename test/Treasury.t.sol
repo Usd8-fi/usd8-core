@@ -13,7 +13,7 @@ import {Test} from "forge-std/Test.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {Registry} from "../src/Registry.sol";
-import {RegistryManaged} from "../src/RegistryManaged.sol";
+import {SharedBase} from "../src/SharedBase.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -22,7 +22,7 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {LossyWithdrawStrategy} from "./mocks/LossyWithdrawStrategy.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
-import {IProfitDistributionReceiver} from "../src/interfaces/IProfitDistributionReceiver.sol";
+
 import {ERC4626Strategy} from "../src/strategies/ERC4626Strategy.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
@@ -30,10 +30,6 @@ import {VaultV2} from "vault-v2/src/VaultV2.sol";
 import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {USD8SavingsAdapter} from "../src/adapters/USD8SavingsAdapter.sol";
-
-contract NonPullingProfitReceiver is IProfitDistributionReceiver {
-    function receiveProfitDistribution(uint256) external pure {}
-}
 
 contract TreasuryTest is Test {
     Registry registry;
@@ -62,7 +58,7 @@ contract TreasuryTest is Test {
     event AdminSet(address indexed account, bool allowed);
     event StrategyAdded(IStrategy indexed strategy);
     event StrategyRemoved(IStrategy indexed strategy);
-    event StrategyToleranceSet(IStrategy indexed strategy, uint256 oldTolerance, uint256 newTolerance);
+
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
     event WithdrawnFromStrategy(IStrategy indexed strategy, uint256 amount);
     event RevenueDistributed(address indexed recipient, uint256 amount);
@@ -81,15 +77,16 @@ contract TreasuryTest is Test {
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, admin))))
         );
         USD8 impl = new USD8();
-        bytes memory init = abi.encodeCall(USD8.initialize, (registry, address(this)));
+        bytes memory init = abi.encodeCall(USD8.initialize, (registry));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         usd8 = USD8(address(proxy));
-        treasuryImpl = new Treasury();
-        treasury = Treasury(
-            address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (usd8, registry))))
-        );
         vm.prank(timelock);
-        usd8.setTreasury(address(treasury));
+        registry.setUsd8(address(usd8));
+        treasuryImpl = new Treasury();
+        treasury =
+            Treasury(address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (registry)))));
+        vm.prank(timelock);
+        registry.setTreasury(address(treasury));
 
         assertEq(usd8.treasury(), address(treasury));
         assertEq(registry.timelock(), timelock);
@@ -126,30 +123,48 @@ contract TreasuryTest is Test {
         assertEq(address(treasury.usd8()), address(usd8));
     }
 
+    function test_Usd8ResolvesFromRegistry() public {
+        USD8 replacement =
+            USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
+
+        vm.prank(timelock);
+        registry.setUsd8(address(replacement));
+
+        assertEq(address(treasury.usd8()), address(replacement));
+    }
+
     function test_ImplementationDisabled() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        treasuryImpl.initialize(usd8, registry);
+        treasuryImpl.initialize(registry);
     }
 
     function test_InitializeOnlyOnce() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        treasury.initialize(usd8, registry);
+        treasury.initialize(registry);
     }
 
-    function test_InitializeRejectsNonContractUsd8() public {
-        vm.expectRevert(abi.encodeWithSelector(Treasury.InvalidContract.selector, alice));
-        new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (USD8(alice), registry)));
+    function test_InitializeAcceptsTrustedNonContractUsd8() public {
+        vm.prank(timelock);
+        registry.setUsd8(alice);
+        Treasury candidate =
+            Treasury(address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (registry)))));
+
+        assertEq(address(candidate.usd8()), alice);
     }
 
-    function test_InitializeRejectsMismatchedRegistry() public {
+    function test_InitializeAcceptsTrustedRegistryTopology() public {
         Registry otherRegistry = Registry(
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, admin))))
         );
+        vm.prank(timelock);
+        otherRegistry.setUsd8(address(usd8));
 
-        vm.expectRevert(
-            abi.encodeWithSelector(Treasury.RegistryMismatch.selector, address(otherRegistry), address(registry))
+        Treasury candidate = Treasury(
+            address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (otherRegistry))))
         );
-        new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (usd8, otherRegistry)));
+
+        assertEq(address(candidate.registry()), address(otherRegistry));
+        assertEq(address(candidate.usd8()), address(usd8));
     }
 
     // -- Pause system (single strict pause) -------------------------------
@@ -287,49 +302,34 @@ contract TreasuryTest is Test {
     }
 
     function _newTreasury() internal returns (Treasury) {
-        return Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (usd8, registry))))
-        );
+        return
+            Treasury(
+                address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
+            );
     }
 
-    /// @dev M-06: the Treasury may be re-pointed only before first issuance
-    ///      (initial wiring). Once USD8 is live, setTreasury stays LOCKED even
-    ///      after supply returns to zero, so the reserve anchor cannot move.
-    function test_SetTreasuryLockedOnceSupplyExists() public {
-        // Supply is still 0 here (setUp minted nothing) — a re-point is allowed.
+    /// @dev Treasury rotation is a timelock trust assumption. USD8 transfers
+    ///      mint/burn authority even while liabilities and old reserves exist;
+    ///      governance must migrate those reserves separately.
+    function test_TimelockCanRotateTreasuryWithLiveSupply() public {
         Treasury treasuryB = _newTreasury();
         vm.prank(timelock);
-        usd8.setTreasury(address(treasuryB));
+        registry.setTreasury(address(treasuryB));
         assertEq(usd8.treasury(), address(treasuryB));
 
-        // Mint so supply > 0.
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
         usdc.approve(address(treasuryB), 100e6);
         treasuryB.mintUSD8(100e6);
         vm.stopPrank();
         assertEq(usd8.totalSupply(), 100e18);
+        assertEq(treasuryB.getReserveBalance(), 100e6);
 
-        // Now rotation is barred — no fragmenting backing from liabilities.
         Treasury treasuryC = _newTreasury();
         vm.prank(timelock);
-        vm.expectRevert(USD8.TreasuryLocked.selector);
-        usd8.setTreasury(address(treasuryC));
-        assertEq(usd8.treasury(), address(treasuryB)); // unchanged
-
-        // The lock is historical, not merely `totalSupply != 0`: even after all
-        // liabilities are redeemed, residual reserve/strategy value cannot be
-        // abandoned by rotating away from the stable Treasury proxy.
-        usdc.mint(address(treasuryB), 50e6);
-        vm.prank(alice);
-        treasuryB.redeemUSD8(100e18, 0);
-        assertEq(usd8.totalSupply(), 0);
-        assertEq(treasuryB.getReserveBalance(), 50e6);
-
-        vm.prank(timelock);
-        vm.expectRevert(USD8.TreasuryLocked.selector);
-        usd8.setTreasury(address(treasuryC));
-        assertEq(usd8.treasury(), address(treasuryB));
+        registry.setTreasury(address(treasuryC));
+        assertEq(usd8.treasury(), address(treasuryC));
+        assertEq(treasuryB.getReserveBalance(), 100e6);
     }
 
     /// @dev M-06: evolve the Treasury by UUPS-upgrading its proxy IN PLACE —
@@ -338,7 +338,6 @@ contract TreasuryTest is Test {
         MockStrategy strat = new MockStrategy(usdc);
         vm.startPrank(timelock);
         treasury.addStrategy(strat, 0);
-        treasury.setStrategyTolerance(strat, 9);
         treasury.setProfitReceiver(recipient, 7, Treasury.RevenueDistributionMode.DirectTransfer);
         vm.stopPrank();
         usdc.mint(alice, 100e6);
@@ -368,7 +367,6 @@ contract TreasuryTest is Test {
         assertEq(address(treasury.registry()), address(registry));
         assertEq(treasury.strategiesLength(), 1);
         assertEq(address(treasury.strategies(0)), address(strat));
-        assertEq(treasury.strategyTolerance(strat), 9);
         assertEq(usdc.balanceOf(address(treasury)), 60e6);
         assertEq(strat.totalAssets(), 40e6);
         assertEq(treasury.getReserveBalance(), 100e6);
@@ -396,72 +394,16 @@ contract TreasuryTest is Test {
 
     address constant recipient = address(0xDEED);
 
-    function test_DistributeRevenueForwardsUsd8ToRecipient() public {
-        _seedTreasuryUsd8(19.9e18);
-
-        vm.expectEmit(true, false, false, true, address(treasury));
-        emit RevenueDistributed(recipient, 12e18);
-        vm.prank(timelock);
-        treasury.distributeRevenue(recipient, 12e18, Treasury.RevenueDistributionMode.DirectTransfer);
-
-        assertEq(usd8.balanceOf(recipient), 12e18);
-        assertEq(usd8.balanceOf(address(treasury)), 7.9e18);
-    }
-
-    /// forge-config: default.isolate = true
-    function test_DistributeRevenueToMorphoSavingsUsesMaxRateBuffer() public {
-        (VaultV2 savings, USD8SavingsAdapter adapter) = _deployMorphoSavings();
-
-        usdc.mint(alice, 100e6);
-        vm.startPrank(alice);
-        usdc.approve(address(treasury), 100e6);
-        treasury.mintUSD8(100e6);
-        usd8.approve(address(savings), 100e18);
-        savings.deposit(100e18, alice);
-        vm.stopPrank();
-
-        _seedTreasuryUsd8(19.9e18);
+    function test_DistributeRevenueIsNotExposed() public {
+        _seedTreasuryUsd8(1e18);
 
         vm.prank(timelock);
-        treasury.distributeRevenue(
-            address(adapter), 19.9e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution
-        );
+        (bool success,) = address(treasury)
+            .call(abi.encodeWithSignature("distributeRevenue(address,uint256,uint8)", recipient, 1e18, uint8(0)));
 
-        assertEq(usd8.balanceOf(address(treasury)), 0);
-        assertEq(usd8.balanceOf(address(adapter)), 119.9e18);
-        assertEq(savings.totalAssets(), 100e18, "no instant share-price jump");
-
-        vm.warp(block.timestamp + 365 days);
-        assertApproxEqAbs(savings.totalAssets(), 119.9e18, 1e10);
-    }
-
-    function test_DistributeRevenueRevertsWhenReceiverPullsNothing() public {
-        NonPullingProfitReceiver nonPulling = new NonPullingProfitReceiver();
-        _seedTreasuryUsd8(10e18);
-
-        vm.prank(timelock);
-        vm.expectRevert(abi.encodeWithSelector(Treasury.RevenueDeliveryMismatch.selector, 10e18, 0));
-        treasury.distributeRevenue(
-            address(nonPulling), 10e18, Treasury.RevenueDistributionMode.ReceiveProfitDistribution
-        );
-    }
-
-    function test_DistributeRevenueToZeroAddressReverts() public {
-        vm.prank(timelock);
-        vm.expectRevert(Registry.ZeroAddress.selector);
-        treasury.distributeRevenue(address(0), 1e18, Treasury.RevenueDistributionMode.DirectTransfer);
-    }
-
-    function test_DistributeRevenueZeroAmountReverts() public {
-        vm.prank(timelock);
-        vm.expectRevert(Treasury.ZeroAmount.selector);
-        treasury.distributeRevenue(recipient, 0, Treasury.RevenueDistributionMode.DirectTransfer);
-    }
-
-    function test_NonAdminCannotDistributeRevenue() public {
-        vm.expectRevert(_unauthorizedAdmin(alice));
-        vm.prank(alice);
-        treasury.distributeRevenue(recipient, 1e18, Treasury.RevenueDistributionMode.DirectTransfer);
+        assertFalse(success);
+        assertEq(usd8.balanceOf(address(treasury)), 1e18);
+        assertEq(usd8.balanceOf(recipient), 0);
     }
 
     // -- Weighted profit-receiver distribution ----------------------------
@@ -606,7 +548,7 @@ contract TreasuryTest is Test {
 
     function test_SetProfitReceiverZeroAddressReverts() public {
         vm.prank(admin);
-        vm.expectRevert(RegistryManaged.ZeroAddress.selector);
+        vm.expectRevert(SharedBase.ZeroAddress.selector);
         treasury.setProfitReceiver(address(0), 1, Treasury.RevenueDistributionMode.DirectTransfer);
     }
 
@@ -719,14 +661,9 @@ contract TreasuryTest is Test {
         assertEq(usdc.balanceOf(address(treasury)), 0);
     }
 
-    /// @dev A redeem funded from an ERC-4626-style strategy whose withdraw leaks
-    ///      sub-USDC dust (ceil shares vs floor totalAssets) drops the reserve a
-    ///      hair beyond the payout. The reserveSupplyStatusCheck tolerates up to
-    ///      one USDC unit per strategy, so it doesn't false-revert; a larger
-    ///      shortfall is a real worsening and still reverts.
-    function test_RedeemToleratesStrategyWithdrawDust() public {
-        // 100 USDC in -> 100e18 USD8, all deployed to a lossy strategy; +10 USDC
-        // "yield" donated so the system is healthy with a 10e18 surplus.
+    /// @dev Treasury allows at most one full USDC of aggregate reserve-accounting
+    ///      difference per mint or redeem, without per-strategy configuration.
+    function test_RedeemUsesFixedOneUsdcReserveTolerance() public {
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
         usdc.approve(address(treasury), 100e6);
@@ -736,21 +673,18 @@ contract TreasuryTest is Test {
         LossyWithdrawStrategy strat = new LossyWithdrawStrategy(usdc);
         vm.startPrank(timelock);
         treasury.addStrategy(strat, type(uint256).max);
-        treasury.setStrategyTolerance(strat, 7);
-        treasury.depositToStrategy(strat, 100e6); // idle -> 0
+        treasury.depositToStrategy(strat, 100e6);
         vm.stopPrank();
-        usdc.mint(address(strat), 10e6); // simulated yield -> 10e18 surplus
+        usdc.mint(address(strat), 10e6);
 
-        // This strategy is configured to tolerate 7 USDC base units.
-        strat.setLossOnNextWithdraw(7);
+        strat.setLossOnNextWithdraw(1e6);
         vm.prank(alice);
         treasury.redeemUSD8(50e18, 0);
         assertEq(usdc.balanceOf(alice), 50e6);
 
-        // A shortfall beyond this strategy's configured dust bound is real worsening.
-        strat.setLossOnNextWithdraw(8);
+        strat.setLossOnNextWithdraw(1e6 + 1);
+        vm.expectPartialRevert(Treasury.ReserveSupplyStatusWorsened.selector);
         vm.prank(alice);
-        vm.expectRevert(); // ReserveSupplyStatusWorsened
         treasury.redeemUSD8(10e18, 0);
     }
 
@@ -788,10 +722,6 @@ contract TreasuryTest is Test {
         registry.setPaused(address(treasury), true);
 
         bytes memory pauseErr = abi.encodeWithSelector(Registry.Paused.selector);
-
-        vm.prank(timelock);
-        vm.expectRevert(pauseErr);
-        treasury.distributeRevenue(recipient, 1e18, Treasury.RevenueDistributionMode.DirectTransfer);
 
         vm.prank(timelock);
         vm.expectRevert(pauseErr);
@@ -869,120 +799,10 @@ contract TreasuryTest is Test {
         vm.prank(timelock);
         vm.expectEmit(true, false, false, true, address(treasury));
         emit StrategyAdded(strat);
-        vm.expectEmit(true, false, false, true, address(treasury));
-        emit StrategyToleranceSet(strat, 0, 5);
         treasury.addStrategy(strat, type(uint256).max);
 
         assertEq(treasury.strategiesLength(), 1);
         assertEq(address(treasury.strategies(0)), address(strat));
-    }
-
-    function test_AdminCanSetStrategyTolerance() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(timelock);
-        treasury.addStrategy(strat, type(uint256).max);
-        assertEq(treasury.strategyTolerance(strat), 5);
-
-        vm.prank(admin);
-        vm.expectEmit(true, false, false, true, address(treasury));
-        emit StrategyToleranceSet(strat, 5, 9);
-        treasury.setStrategyTolerance(strat, 9);
-
-        assertEq(treasury.strategyTolerance(strat), 9);
-    }
-
-    function test_NonAdminCannotSetStrategyTolerance() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(timelock);
-        treasury.addStrategy(strat, type(uint256).max);
-
-        vm.expectRevert(_unauthorizedAdmin(alice));
-        vm.prank(alice);
-        treasury.setStrategyTolerance(strat, 9);
-    }
-
-    function test_SetStrategyToleranceRejectsUnapprovedStrategy() public {
-        MockStrategy strat = new MockStrategy(usdc);
-
-        vm.expectRevert(abi.encodeWithSelector(Treasury.StrategyNotApproved.selector, strat));
-        vm.prank(admin);
-        treasury.setStrategyTolerance(strat, 9);
-    }
-
-    function test_SetStrategyToleranceRejectsExcessiveValue() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(timelock);
-        treasury.addStrategy(strat, type(uint256).max);
-
-        uint256 excessive = 1e6 + 1;
-        vm.expectRevert(abi.encodeWithSelector(Treasury.InvalidStrategyTolerance.selector, excessive, 1e6));
-        vm.prank(admin);
-        treasury.setStrategyTolerance(strat, excessive);
-    }
-
-    function test_TimelockCanSetStrategyTolerance() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(timelock);
-        treasury.addStrategy(strat, type(uint256).max);
-        treasury.setStrategyTolerance(strat, 11);
-        vm.stopPrank();
-
-        assertEq(treasury.strategyTolerance(strat), 11);
-    }
-
-    function test_StrategyToleranceAcceptsZeroAndMaximum() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.prank(timelock);
-        treasury.addStrategy(strat, type(uint256).max);
-
-        vm.startPrank(admin);
-        treasury.setStrategyTolerance(strat, 1e6);
-        assertEq(treasury.strategyTolerance(strat), 1e6);
-        treasury.setStrategyTolerance(strat, 0);
-        vm.stopPrank();
-
-        assertEq(treasury.strategyTolerance(strat), 0);
-    }
-
-    function test_RemoveThenReaddRestoresDefaultStrategyTolerance() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(timelock);
-        treasury.addStrategy(strat, type(uint256).max);
-        treasury.setStrategyTolerance(strat, 9);
-        treasury.removeStrategy(strat);
-        treasury.addStrategy(strat, type(uint256).max);
-        vm.stopPrank();
-
-        assertEq(treasury.strategyTolerance(strat), 5);
-    }
-
-    function test_ReserveCheckSumsConfiguredStrategyTolerances() public {
-        usdc.mint(alice, 100e6);
-        vm.startPrank(alice);
-        usdc.approve(address(treasury), 100e6);
-        treasury.mintUSD8(100e6);
-        vm.stopPrank();
-
-        LossyWithdrawStrategy funded = new LossyWithdrawStrategy(usdc);
-        MockStrategy idle = new MockStrategy(usdc);
-        vm.startPrank(timelock);
-        treasury.addStrategy(funded, type(uint256).max);
-        treasury.addStrategy(idle, type(uint256).max);
-        treasury.setStrategyTolerance(funded, 3);
-        treasury.setStrategyTolerance(idle, 7);
-        treasury.depositToStrategy(funded, 100e6);
-        vm.stopPrank();
-        usdc.mint(address(funded), 10e6);
-
-        funded.setLossOnNextWithdraw(10);
-        vm.prank(alice);
-        treasury.redeemUSD8(50e18, 0);
-        assertEq(usdc.balanceOf(alice), 50e6);
-
-        funded.setLossOnNextWithdraw(11);
-        vm.expectRevert(); // ReserveSupplyStatusWorsened
-        vm.prank(alice);
-        treasury.redeemUSD8(10e18, 0);
     }
 
     function test_AddStrategyRejectsZeroAddress() public {
@@ -1007,15 +827,12 @@ contract TreasuryTest is Test {
         treasury.addStrategy(strat, type(uint256).max);
     }
 
-    function test_AddStrategyRejectsWrongUnderlying() public {
-        WrongUsdcStrategy bad = new WrongUsdcStrategy();
+    function test_AddStrategyAcceptsTrustedUnderlying() public {
+        IStrategy bad = IStrategy(address(new WrongUsdcStrategy()));
         vm.prank(timelock);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                Treasury.StrategyAssetMismatch.selector, IStrategy(address(bad)), USDC_ADDR, address(0xDEAD)
-            )
-        );
-        treasury.addStrategy(IStrategy(address(bad)), type(uint256).max);
+        treasury.addStrategy(bad, type(uint256).max);
+
+        assertEq(address(treasury.strategies(0)), address(bad));
     }
 
     function test_RemoveStrategyForcesRemovalIgnoringFunds() public {
@@ -1028,7 +845,6 @@ contract TreasuryTest is Test {
         treasury.removeStrategy(strat);
 
         assertEq(treasury.strategiesLength(), 0);
-        assertEq(treasury.strategyTolerance(strat), 0);
         assertEq(usdc.balanceOf(address(strat)), 50e6, "funds orphaned in strategy");
     }
 
@@ -1523,13 +1339,13 @@ contract TreasuryTest is Test {
 
     function test_RescueTokenRejectsUSDC() public {
         vm.prank(timelock);
-        vm.expectRevert(abi.encodeWithSelector(RegistryManaged.NothingToSweep.selector, address(usdc)));
+        vm.expectRevert(abi.encodeWithSelector(SharedBase.NothingToSweep.selector, address(usdc)));
         treasury.sweepToken(IERC20(address(usdc)), recipient);
     }
 
     function test_RescueTokenRejectsUSD8() public {
         vm.prank(timelock);
-        vm.expectRevert(abi.encodeWithSelector(RegistryManaged.NothingToSweep.selector, address(usd8)));
+        vm.expectRevert(abi.encodeWithSelector(SharedBase.NothingToSweep.selector, address(usd8)));
         treasury.sweepToken(IERC20(address(usd8)), recipient);
     }
 

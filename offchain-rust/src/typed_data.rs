@@ -4,7 +4,7 @@ use thiserror::Error;
 
 const DOMAIN_TYPE: &[u8] =
     b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
-const SETTLEMENT_TYPE: &[u8] = b"Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 configHash,bytes32 settlementInputHash)";
+const SETTLEMENT_TYPE: &[u8] = b"Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)";
 
 #[derive(Clone, Debug)]
 pub struct SettlementDigestInput {
@@ -16,8 +16,7 @@ pub struct SettlementDigestInput {
     pub pool_payouts: Vec<BigUint>,
     pub pool_addrs: Vec<Address>,
     pub claim_set: String,
-    pub config_hash: String,
-    pub settlement_input_hash: String,
+    pub tee_pcr_hash: String,
 }
 
 #[derive(Debug, Error)]
@@ -71,8 +70,7 @@ pub fn pools_hash(values: &[Address]) -> String {
 pub fn settlement_digest(input: &SettlementDigestInput) -> Result<String, TypedDataError> {
     let root = hash32("root", &input.root)?;
     let claim_set = hash32("claimSet", &input.claim_set)?;
-    let config_hash = hash32("configHash", &input.config_hash)?;
-    let settlement_input_hash = hash32("settlementInputHash", &input.settlement_input_hash)?;
+    let tee_pcr_hash = hash32("teePcrHash", &input.tee_pcr_hash)?;
 
     let mut domain = Vec::with_capacity(160);
     domain.extend_from_slice(&keccak256(DOMAIN_TYPE));
@@ -82,7 +80,7 @@ pub fn settlement_digest(input: &SettlementDigestInput) -> Result<String, TypedD
     domain.extend_from_slice(&input.verifying_contract.abi_word());
     let domain_hash = keccak256(domain);
 
-    let mut structure = Vec::with_capacity(288);
+    let mut structure = Vec::with_capacity(256);
     structure.extend_from_slice(&keccak256(SETTLEMENT_TYPE));
     structure.extend_from_slice(&word(&input.incident_id)?);
     structure.extend_from_slice(&root);
@@ -90,8 +88,7 @@ pub fn settlement_digest(input: &SettlementDigestInput) -> Result<String, TypedD
     structure.extend_from_slice(&packed_uint256_hash(&input.pool_payouts)?);
     structure.extend_from_slice(&packed_address_hash(&input.pool_addrs));
     structure.extend_from_slice(&claim_set);
-    structure.extend_from_slice(&config_hash);
-    structure.extend_from_slice(&settlement_input_hash);
+    structure.extend_from_slice(&tee_pcr_hash);
     let struct_hash = keccak256(structure);
 
     let mut digest = Vec::with_capacity(66);

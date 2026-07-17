@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use thiserror::Error;
 
-pub const SUPPORTED_CONFIG_VERSION: &str = "4.5.0";
+pub const SUPPORTED_CONFIG_VERSION: &str = "4.8.0";
 pub const SUPPORTED_BOOSTER_ID: u64 = 1;
 pub const SUPPORTED_BOOSTER_BOOST_BPS: u64 = 100;
 pub const MAX_LOG_RANGE: u64 = 2_048;

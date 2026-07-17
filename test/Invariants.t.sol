@@ -63,19 +63,15 @@ contract PoolHandler is Test {
         try pool.requestRedeem(shares) {} catch {}
     }
 
-    function cancelUnstake(uint256 actorSeed) external {
-        address who = _actor(actorSeed);
-        vm.prank(who);
-        try pool.cancelRedeemRequest() {} catch {}
-    }
-
     function completeUnstake(uint256 actorSeed) external {
         address who = _actor(actorSeed);
-        // completeRedeem checkpoints but does not pay yield; capture any USD8
+        (uint256 shares, uint64 exitEpoch) = pool.exitRequests(who);
+        if (shares == 0 || block.timestamp < exitEpoch) return;
+        // completeRedeem does not pay yield; capture any USD8
         // delta defensively (expected 0) so the reward-conservation ghost holds.
         uint256 before = usd8.balanceOf(who);
         vm.prank(who);
-        try pool.completeRedeem() {
+        try pool.completeRedeem(who) {
             ghostWithdrawn += usd8.balanceOf(who) - before;
         } catch {}
     }
@@ -122,7 +118,11 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
         registry = Registry(
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
         );
-        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, admin)))));
+        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
+        vm.startPrank(admin);
+        registry.setUsd8(address(usd8));
+        registry.setTreasury(admin);
+        vm.stopPrank();
         asset = new MockERC20("AST", "AST", 18);
 
         SingleAssetCoverPool impl = new SingleAssetCoverPool();
@@ -131,10 +131,7 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
             address(
                 new BeaconProxy(
                     address(beacon),
-                    abi.encodeCall(
-                        SingleAssetCoverPool.initialize,
-                        (registry, IERC20(address(asset)), IERC20(address(usd8)), "Cover", "cp")
-                    )
+                    abi.encodeCall(SingleAssetCoverPool.initialize, (registry, IERC20(address(asset)), "Cover", "cp"))
                 )
             )
         );
@@ -146,14 +143,13 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
 
         // grant handler USD8 mint rights via admin prank inside handler (USD8 treasury == admin)
         // USD8 mint is gated to treasury; admin was set as treasury at init.
-        bytes4[] memory sel = new bytes4[](7);
+        bytes4[] memory sel = new bytes4[](6);
         sel[0] = PoolHandler.stake.selector;
         sel[1] = PoolHandler.requestUnstake.selector;
-        sel[2] = PoolHandler.cancelUnstake.selector;
-        sel[3] = PoolHandler.completeUnstake.selector;
-        sel[4] = PoolHandler.withdrawYield.selector;
-        sel[5] = PoolHandler.distribute.selector;
-        sel[6] = PoolHandler.warp.selector;
+        sel[2] = PoolHandler.completeUnstake.selector;
+        sel[3] = PoolHandler.withdrawYield.selector;
+        sel[4] = PoolHandler.distribute.selector;
+        sel[5] = PoolHandler.warp.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -169,10 +165,27 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
 
     // Property 2: share accounting. sum(user shares) == totalShares; totalAssets <= balance.
     function invariant_shareAccounting() public view {
-        uint256 sumShares = pool.balanceOf(address(0xA11)) + pool.balanceOf(address(0xB0B));
+        uint256 sumShares =
+            pool.balanceOf(address(0xA11)) + pool.balanceOf(address(0xB0B)) + pool.balanceOf(address(pool));
         assertEq(sumShares, pool.totalSupply(), "share sum != totalShares");
-        // totalAssets is backed by real token balance held by the pool.
-        assertLe(pool.totalAssets(), asset.balanceOf(address(pool)), "totalAssets > balance");
+        assertEq(
+            pool.balanceOf(address(pool)),
+            _unsettledRequestShares(address(0xA11)) + _unsettledRequestShares(address(0xB0B)),
+            "exit escrow != unsettled requests"
+        );
+        if (pool.totalSupply() == 0) assertEq(pool.totalAssets(), 0, "assets remain without shares");
+        // Active assets plus matured exit debt are backed by the pool's real balance.
+        assertLe(
+            pool.totalAssets() + pool.withdrawalReserve(), asset.balanceOf(address(pool)), "accounted assets > balance"
+        );
+    }
+
+    function _unsettledRequestShares(address user) internal view returns (uint256 shares) {
+        uint64 exitEpoch;
+        (shares, exitEpoch) = pool.exitRequests(user);
+        if (shares == 0) return 0;
+        (,,,, bool settled) = pool.exitEpochs(exitEpoch);
+        return settled ? 0 : shares;
     }
 }
 
@@ -188,7 +201,11 @@ contract StatelessFuzzTest is Test {
         Registry registry = Registry(
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
         );
-        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, admin)))));
+        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
+        vm.startPrank(admin);
+        registry.setUsd8(address(usd8));
+        registry.setTreasury(admin);
+        vm.stopPrank();
         vault = VaultV2(new VaultV2Factory().createVaultV2(address(this), address(usd8), keccak256("sUSD8")));
         adapter = new USD8SavingsAdapter(address(vault));
         vault.setCurator(address(this));
@@ -290,13 +307,12 @@ contract StatelessFuzzTest is Test {
                 new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (address(this), admin)))
             )
         );
-        usd8 = USD8(
-            address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, address(this)))))
-        );
+        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
+        registry.setUsd8(address(usd8));
         treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (usd8, registry))))
+            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
         );
-        usd8.setTreasury(address(treasury));
+        registry.setTreasury(address(treasury));
     }
 
     function testFuzz_PegNoUnbackedMint(uint256 mintAmt, uint256 redeemAmt, bool harvest) public {

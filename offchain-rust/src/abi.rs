@@ -25,6 +25,7 @@ sol! {
             uint64 disputedAt,
             bytes32 claimSetHash
         );
+        function incidentTeePcrHash(uint256 incidentId) external view returns (bytes32);
         function getInsuredToken(address token) external view returns (InsuredToken memory);
         function settlementParams() external view returns (
             uint64 twapLookbackBlocks,

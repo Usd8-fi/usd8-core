@@ -13,7 +13,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Registry} from "./Registry.sol";
 
-/// @title  RegistryManaged
+/// @title  SharedBase
 /// @notice Thin base wiring a contract to the shared {Registry}. Holds the
 ///         registry and exposes the three access/pause modifiers every core
 ///         contract uses, so roles and the pause flag live in one place
@@ -33,30 +33,30 @@ import {Registry} from "./Registry.sol";
 ///         fields in a future version without a storage gap and without shifting
 ///         any child's storage — collisions are infeasible regardless of
 ///         inheritance order.
-abstract contract RegistryManaged {
+abstract contract SharedBase {
     using SafeERC20 for IERC20;
 
     // ─────────────────────────── Storage (ERC-7201) ───────────────────────────
 
     /// @custom:storage-location erc7201:usd8.storage.RegistryManaged
-    struct RegistryManagedStorage {
+    /// @dev The original namespace is intentionally retained across the contract rename.
+    struct SharedBaseStorage {
         /// @dev The system's access + pause registry. Set once at init, then fixed.
         Registry registry;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("usd8.storage.RegistryManaged")) - 1)) & ~bytes32(uint256(0xff))
-    bytes32 private constant REGISTRY_MANAGED_STORAGE =
-        0x9352834efe5044ee8cb502e43731eef76e3c874efee5a39ae6f2733fb284cb00;
+    bytes32 private constant SHARED_BASE_STORAGE = 0x9352834efe5044ee8cb502e43731eef76e3c874efee5a39ae6f2733fb284cb00;
 
-    function _registryManagedStorage() private pure returns (RegistryManagedStorage storage $) {
+    function _sharedBaseStorage() private pure returns (SharedBaseStorage storage $) {
         assembly {
-            $.slot := REGISTRY_MANAGED_STORAGE
+            $.slot := SHARED_BASE_STORAGE
         }
     }
 
     /// @notice The system's access + pause registry (a fixed UUPS proxy address).
     function registry() public view returns (Registry) {
-        return _registryManagedStorage().registry;
+        return _sharedBaseStorage().registry;
     }
 
     // ─────────────────────────── Errors / events ───────────────────────────
@@ -81,7 +81,7 @@ abstract contract RegistryManaged {
     ///      to evolve system-wide behavior.
     function _setRegistry(Registry newRegistry) internal {
         if (address(newRegistry) == address(0)) revert ZeroAddress();
-        RegistryManagedStorage storage $ = _registryManagedStorage();
+        SharedBaseStorage storage $ = _sharedBaseStorage();
         emit RegistryChanged(address($.registry), address(newRegistry));
         $.registry = newRegistry;
     }
@@ -90,19 +90,19 @@ abstract contract RegistryManaged {
 
     /// @dev Caller must be the timelock.
     modifier onlyTimelock() {
-        _registryManagedStorage().registry.requireTimelock(msg.sender);
+        _sharedBaseStorage().registry.requireTimelock(msg.sender);
         _;
     }
 
     /// @dev Caller must be an admin or the timelock.
     modifier onlyAdminOrTimelock() {
-        _registryManagedStorage().registry.requireAdminOrTimelock(msg.sender);
+        _sharedBaseStorage().registry.requireAdminOrTimelock(msg.sender);
         _;
     }
 
     /// @dev Reverts while THIS contract is paused in the registry.
     modifier whenNotPaused() {
-        _registryManagedStorage().registry.requireNotPaused(address(this));
+        _sharedBaseStorage().registry.requireNotPaused(address(this));
         _;
     }
 
@@ -112,7 +112,7 @@ abstract contract RegistryManaged {
     ///      itself grant any authority — it only widens WHEN an already-authorized
     ///      shortcut is allowed. Never applied to master powers.
     modifier onlyBetaMode() {
-        if (!_registryManagedStorage().registry.betaMode()) revert NotBetaMode();
+        if (!_sharedBaseStorage().registry.betaMode()) revert NotBetaMode();
         _;
     }
 

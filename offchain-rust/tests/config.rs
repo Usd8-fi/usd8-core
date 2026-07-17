@@ -1,7 +1,7 @@
 use usd8_settlement::config::BootstrapConfig;
 
 const VALID: &str = r#"{
-  "version": "4.5.0",
+  "version": "4.8.0",
   "chainId": 1,
   "registry": "0x0000000000000000000000000000000000001000",
   "defiInsurance": "0x0000000000000000000000000000000000002000",
@@ -17,15 +17,15 @@ const VALID: &str = r#"{
 }"#;
 
 #[test]
-fn config_hash_matches_typescript_and_sorts_feed_keys() {
+fn config_hash_matches_golden_value_and_sorts_feed_keys() {
     let config = BootstrapConfig::from_json(VALID).unwrap();
     assert_eq!(
         config.commitment_json().unwrap(),
-        r#"{"version":"4.5.0","chainId":1,"registry":"0x0000000000000000000000000000000000001000","defiInsurance":"0x0000000000000000000000000000000000002000","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":[["0x0000000000000000000000000000000000003000","0x0000000000000000000000000000000000004000"],["0x0000000000000000000000000000000000005000","0x0000000000000000000000000000000000006000"]],"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":"1000"}"#
+        r#"{"version":"4.8.0","chainId":1,"registry":"0x0000000000000000000000000000000000001000","defiInsurance":"0x0000000000000000000000000000000000002000","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":[["0x0000000000000000000000000000000000003000","0x0000000000000000000000000000000000004000"],["0x0000000000000000000000000000000000005000","0x0000000000000000000000000000000000006000"]],"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":"1000"}"#
     );
     assert_eq!(
         config.hash().unwrap(),
-        "0x4978fad16bc932217dc50f7083fc74b516ae710276ba04b04d0f36803965eac0"
+        "0x7aedf89d353c18ee09f578cb8b276f20a52e3c85629ad35b2c155d9f39b3b56d"
     );
 }
 
@@ -73,7 +73,7 @@ fn bootstrap_validation_rejects_unknown_or_unsupported_policy() {
     let unknown = VALID.replacen("\"chainId\": 1,", "\"chainId\": 1, \"extra\": true,", 1);
     assert!(BootstrapConfig::from_json(&unknown).is_err());
 
-    let version = VALID.replacen("4.5.0", "5.0.0", 1);
+    let version = VALID.replacen("4.8.0", "5.0.0", 1);
     assert!(
         BootstrapConfig::from_json(&version)
             .unwrap_err()

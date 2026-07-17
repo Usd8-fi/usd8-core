@@ -14,7 +14,7 @@ use usd8_settlement::engine::{ScoreMode, build_settlement};
 use usd8_settlement::rpc::HttpRpc;
 use usd8_settlement::{allocate, parse_json, serialize_output};
 
-const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement verify  <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_CONFIG, ETH_RPC_URL, DRPC_KEY, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
+const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement verify  <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_CONFIG, ETH_RPC_URL, DRPC_KEY, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
 
 #[derive(Debug)]
 enum CliError {
@@ -421,7 +421,44 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
         .await
         .map_err(|error| fatal(error.to_string()))?;
     verify_run(&run, &config).map_err(|error| fatal(error.to_string()))?;
-    let artifact = run.artifact(&config, mode == "compute");
+    let mut artifact = run.artifact(&config, mode != "verify");
+    if mode == "attested-compute" {
+        let digest_bytes = hex::decode(
+            run.digest
+                .strip_prefix("0x")
+                .ok_or_else(|| fatal("settlement digest is missing 0x prefix"))?,
+        )
+        .map_err(|error| fatal(format!("invalid settlement digest: {error}")))?;
+        if digest_bytes.len() != 32 {
+            return Err(fatal(format!(
+                "settlement digest must be 32 bytes, got {}",
+                digest_bytes.len()
+            )));
+        }
+        let attestation = usd8_settlement::tee::fresh_nitro_attestation(&digest_bytes)
+            .map_err(|error| fatal(error.to_string()))?;
+        if !attestation.pcr_hash.eq_ignore_ascii_case(&run.tee_pcr_hash) {
+            return Err(fatal(format!(
+                "local Nitro PCR hash {} does not match incident snapshot {}",
+                attestation.pcr_hash, run.tee_pcr_hash
+            )));
+        }
+        let object = artifact
+            .as_object_mut()
+            .ok_or_else(|| fatal("settlement artifact is not a JSON object"))?;
+        object.insert(
+            "nitroAttestationDocument".to_owned(),
+            serde_json::json!(format!("0x{}", hex::encode(attestation.document))),
+        );
+        object.insert(
+            "measuredTeePcrHash".to_owned(),
+            serde_json::json!(attestation.pcr_hash),
+        );
+        object.insert(
+            "nitroAttestedDigest".to_owned(),
+            serde_json::json!(run.digest),
+        );
+    }
     if let Some(path) = output_path {
         write_atomic_json(&path, &artifact).map_err(|error| fatal(error.to_string()))?;
         eprintln!("wrote verified artifact: {}", path.display());
@@ -447,7 +484,7 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
 async fn run() -> Result<i32, CliError> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
-        Some("compute") | Some("verify") => {
+        Some("compute") | Some("attested-compute") | Some("verify") => {
             let mode = args.remove(0);
             run_production(&mode, &args).await
         }

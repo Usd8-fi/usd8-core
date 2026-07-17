@@ -45,9 +45,11 @@ export interface SettledRow {
   escrowAmount: bigint;
   eligibleAmount: bigint;
   lossUsd: bigint; // 1e18
-  grossEarnedScore: bigint; // raw lifetime score at referenceBlock, before spent-score subtraction and booster
-  earnedScore: bigint; // score available to spend this claim = (raw lifetime − spent) × booster multiplier
-  scoreSpent: bigint; // min(requested, available) — geometric-weight input, recorded via ScoreSpent
+  grossEarnedScore: bigint; // raw lifetime score at referenceBlock, before spent-score subtraction
+  earnedScore: bigint; // raw score available to spend = raw lifetime − prior raw score spent
+  scoreSpent: bigint; // raw score consumed = min(requested, raw available), recorded via ScoreSpent
+  boosterAmountUsed: bigint; // min(committed, continuously held), committed in the payout leaf
+  boostedScore: bigint; // scoreSpent × booster multiplier, used only for payout weighting
   payoutUsd: bigint; // 1e18, post-coverage-cap and capped-geometric allocation
   amounts: bigint[]; // aligned to the registered pool list (one scalar per pool)
 }
@@ -165,13 +167,11 @@ export async function settle(
     const grossEarnedScore = await opts.grossScoreOf(e.user);
     const spent = opts.spentOf(e.user);
     const unspent = grossEarnedScore > spent ? grossEarnedScore - spent : 0n;
-    // The booster boosts ONLY the unspent remainder (I-2): committing a booster now
-    // must not retroactively multiply score already consumed on prior incidents.
-    // multiplier = (BPS + boost × BOOSTER_BOOST_BPS) / BPS, applied here (not in
-    // earnedScoreOf) so the +1%/unit lands on what's actually claimable.
-    const available = (unspent * (BPS + boost * BOOSTER_BOOST_BPS)) / BPS;
-    // The claimant spends what they requested, capped to availability.
-    const scoreSpent = e.scoreToSpend < available ? e.scoreToSpend : available;
+    // Consume only raw score so the durable on-chain ledger can never exceed the
+    // claimant's reproducible history. Apply the booster afterward and use that
+    // separate value only for payout allocation.
+    const scoreSpent = e.scoreToSpend < unspent ? e.scoreToSpend : unspent;
+    const boostedScore = (scoreSpent * (BPS + boost * BOOSTER_BOOST_BPS)) / BPS;
     rows.push({
       claimId: e.claimId,
       user: e.user,
@@ -179,8 +179,10 @@ export async function settle(
       eligibleAmount: eligible,
       lossUsd,
       grossEarnedScore,
-      earnedScore: available,
+      earnedScore: unspent,
       scoreSpent,
+      boosterAmountUsed: boost,
+      boostedScore,
       payoutUsd: 0n,
       amounts: [],
     });
@@ -196,13 +198,13 @@ export async function settle(
   // Registry.maxCoverPoolPayoutBps limit.
   const maxTotalUsd = (poolUsd * opts.maxCoverPoolPayoutBps) / BPS;
 
-  // Capped geometric weighting gives covered need and spent score equal
-  // multiplicative influence: weight = floor(sqrt(claimCapUsd * scoreSpent)).
+  // Capped geometric weighting gives covered need and boosted score equal
+  // multiplicative influence: weight = floor(sqrt(claimCapUsd * boostedScore)).
   // Global units cancel because only weight ratios are used. A zero cap or zero
   // score produces zero weight, so unusable score cannot dilute valid claims.
   const weighted = rows.map((row) => {
     const cap = (row.lossUsd * cfg.coverageBps) / BPS;
-    return { row, cap, weight: sqrtFloor(cap * row.scoreSpent) };
+    return { row, cap, weight: sqrtFloor(cap * row.boostedScore) };
   });
   for (const claim of weighted) claim.row.payoutUsd = 0n;
 
@@ -270,19 +272,21 @@ export async function settle(
 
 // Leaf encoding — SINGLE source of truth. The on-chain leaf in
 // DefiInsurance.finalizeClaim (keccak256(bytes.concat(keccak256(abi.encode(
-// incidentId, claimId, user, amounts, scoreSpent, eligible))))) and the FFI helper
-// both mirror this exact tuple and type order; `amounts` aligns to the registered
-// pool list, `eligible` is the covered insured-token amount (forfeited from escrow,
-// rest refunded at finalize). Drift here breaks every on-chain proof.
-export const LEAF_ENCODING = ["uint256", "uint256", "address", "uint256[]", "uint256", "uint256"] as const;
+// incidentId, claimId, user, amounts, scoreSpent, boosterAmountUsed, boostedScore, eligible))))) and the FFI helper
+// both mirror this exact tuple and type order; `scoreSpent` is raw score recorded
+// on-chain, `boosterAmountUsed` is the historically eligible booster quantity, and
+// `boostedScore` is used only for payout weighting. `amounts` aligns
+// to the registered pool list, and `eligible` is the covered insured-token amount
+// (forfeited from escrow, rest refunded at finalize). Drift here breaks every proof.
+export const LEAF_ENCODING = ["uint256", "uint256", "address", "uint256[]", "uint256", "uint256", "uint256", "uint256"] as const;
 
 /** Build the OZ StandardMerkleTree over settlement rows using {LEAF_ENCODING}. */
 export function settlementTree(
   incidentId: bigint,
-  rows: { claimId: bigint; user: `0x${string}`; amounts: bigint[]; scoreSpent: bigint; eligibleAmount: bigint }[]
+  rows: { claimId: bigint; user: `0x${string}`; amounts: bigint[]; scoreSpent: bigint; boosterAmountUsed: bigint; boostedScore: bigint; eligibleAmount: bigint }[]
 ) {
   return StandardMerkleTree.of(
-    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent, r.eligibleAmount]) as unknown as any[][],
+    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent, r.boosterAmountUsed, r.boostedScore, r.eligibleAmount]) as unknown as any[][],
     LEAF_ENCODING as unknown as string[]
   );
 }
@@ -363,7 +367,7 @@ export interface SettlementInputRow {
  * Canonical Phase-1 settlement-score input rows. Exactly one row is permitted
  * per live claimant address; rows are sorted by the address's canonical 20-byte
  * value so event order, RPC response order, and checksum casing cannot affect
- * the signed commitment.
+ * the artifact commitment.
  */
 export function canonicalSettlementInputRows<T extends SettlementInputRow>(rows: readonly T[]): T[] {
   const sorted = [...rows].sort((a, b) => {
@@ -402,9 +406,8 @@ export function settlementInputHashOf(rows: readonly SettlementInputRow[]): `0x$
 // of truth mirroring SETTLEMENT_TYPEHASH on-chain. `unresolved` (the live-claim
 // counter, Incident.unresolved) and `claimSet` (the Incident.claimSetHash rolling
 // commitment, reproduced by {claimSetHashOf}) bind the signature to the exact
-// claimant table that was scored; `configHash` ({configHash} from config.ts)
-// commits the signer to the off-chain configuration the root was computed under,
-// while `settlementInputHash` commits the canonical per-user gross-score rows.
+// claimant table that was scored. `teePcrHash` binds the signer claim to the
+// incident's snapshotted PCR0/PCR1/PCR2 image.
 // Sign with viem: walletClient.signTypedData(settlementTypedData(...)).
 export function settlementTypedData(
   chainId: number,
@@ -412,8 +415,7 @@ export function settlementTypedData(
   s: Pick<Settlement, "incidentId" | "root" | "poolPayouts" | "poolAddrs">,
   unresolved: bigint,
   claimSet: `0x${string}`,
-  configHash: `0x${string}`,
-  settlementInputHash: `0x${string}`
+  teePcrHash: `0x${string}`
 ) {
   // The `pools` hash is taken from s.poolAddrs — the SAME ordered pool list the payout row
   // was computed against (parallel to poolOrder) — NOT a fresh chain read. That's what makes
@@ -435,8 +437,7 @@ export function settlementTypedData(
         { name: "poolPayouts", type: "uint256[]" },
         { name: "pools", type: "bytes32" },
         { name: "claimSet", type: "bytes32" },
-        { name: "configHash", type: "bytes32" },
-        { name: "settlementInputHash", type: "bytes32" },
+        { name: "teePcrHash", type: "bytes32" },
       ],
     },
     primaryType: "Settlement",
@@ -447,8 +448,7 @@ export function settlementTypedData(
       poolPayouts: s.poolPayouts,
       pools: poolsHash,
       claimSet,
-      configHash,
-      settlementInputHash,
+      teePcrHash,
     },
   } as const;
 }

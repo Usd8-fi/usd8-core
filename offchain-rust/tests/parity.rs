@@ -21,7 +21,7 @@ const BOB: &str = "0x000000000000000000000000000000000000b0b0";
 const CAROL: &str = "0x000000000000000000000000000000000000ca50";
 
 #[test]
-fn capped_geometric_allocation_matches_typescript_vector() {
+fn capped_geometric_allocation_matches_golden_vector() {
     let input = KernelInput {
         incident_id: 1u8.into(),
         coverage_bps: 8_000u16.into(),
@@ -67,13 +67,49 @@ fn capped_geometric_allocation_matches_typescript_vector() {
 }
 
 #[test]
-fn standard_merkle_root_and_proofs_match_typescript_vectors() {
+fn booster_changes_payout_score_without_inflating_raw_score_spent() {
+    let input = KernelInput {
+        incident_id: 1u8.into(),
+        coverage_bps: 8_000u16.into(),
+        insured_decimals: 18,
+        twap_ratio: wad(1),
+        underlying_usd: wad(1),
+        max_cover_pool_payout_bps: 10_000u16.into(),
+        pools: vec![PoolInput {
+            balance: wad(1_000),
+            asset_usd: wad(1),
+            asset_decimals: 18,
+        }],
+        claims: vec![ClaimInput {
+            claim_id: 1u8.into(),
+            user: address(BOB),
+            escrow_amount: wad(100),
+            min_held: wad(100),
+            gross_earned_score: 100u8.into(),
+            spent_score: 40u8.into(),
+            score_to_spend: 1_000u16.into(),
+            booster_amount: 2u8.into(),
+            booster_held: 2u8.into(),
+        }],
+    };
+
+    let output = allocate(&input).unwrap();
+    assert_eq!(output.rows[0].earned_score, 60u8.into());
+    assert_eq!(output.rows[0].score_spent, 60u8.into());
+    assert_eq!(output.rows[0].booster_amount_used, 2u8.into());
+    assert_eq!(output.rows[0].boosted_score, 61u8.into());
+}
+
+#[test]
+fn standard_merkle_root_and_proofs_match_golden_vectors() {
     let rows = vec![
         MerkleRow {
             claim_id: 1u8.into(),
             user: address(BOB),
             amounts: vec![wad(60)],
             score_spent: 60u8.into(),
+            booster_amount_used: 2u8.into(),
+            boosted_score: 61u8.into(),
             eligible_amount: wad(100),
         },
         MerkleRow {
@@ -81,26 +117,28 @@ fn standard_merkle_root_and_proofs_match_typescript_vectors() {
             user: address(CAROL),
             amounts: vec![wad(40)],
             score_spent: 40u8.into(),
+            booster_amount_used: 0u8.into(),
+            boosted_score: 40u8.into(),
             eligible_amount: wad(100),
         },
     ];
     let tree = SettlementTree::new(&1u8.into(), &rows).unwrap();
     assert_eq!(
         tree.root_hex(),
-        "0x4f18a629abf6e939d1666569fb13afabf05cb8b0e7d583a99da4e9570916a90e"
+        "0x81b13a66446b6a3eca95cef284db8819186613b142b636e65d15b756f2749ff1"
     );
     assert_eq!(
         tree.proof_hex(&1u8.into()).unwrap(),
-        vec!["0x4764d8296f3f8b7c6027ff8e39e4ee83016387fa9333214274b53c3d721bec82"]
+        vec!["0xa0888d3286e1502efd52cd3934ffb99b7bc7fb5e6cfe1e1fd8b208c6b8714b39"]
     );
     assert_eq!(
         tree.proof_hex(&2u8.into()).unwrap(),
-        vec!["0x84cb5690987404a42eb2c21e26ba062ae0065364bcd7dc9f509280e6428f8075"]
+        vec!["0x1fe6d3a89577cd9a8b7c95bcd2ad23d69755bfe291f4917749246eb7f6ade659"]
     );
 }
 
 #[test]
-fn canonical_input_and_claim_set_hashes_match_typescript_vectors() {
+fn canonical_input_and_claim_set_hashes_match_golden_vectors() {
     let score_rows = vec![(address(BOB), 60u8.into()), (address(CAROL), 40u8.into())];
     assert_eq!(
         settlement_input_hash(&score_rows).unwrap(),

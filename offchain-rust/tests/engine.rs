@@ -1,5 +1,5 @@
 use alloy_primitives::aliases::U80;
-use alloy_primitives::{Address as AlloyAddress, Bytes, I256, U256};
+use alloy_primitives::{Address as AlloyAddress, B256, Bytes, I256, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -17,7 +17,6 @@ use usd8_settlement::artifact::{verify_run, write_atomic_json};
 use usd8_settlement::config::BootstrapConfig;
 use usd8_settlement::engine::{ScoreMode, build_settlement};
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
-use usd8_settlement::typed_data::{SettlementDigestInput, settlement_digest};
 use usd8_settlement::{Address, ClaimEvent, EventKind, claim_set_hash};
 
 const DEFI: &str = "0x0000000000000000000000000000000000002000";
@@ -293,6 +292,11 @@ fn fixture_with_min_claim(min_claim_amount: u128) -> (EngineRpc, BootstrapConfig
         IRegistry::scoreSpentCall::SELECTOR,
         encoded::<IRegistry::scoreSpentCall>(&U256::ZERO),
     );
+    insert(
+        DEFI,
+        IDefiInsurance::incidentTeePcrHashCall::SELECTOR,
+        encoded::<IDefiInsurance::incidentTeePcrHashCall>(&B256::repeat_byte(0x44)),
+    );
     for token in [INSURED, SCORED, ASSET] {
         insert(
             token,
@@ -363,7 +367,7 @@ fn fixture_with_min_claim(min_claim_amount: u128) -> (EngineRpc, BootstrapConfig
     .into_iter()
     .collect();
     let config = BootstrapConfig::from_json(&format!(
-        r#"{{"version":"4.5.0","chainId":1,"registry":"{REGISTRY}","defiInsurance":"{DEFI}","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":{{"{ASSET}":"{FEED}"}},"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":1000}}"#
+        r#"{{"version":"4.8.0","chainId":1,"registry":"{REGISTRY}","defiInsurance":"{DEFI}","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":{{"{ASSET}":"{FEED}"}},"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":1000}}"#
     ))
     .unwrap();
     (
@@ -413,8 +417,11 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     assert_eq!(run.output.rows.len(), 1);
     assert_eq!(run.output.rows[0].eligible_amount, BigUint::from(100u8));
     assert_eq!(run.output.rows[0].score_spent, BigUint::from(60u8));
+    assert_eq!(run.output.rows[0].booster_amount_used, BigUint::from(0u8));
+    assert_eq!(run.output.rows[0].boosted_score, BigUint::from(60u8));
     assert_eq!(run.output.rows[0].amounts, vec![BigUint::from(80u8)]);
     assert_eq!(run.output.pool_payouts, vec![BigUint::from(80u8)]);
+    assert_eq!(run.tee_pcr_hash, format!("0x{}", "44".repeat(32)));
     assert!(!run.root_matches());
     verify_run(&run, &config).unwrap();
 
@@ -423,6 +430,7 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     write_atomic_json(&path, &artifact).unwrap();
     let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(persisted, artifact);
+    assert_eq!(persisted["teePcrHash"], format!("0x{}", "44".repeat(32)));
     assert_eq!(persisted["rows"][0]["amounts"][0], "80");
     assert!(persisted["rows"][0]["proof"].is_array());
     fs::remove_file(path).unwrap();
@@ -435,19 +443,6 @@ async fn artifact_verifier_recomputes_config_hash_independently() {
         .await
         .unwrap();
     run.config_hash = format!("0x{}", "11".repeat(32));
-    run.digest = settlement_digest(&SettlementDigestInput {
-        chain_id: config.chain_id,
-        verifying_contract: config.defi_insurance,
-        incident_id: run.incident_id.clone(),
-        root: run.output.root.clone(),
-        unresolved: run.window_incident.unresolved.clone(),
-        pool_payouts: run.output.pool_payouts.clone(),
-        pool_addrs: run.pool_addrs.clone(),
-        claim_set: run.output.claim_set_hash.clone(),
-        config_hash: run.config_hash.clone(),
-        settlement_input_hash: run.output.settlement_input_hash.clone(),
-    })
-    .unwrap();
 
     let error = verify_run(&run, &config).unwrap_err();
     assert!(error.to_string().contains("config hash"));

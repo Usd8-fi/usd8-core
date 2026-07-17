@@ -12,13 +12,13 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {USD8} from "./USD8.sol";
 import {Registry} from "./Registry.sol";
-import {RegistryManaged} from "./RegistryManaged.sol";
+import {SharedBase} from "./SharedBase.sol";
 import {IProfitDistributionReceiver} from "./interfaces/IProfitDistributionReceiver.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 
@@ -28,7 +28,7 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///           R  = reserve: all USDC the Treasury controls, incl. accrued yield ({getReserveBalance}).
 ///           eff = effective collateral = min(R·1e12, USD8Supply).
 ///           S  = surplus = R·1e12 − USD8Supply (signed): S > 0 is reserve above backing
-///                (routed to yield via {harvestAndDistribute}/{distributeRevenue}); S < 0 is distress.
+///                (routed to yield via {harvestAndDistribute}); S < 0 is distress.
 ///         The reserve asset is USDC and cannot be changed.
 ///
 ///         Mint is always 1:1. Redeem pays redeemedUSDC = givenUSD8 · eff / (USD8Supply · 1e12),
@@ -41,20 +41,18 @@ import {IStrategy} from "./interfaces/IStrategy.sol";
 ///         Strategies: a timelock-approved list ({addStrategy}/{removeStrategy}). Mints leave USDC
 ///         idle; admin moves it via {depositToStrategy}/{withdrawFromStrategy}. Redeem spends idle
 ///         first, then walks the list in order — the array is the withdrawal-priority queue.
-///         UPGRADEABLE (audit M-06): the Treasury is a UUPS proxy, timelock-
-///         upgraded IN PLACE, so evolving its logic never moves the reserve or
-///         re-points USD8's mint/burn authority — there is no Treasury "rotation"
-///         that could split backing (reserves) from liabilities (global supply).
-///         {USD8.setTreasury} is correspondingly locked forever after first
-///         issuance, so the proxy address is the permanent, stable anchor even
-///         if all circulating supply is later redeemed.
+///         UPGRADEABLE: the Treasury is a UUPS proxy, so governance can normally
+///         evolve logic in place without moving reserves or re-pointing USD8's
+///         mint/burn authority. The timelock may rotate Treasury through
+///         {USD8.setTreasury}; governance is trusted to migrate every reserve,
+///         strategy position, and operational setting before doing so.
 ///
 ///         DEPLOYMENT NOTE: this v1 proxy is for a fresh protocol deployment. It
 ///         does not migrate reserves, strategy positions, or configuration from a
 ///         previously deployed constructor-based Treasury; such a live migration
 ///         would require a separate audited migration procedure.
 /// @custom:security-contact rick@usd8.fi
-contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, RegistryManaged {
+contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, SharedBase {
     using SafeERC20 for IERC20;
 
     /// @notice How harvested USD8 revenue is routed to a recipient.
@@ -86,26 +84,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         the system across the distressed-redemption boundary.
     uint256 public constant HARVEST_BUFFER_DIVISOR = 1000;
 
-    /// @notice Default reserve-check rounding tolerance assigned when a strategy
-    ///         is approved, in USDC base units.
-    uint256 public constant DEFAULT_STRATEGY_TOLERANCE = 5;
-
-    /// @notice Maximum configurable tolerance per strategy: 1 USDC.
-    uint256 public constant MAX_STRATEGY_TOLERANCE = 1e6;
-
-    /// @dev Returned only when executed through this implementation's active
-    ///      ERC-1967 proxy. USD8 checks it before making the proxy its permanent
-    ///      mint/burn authority, preventing accidental legacy/direct wiring.
-    bytes32 private constant TREASURY_PROXY_MARKER = keccak256("usd8.treasury.uups");
-
-    /// @dev Exact runtime hash of the canonical, adminless proxy deployed by
-    ///      Deploy.s.sol. This excludes transparent/custom proxies that could
-    ///      retain an upgrade path outside {_authorizeUpgrade}.
-    bytes32 private constant TREASURY_PROXY_CODE_HASH = keccak256(type(ERC1967Proxy).runtimeCode);
-
-    /// @notice The USD8 token this Treasury mints and burns. Set once at
-    ///         {initialize}; never changes across upgrades (same proxy).
-    USD8 public usd8;
+    /// @notice Maximum aggregate reserve-accounting difference allowed by one
+    ///         mint or redeem, in USDC base units. One full USDC = 1e6.
+    uint256 public constant RESERVE_CHECK_TOLERANCE = 1e6;
 
     /// @notice Approved strategies, in timelock-determined order. Membership
     ///         in this array IS the approval — there is no separate
@@ -139,10 +120,6 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         positive-weight receiver.
     ProfitReceiver[] public profitReceivers;
 
-    /// @notice Per-strategy reserve-check rounding tolerance, in USDC base units.
-    ///         Appended after existing proxy state to preserve upgrade storage layout.
-    mapping(IStrategy strategy => uint256 tolerance) public strategyTolerance;
-
     // ─────────────────────────── Errors ──────────────────────────
 
     /// @notice Thrown when a mint or redeem is called with zero amount.
@@ -174,24 +151,6 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     /// @notice Thrown by {addStrategy} when the strategy is already approved.
     error StrategyAlreadyApproved(IStrategy strategy);
 
-    /// @notice Thrown when a strategy tolerance exceeds the conservative 1 USDC cap.
-    error InvalidStrategyTolerance(uint256 tolerance, uint256 maximum);
-
-    /// @notice Thrown when initialization receives a non-contract dependency.
-    error InvalidContract(address account);
-
-    /// @notice Thrown when the supplied USD8 belongs to a different Registry.
-    error RegistryMismatch(address expected, address actual);
-
-    /// @notice Thrown when the Treasury is not behind the canonical adminless
-    ///         ERC1967Proxy used by the deployment flow.
-    error UnexpectedProxyCodeHash(bytes32 actual);
-
-    /// @notice Thrown by {addStrategy} when the strategy's reported
-    ///         underlying() is not USDC. Prevents wiring a USD8-denominated
-    ///         strategy into Treasury by mistake.
-    error StrategyAssetMismatch(IStrategy strategy, address expected, address actual);
-
     /// @notice Thrown by {removeProfitReceiver} when the address isn't registered.
     error ProfitReceiverNotFound(address receiver);
 
@@ -218,10 +177,6 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         {removeStrategy} — this is a force-removal that does not
     ///         require the strategy to be drained first.
     event StrategyRemoved(IStrategy indexed strategy);
-
-    /// @notice Emitted when admin or timelock changes an approved strategy's
-    ///         reserve-check rounding tolerance.
-    event StrategyToleranceSet(IStrategy indexed strategy, uint256 oldTolerance, uint256 newTolerance);
 
     /// @notice Emitted when timelock pushes idle USDC to a strategy.
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
@@ -254,34 +209,19 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     }
 
     /// @notice Initialize the Treasury proxy. Callable once.
-    /// @param _usd8       The USD8 token. This Treasury must be set as
-    ///                    USD8's treasury address for mint/redeem.
-    /// @param _registry  Shared access + pause registry (holds timelock/admin).
-    function initialize(USD8 _usd8, Registry _registry) external initializer {
-        if (address(_usd8) == address(0) || address(_registry) == address(0)) revert ZeroAddress();
-        if (address(_usd8).code.length == 0) revert InvalidContract(address(_usd8));
-        if (address(_registry).code.length == 0) revert InvalidContract(address(_registry));
-        Registry usd8Registry = _usd8.registry();
-        if (usd8Registry != _registry) revert RegistryMismatch(address(_registry), address(usd8Registry));
+    /// @param _registry Shared access, pause, and canonical-topology registry.
+    function initialize(Registry _registry) external initializer {
+        if (address(_registry) == address(0)) revert ZeroAddress();
         _setRegistry(_registry);
-        usd8 = _usd8;
     }
 
-    /// @notice Confirms this call is executing through the active, adminless
-    ///         ERC-1967 proxy used for UUPS upgrades.
-    /// @dev The inherited {onlyProxy} check rejects direct implementation calls
-    ///      and proxies whose implementation slot no longer points to this code.
-    ///      The exact runtime-code check rejects transparent/custom proxies that
-    ///      could otherwise retain an upgrade path outside {_authorizeUpgrade}.
-    function treasuryProxyMarker() external view onlyProxy returns (bytes32) {
-        bytes32 actualCodeHash = address(this).codehash;
-        if (actualCodeHash != TREASURY_PROXY_CODE_HASH) revert UnexpectedProxyCodeHash(actualCodeHash);
-        return TREASURY_PROXY_MARKER;
+    /// @notice Canonical USD8 token resolved from the shared Registry.
+    function usd8() public view returns (USD8) {
+        return USD8(registry().usd8());
     }
 
-    /// @dev Only the timelock can upgrade the Treasury — in place, so the reserve
-    ///      and USD8 authority never move (audit M-06). Same authority that gates
-    ///      the Registry/USD8 upgrades.
+    /// @dev Only the timelock can upgrade the Treasury in place. Registry topology
+    ///      may separately rotate the active Treasury when governance performs a migration.
     function _authorizeUpgrade(address) internal override onlyTimelock {}
 
     // ─────────────────────────── Modifiers ───────────────────────
@@ -290,29 +230,20 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///      system starts healthy or in surplus, surplus must not decrease; if it
     ///      starts distressed, the reserve/supply ratio must not decrease.
     ///
-    ///      Each check allows the sum of the approved strategies' configured
-    ///      tolerances for sub-USDC accounting dust a strategy withdrawal can
-    ///      shave off {getReserveBalance}. An ERC-4626 strategy burns CEIL shares
-    ///      while reporting FLOOR assets, so a redeem that pulls from it can lower
-    ///      the reserve slightly beyond the payout — up to roughly the value of one
-    ///      share base unit. The admin or timelock sets each strategy-specific
-    ///      allowance in USDC base units; newly approved strategies default to 5.
-    ///      Tolerance only decides revert-vs-pass: the redeemer's payout is fixed
-    ///      by the formula either way, so the slack cannot itself be withdrawn.
+    ///      Each check allows one full USDC of aggregate accounting difference.
+    ///      This accommodates strategy rounding without per-strategy configuration.
+    ///      Tolerance only decides revert-vs-pass: the redeemer's payout remains
+    ///      fixed by the formula and the allowance cannot itself be withdrawn.
     modifier reserveSupplyStatusCheck() {
         uint256 reserveBefore = getReserveBalance();
-        uint256 supplyBefore = usd8.totalSupply();
+        uint256 supplyBefore = usd8().totalSupply();
         _;
 
         uint256 reserveAfter = getReserveBalance();
-        uint256 supplyAfter = usd8.totalSupply();
+        uint256 supplyAfter = usd8().totalSupply();
         uint256 reserveBeforeInUsd8 = reserveBefore * USDC_TO_USD8_SCALE;
         uint256 reserveAfterInUsd8 = reserveAfter * USDC_TO_USD8_SCALE;
-        uint256 tol;
-        for (uint256 i = 0; i < strategies.length; i++) {
-            tol += strategyTolerance[strategies[i]];
-        }
-        tol *= USDC_TO_USD8_SCALE;
+        uint256 tol = RESERVE_CHECK_TOLERANCE * USDC_TO_USD8_SCALE;
 
         if (reserveBeforeInUsd8 >= supplyBefore) {
             // surplusAfter >= surplusBefore - tol, rearranged to avoid underflow
@@ -341,7 +272,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
 
         USDC.safeTransferFrom(msg.sender, address(this), usdcAmount);
         uint256 usd8Amount = usdcAmount * USDC_TO_USD8_SCALE;
-        usd8.mint(msg.sender, usd8Amount);
+        usd8().mint(msg.sender, usd8Amount);
 
         emit Minted(msg.sender, usdcAmount, usd8Amount);
         // USDC sits idle until admin/timelock explicitly allocates it via
@@ -367,7 +298,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     {
         if (usd8Amount == 0) revert ZeroAmount();
 
-        uint256 supply = usd8.totalSupply();
+        uint256 supply = usd8().totalSupply();
         if (supply == 0) revert NoUsd8Supply();
         uint256 reserveInUsd8 = getReserveBalance() * USDC_TO_USD8_SCALE;
         // Effective collateral is capped at peg: surplus is reserved for
@@ -378,7 +309,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
         uint256 usdcAmount = Math.mulDiv(usd8Amount, eff, supply) / USDC_TO_USD8_SCALE;
         if (usdcAmount < minUsdcOut) revert InsufficientUsdcOut(usdcAmount, minUsdcOut);
 
-        usd8.burn(msg.sender, usd8Amount);
+        usd8().burn(msg.sender, usd8Amount);
         _ensureIdleUsdc(usdcAmount);
         USDC.safeTransfer(msg.sender, usdcAmount);
 
@@ -391,13 +322,11 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
     ///         redeem fallback withdrawal queue (strategies[0] is consulted
     ///         first). Timelock only. Any index >= strategies.length appends.
     ///         To reposition an existing strategy, {removeStrategy} it and
-    ///         re-add it at the desired index — drain it first if funded.
+    ///         re-add it at the desired index. withdraw goes from first strategy.
     ///         Strategy approval is a trusted process — timelock is expected to
     ///         verify the contract implements IStrategy correctly off-chain.
     function addStrategy(IStrategy s, uint256 index) external onlyTimelock {
         if (address(s) == address(0)) revert ZeroAddress();
-        address underlying = s.underlying();
-        if (underlying != address(USDC)) revert StrategyAssetMismatch(s, address(USDC), underlying);
         (, bool exists) = _findStrategy(s);
         if (exists) revert StrategyAlreadyApproved(s);
 
@@ -408,22 +337,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
             strategies[i] = strategies[i - 1];
         }
         strategies[index] = s;
-        strategyTolerance[s] = DEFAULT_STRATEGY_TOLERANCE;
         emit StrategyAdded(s);
-        emit StrategyToleranceSet(s, 0, DEFAULT_STRATEGY_TOLERANCE);
-    }
-
-    /// @notice Set an approved strategy's reserve-check rounding tolerance.
-    /// @param s Strategy whose tolerance is updated.
-    /// @param newTolerance Tolerance in USDC base units.
-    function setStrategyTolerance(IStrategy s, uint256 newTolerance) external onlyAdminOrTimelock {
-        _findApprovedStrategy(s);
-        if (newTolerance > MAX_STRATEGY_TOLERANCE) {
-            revert InvalidStrategyTolerance(newTolerance, MAX_STRATEGY_TOLERANCE);
-        }
-        uint256 oldTolerance = strategyTolerance[s];
-        strategyTolerance[s] = newTolerance;
-        emit StrategyToleranceSet(s, oldTolerance, newTolerance);
     }
 
     /// @notice Remove a previously approved strategy. Timelock only.
@@ -453,7 +367,6 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
             strategies[i] = strategies[i + 1];
         }
         strategies.pop();
-        delete strategyTolerance[s];
         emit StrategyRemoved(s);
     }
 
@@ -524,17 +437,17 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
         returns (uint256 harvested, uint256 distributed)
     {
         // ── Harvest: mint surplus above the retained buffer. ──
-        uint256 supply = usd8.totalSupply();
+        uint256 supply = usd8().totalSupply();
         uint256 reserveInUsd8 = getReserveBalance() * USDC_TO_USD8_SCALE;
         uint256 retain = supply + supply / HARVEST_BUFFER_DIVISOR;
         if (reserveInUsd8 > retain) {
             harvested = reserveInUsd8 - retain;
-            usd8.mint(address(this), harvested); // no JIT concerns
+            usd8().mint(address(this), harvested); // no JIT concerns
             emit RevenueHarvested(harvested);
         }
 
         // ── Distribute the full revenue pool across receivers by weight. ──
-        distributed = usd8.balanceOf(address(this));
+        distributed = usd8().balanceOf(address(this));
         if (distributed == 0) return (harvested, distributed);
 
         // Pass 1: total the weights and find the last positive-weight receiver.
@@ -557,48 +470,24 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
             if (p.weight == 0) continue;
             uint256 share = i == lastEligible ? distributed - paid : Math.mulDiv(distributed, p.weight, totalWeight);
             paid += share;
-            if (share != 0) _deliverRevenue(p.receiver, share, p.mode);
+            if (share == 0) continue;
+
+            if (p.mode == RevenueDistributionMode.DirectTransfer) {
+                // No need for SafeTransfer here: USD8 is the protocol's own token.
+                usd8().transfer(p.receiver, share);
+            } else {
+                uint256 balanceBefore = usd8().balanceOf(address(this));
+                usd8().approve(p.receiver, share);
+                IProfitDistributionReceiver(p.receiver).receiveProfitDistribution(share);
+                usd8().approve(p.receiver, 0);
+
+                uint256 balanceAfter = usd8().balanceOf(address(this));
+                uint256 delivered = balanceAfter <= balanceBefore ? balanceBefore - balanceAfter : 0;
+                if (delivered != share) revert RevenueDeliveryMismatch(share, delivered);
+            }
+
+            emit RevenueDistributed(p.receiver, share);
         }
-    }
-
-    /// @notice Forward amount of the Treasury's USD8 balance to a single
-    ///         recipient — an ad-hoc escape hatch alongside the weighted
-    ///         {harvestAndDistribute}. Admin or timelock; blocked while paused.
-    ///         mode controls whether USD8 is sent directly or delivered through
-    ///         {IProfitDistributionReceiver-receiveProfitDistribution} —
-    ///         accounting-aware consumers such as the sUSD8 Morpho adapter MUST be paid via
-    ///         ReceiveProfitDistribution.
-    function distributeRevenue(address recipient, uint256 amount, RevenueDistributionMode mode)
-        external
-        nonReentrant
-        onlyAdminOrTimelock
-        whenNotPaused
-    {
-        if (recipient == address(0)) revert ZeroAddress();
-        if (amount == 0) revert ZeroAmount();
-        _deliverRevenue(recipient, amount, mode);
-    }
-
-    /// @dev Deliver amount USD8 to recipient via mode. DirectTransfer sends the
-    ///      token raw; ReceiveProfitDistribution approves and calls the vesting-
-    ///      aware {IProfitDistributionReceiver-receiveProfitDistribution}, then
-    ///      clears any residual allowance and verifies the exact balance delta.
-    function _deliverRevenue(address recipient, uint256 amount, RevenueDistributionMode mode) internal {
-        if (mode == RevenueDistributionMode.DirectTransfer) {
-            // no need for SafeTransfer here, usd8 is our own token.
-            usd8.transfer(recipient, amount);
-        } else {
-            uint256 balanceBefore = usd8.balanceOf(address(this));
-            usd8.approve(recipient, amount);
-            IProfitDistributionReceiver(recipient).receiveProfitDistribution(amount);
-            usd8.approve(recipient, 0);
-
-            uint256 balanceAfter = usd8.balanceOf(address(this));
-            uint256 delivered = balanceAfter <= balanceBefore ? balanceBefore - balanceAfter : 0;
-            if (delivered != amount) revert RevenueDeliveryMismatch(amount, delivered);
-        }
-
-        emit RevenueDistributed(recipient, amount);
     }
 
     /// @notice Register a profit receiver or update its weight/mode. Admin or
@@ -646,12 +535,12 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, R
 
     // ─────────────────────────── Admin control ───────────────────────────
 
-    /// @dev Rescuable via {RegistryManaged-rescueToken}: any stray token EXCEPT the
+    /// @dev Rescuable via {SharedBase-rescueToken}: any stray token EXCEPT the
     ///      reserve asset ({USDC}) and the harvested-revenue token ({usd8}),
     ///      which are protected (cap 0). Their normal exits are redeem/strategy
-    ///      flows (USDC) and {distributeRevenue} (USD8).
+    ///      flows (USDC) and {harvestAndDistribute} (USD8).
     function _sweepable(address token) internal view override returns (uint256) {
-        if (token == address(USDC) || token == address(usd8)) return 0;
+        if (token == address(USDC) || token == address(usd8())) return 0;
         return IERC20(token).balanceOf(address(this));
     }
 

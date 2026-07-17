@@ -56,7 +56,6 @@ contract USD8SavingsBootstrap {
                 || address(config.usd8) == address(0) || address(config.treasury) == address(0)
                 || config.seedSink == address(0) || config.governance == address(0)
         ) revert InvalidAddress();
-        if (config.vaultFactory.code.length == 0) revert InvalidFactory();
         executed = true;
         d.bootstrap = address(this);
 

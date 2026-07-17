@@ -37,13 +37,12 @@ contract USD8SavingsBootstrapTest is Test {
                 )
             )
         );
-        usd8 = USD8(
-            address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry, address(this)))))
-        );
+        usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
+        registry.setUsd8(address(usd8));
         treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (usd8, registry))))
+            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
         );
-        usd8.setTreasury(address(treasury));
+        registry.setTreasury(address(treasury));
         vaultFactory = new VaultV2Factory();
     }
 

@@ -190,10 +190,10 @@ describe("settle — payout math", () => {
     expect(split.rows.map((row) => row.payoutUsd)).toEqual([20n * WAD, 20n * WAD]);
   });
 
-  it("scarce pool → equal-need payouts use the square root of spent score", async () => {
+  it("scarce pool → equal-need payouts use the square root of boosted score", async () => {
     setEarned();
     // Both caps are $80, so covered need is equal and the weights differ only by
-    // sqrt(scoreSpent). Integer division leaves one wei of deterministic dust.
+    // sqrt(boostedScore). With no boosters here, boostedScore equals raw scoreSpent.
     const s = await settle({} as any, 1n, cfg, events, baseOpts(100n * WAD));
 
     expect(s.rows.map((r) => r.scoreSpent)).toEqual([60n, 40n]);
@@ -322,8 +322,11 @@ describe("settle — booster cap", () => {
     h.integrals.set(BOB.toLowerCase(), 100n);
     h.boosterBalances.set(BOB.toLowerCase(), 2n); // holds ≥ the 2 committed
     const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], baseOpts(10_000n * WAD));
-    // 100 × 10200/10000 = 102
-    expect(s.rows[0].earnedScore).toEqual(102n);
+    // Raw availability stays 100; 100 × 10200/10000 = 102 is separate.
+    expect(s.rows[0].earnedScore).toEqual(100n);
+    expect(s.rows[0].scoreSpent).toEqual(100n);
+    expect(s.rows[0].boosterAmountUsed).toEqual(2n);
+    expect(s.rows[0].boostedScore).toEqual(102n);
   });
 
   it("boost capped at min held; sold-down boosters don't count", async () => {
@@ -346,19 +349,21 @@ describe("settle — booster cap", () => {
     expect((chain.minErc1155BalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls.length).toBe(0);
   });
 
-  it("I-2: booster boosts ONLY the unspent remainder, not already-spent score", async () => {
+  it("records only raw score spent and applies the booster only to payout weighting", async () => {
     h.integrals.clear();
     h.minBalances.clear();
     h.boosterBalances.clear();
     h.integrals.set(BOB.toLowerCase(), 100n); // raw lifetime earned = 100
     h.boosterBalances.set(BOB.toLowerCase(), 2n); // holds the 2 committed
-    // 40 already spent on prior incidents. Correct: (100 − 40) × 10200/10000 = 61.
-    // The old bug gave 100 × 10200/10000 − 40 = 62 (booster boosting spent score).
+    // 40 was already spent, leaving 60 raw score. The claim can consume only those
+    // 60 raw units; the 2% booster creates a separate payout weight of 61.
     const opts = { ...baseOpts(10_000n * WAD), spentOf: (_u: `0x${string}`) => 40n };
     const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], opts);
-    expect(s.rows[0].grossEarnedScore).toEqual(100n); // signed input is pre-spend, pre-booster
-    expect(s.rows[0].earnedScore).toEqual(61n);
-    expect(s.rows[0].scoreSpent).toEqual(61n);
+    expect(s.rows[0].grossEarnedScore).toEqual(100n);
+    expect(s.rows[0].earnedScore).toEqual(60n);
+    expect(s.rows[0].scoreSpent).toEqual(60n);
+    expect(s.rows[0].boosterAmountUsed).toEqual(2n);
+    expect(s.rows[0].boostedScore).toEqual(61n);
     expect(s.settlementInputHash).toBe(settlementInputHashOf([{ user: BOB, grossEarnedScore: 100n }]));
   });
 });
@@ -412,29 +417,20 @@ describe("settlementInputHash — canonical gross-score commitment", () => {
       poolAddrs: [ASSET, INS],
     };
     const claimSet = `0x${"22".repeat(32)}` as `0x${string}`;
-    const configHash = `0x${"33".repeat(32)}` as `0x${string}`;
-    const inputHash = settlementInputHashOf(rows);
-    const typed = settlementTypedData(1, INS, settlement, 2n, claimSet, configHash, inputHash);
-    expect(typed.types.Settlement.at(-1)).toEqual({ name: "settlementInputHash", type: "bytes32" });
-    expect(typed.message.settlementInputHash).toBe(inputHash);
+    const teePcrHash = `0x${"55".repeat(32)}` as `0x${string}`;
+    const typed = settlementTypedData(1, INS, settlement, 2n, claimSet, teePcrHash);
+    expect(typed.types.Settlement.at(-1)).toEqual({ name: "teePcrHash", type: "bytes32" });
+    expect(typed.message.teePcrHash).toBe(teePcrHash);
 
-    const changed = settlementTypedData(
-      1,
-      INS,
-      settlement,
-      2n,
-      claimSet,
-      configHash,
-      `0x${"44".repeat(32)}`
-    );
+    const changed = settlementTypedData(1, INS, settlement, 2n, claimSet, `0x${"66".repeat(32)}`);
     expect(hashTypedData(changed)).not.toBe(hashTypedData(typed));
   });
 });
 
 describe("settlementTree / proofs", () => {
   const rows = [
-    { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n, eligibleAmount: 100n * WAD },
-    { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n, eligibleAmount: 100n * WAD },
+    { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n, boosterAmountUsed: 2n, boostedScore: 61n, eligibleAmount: 100n * WAD },
+    { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n, boosterAmountUsed: 0n, boostedScore: 40n, eligibleAmount: 100n * WAD },
   ];
 
   it("proofs verify against the root with the canonical leaf encoding", () => {
@@ -456,11 +452,13 @@ describe("settlementTree / proofs", () => {
     }
   });
 
-  it("root is deterministic and changes with amounts, scoreSpent, or eligible", () => {
+  it("root commits amounts, raw score, booster amount used, boosted score, and eligible", () => {
     const base = settlementTree(1n, rows).root;
     expect(settlementTree(1n, rows).root).toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], amounts: [61n * WAD] }, rows[1]]).root).not.toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], scoreSpent: 59n }, rows[1]]).root).not.toEqual(base);
+    expect(settlementTree(1n, [{ ...rows[0], boosterAmountUsed: 1n }, rows[1]]).root).not.toEqual(base);
+    expect(settlementTree(1n, [{ ...rows[0], boostedScore: 60n }, rows[1]]).root).not.toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], eligibleAmount: 99n * WAD }, rows[1]]).root).not.toEqual(base);
   });
 });
@@ -494,7 +492,7 @@ describe("blockAtOrBeforeTimestamp — window-end boundary (H-02)", () => {
   });
 });
 
-describe("configHash — settlement config commitment (M-04)", () => {
+describe("configHash — settlement artifact commitment", () => {
   it("is deterministic and insensitive to feed-map key order", async () => {
     const { CONFIG, configHash } = await import("../src/config.js");
     const original = { ...CONFIG.assetUsdFeed };

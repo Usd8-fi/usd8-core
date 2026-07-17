@@ -18,6 +18,7 @@ export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as cons
 // reading these at the incident's openBlock (see {incidentConfigOf}).
 export const DEFI_ABI = parseAbi([
   "function incidents(uint256) view returns (address insuredToken, uint64 claimWindowEndTime, bytes32 root, uint256 unresolved, uint64 rootSubmittedAt, uint64 referenceBlock, uint64 openBlock, uint8 status, uint64 disputedAt, bytes32 claimSetHash)",
+  "function incidentTeePcrHash(uint256 incidentId) view returns (bytes32)",
   "function getInsuredToken(address) view returns ((uint256 maxCoverageBps, address underlyingPriceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData, uint128 minClaimAmount))",
   "function settlementParams() view returns (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks)",
 ]);
@@ -186,7 +187,7 @@ function orderLogs<T extends { blockNumber: bigint; logIndex: number }>(a: T, b:
 // merged result is identical regardless of provider. An inverted range (to < from)
 // yields [] deterministically (guards the degenerate window, audit L-C).
 //
-// The caps live in config.ts (committed in configHash, M-01) and MUST be ≤ the
+// The caps live in config.ts (recorded in configHash) and MUST be ≤ the
 // configured provider's documented limits — there is no universal cap (Blockscout
 // is 1,000, not 10,000). If bisection reaches a single block that STILL returns a
 // full page, we can't prove completeness, so we FAIL CLOSED (throw) rather than
@@ -463,6 +464,23 @@ export async function boosterNftAt(client: PublicClient, blockNumber: bigint): P
   })) as `0x${string}`;
 }
 
+/** PCR0/PCR1/PCR2 commitment snapshotted for an incident at open. */
+export async function incidentTeePcrHashAt(
+  client: PublicClient,
+  incidentId: bigint,
+  blockNumber: bigint
+): Promise<`0x${string}`> {
+  const value = (await client.readContract({
+    address: CONFIG.defiInsurance,
+    abi: DEFI_ABI,
+    functionName: "incidentTeePcrHash",
+    args: [incidentId],
+    blockNumber,
+  })) as `0x${string}`;
+  if (value === `0x${"0".repeat(64)}`) throw new Error("incident teePcrHash is zero");
+  return value;
+}
+
 /** The universal per-incident payout cap (bps) as of `blockNumber`. */
 export async function maxCoverPoolPayoutBpsAt(client: PublicClient, blockNumber: bigint): Promise<bigint> {
   return (await client.readContract({
@@ -717,6 +735,29 @@ async function assertErc20ReplayEnd(
   }
 }
 
+async function assertErc1155ReplayEnd(
+  client: PublicClient,
+  collection: `0x${string}`,
+  who: `0x${string}`,
+  id: bigint,
+  toBlock: bigint,
+  replayedBalance: bigint
+): Promise<void> {
+  const actualBalance = (await client.readContract({
+    address: collection,
+    abi: ERC1155_ABI,
+    functionName: "balanceOf",
+    args: [who, id],
+    blockNumber: toBlock,
+  })) as bigint;
+  if (replayedBalance !== actualBalance) {
+    throw new Error(
+      `unsupported ERC-1155 balance semantics for ${collection} token ${id}: transfer replay ended at ` +
+        `${replayedBalance}, balanceOf(${who}, ${id}) at block ${toBlock} is ${actualBalance}`
+    );
+  }
+}
+
 /**
  * Merge outflow (from == who) and inflow (to == who) Transfer logs into net
  * balance deltas, summed per unique (blockNumber, logIndex), then sorted. Netting
@@ -773,7 +814,9 @@ export async function minBalanceOver(
  * replaying TransferSingle/TransferBatch — the same continuous-holding rule the
  * insured-token eligibility uses, applied to the booster. This is the cap on the
  * boost a claim can apply: the claimant must have held the committed boosters
- * continuously from filing through window-end (they are burned at finalize).
+ * continuously from the end of the filing block through window-end (they are
+ * burned at finalize). Ethereum's historical state API is block-granular, so
+ * intra-filing-block balance changes are intentionally outside this window.
  */
 export async function minErc1155BalanceOver(
   client: PublicClient,
@@ -829,6 +872,7 @@ export async function minErc1155BalanceOver(
     bal += e.delta;
     if (bal < min) min = bal;
   }
+  await assertErc1155ReplayEnd(client, collection, who, id, toBlock, bal);
   return min;
 }
 

@@ -12,7 +12,7 @@ if (!process.argv[2] || !Number.isSafeInteger(samples) || samples < 3) {
   console.error("usage: node cold-start.mjs <fixture.json> [samples>=3]");
   process.exit(2);
 }
-const rust = resolve(here, "../target/release/usd8-settlement");
+const rust = resolve(here, "../../../offchain-rust/target/release/usd8-settlement");
 const ts = resolve(here, "ts-kernel.mjs");
 const options = { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 };
 function elapsed(command, args) {

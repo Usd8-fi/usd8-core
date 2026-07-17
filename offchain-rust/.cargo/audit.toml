@@ -2,8 +2,12 @@
 # Unmaintained, not vulnerable. `derivative` is only in Alloy's optional ark-ff
 # lock graph and is absent from `cargo tree --target all`. `paste` and
 # `proc-macro-error2` are compile-time dependencies of latest alloy 1.6.0.
-# Remove each exception when Alloy removes the dependency.
+# `serde_cbor` is a Linux-only dependency of AWS's NSM API 0.4.0; NSM API 0.5.x
+# removes it but requires Rust 1.92, above this package's pinned 1.91.1 toolchain.
+# Upgrade the NSM API with the pinned Rust toolchain; remove Alloy exceptions
+# when Alloy removes the corresponding dependencies.
 ignore = [
+  "RUSTSEC-2021-0127",
   "RUSTSEC-2024-0388",
   "RUSTSEC-2024-0436",
   "RUSTSEC-2026-0173",

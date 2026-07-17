@@ -1,9 +1,9 @@
 use crate::chain::{
     BlockAnchor, ChainError, Incident, SettlementAnchors, assert_anchors_unchanged,
     assert_contract_code_at, booster_nft_at, chain_id, decimals_at, earned_score_of,
-    finalized_settlement_anchors, incident_at, incident_config_at, max_cover_pool_payout_bps_at,
-    min_balance_over, min_erc1155_balance_over, pool_state_at, pools_at, price_usd_1e18,
-    read_input_events, spent_score_at, twap_ratio_before,
+    finalized_settlement_anchors, incident_at, incident_config_at, incident_tee_pcr_hash_at,
+    max_cover_pool_payout_bps_at, min_balance_over, min_erc1155_balance_over, pool_state_at,
+    pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
 };
 use crate::checkpoint::{CheckpointError, CheckpointScoreSource};
 use crate::config::{BootstrapConfig, ConfigError};
@@ -80,6 +80,7 @@ pub struct SettlementRun {
     pub latest_incident: Incident,
     pub anchors: SettlementAnchors,
     pub config_hash: String,
+    pub tee_pcr_hash: String,
     pub pool_order: Vec<Address>,
     pub pool_addrs: Vec<Address>,
     pub twap_ratio: BigUint,
@@ -140,6 +141,8 @@ impl SettlementRun {
                     "grossEarnedScore": row.gross_earned_score.to_string(),
                     "earnedScore": row.earned_score.to_string(),
                     "scoreSpent": row.score_spent.to_string(),
+                    "boosterAmountUsed": row.booster_amount_used.to_string(),
+                    "boostedScore": row.boosted_score.to_string(),
                     "payoutUsd": row.payout_usd.to_string(),
                     "amounts": row.amounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 });
@@ -189,6 +192,7 @@ impl SettlementRun {
             "schemaVersion": 1,
             "configVersion": config.version,
             "configHash": self.config_hash,
+            "teePcrHash": self.tee_pcr_hash,
             "claimSetHash": self.output.claim_set_hash,
             "settlementInputHash": self.output.settlement_input_hash,
             "settlementInputRows": input_rows,
@@ -303,6 +307,13 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         rpc.as_ref(),
         config.registry,
         "Registry",
+        provisional.open_block,
+    )
+    .await?;
+    let tee_pcr_hash = incident_tee_pcr_hash_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        &incident_id,
         provisional.open_block,
     )
     .await?;
@@ -605,8 +616,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         pool_payouts: output.pool_payouts.clone(),
         pool_addrs: topology.pool_addrs.clone(),
         claim_set: output.claim_set_hash.clone(),
-        config_hash: config_hash.clone(),
-        settlement_input_hash: output.settlement_input_hash.clone(),
+        tee_pcr_hash: tee_pcr_hash.clone(),
     })?;
     let latest_incident = incident_at(
         rpc.as_ref(),
@@ -624,6 +634,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         latest_incident,
         anchors,
         config_hash,
+        tee_pcr_hash,
         pool_order: topology.assets,
         pool_addrs: topology.pool_addrs,
         twap_ratio,

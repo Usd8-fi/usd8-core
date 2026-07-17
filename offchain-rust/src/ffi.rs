@@ -6,9 +6,10 @@ use num_bigint::BigUint;
 use std::str::FromStr;
 use thiserror::Error;
 
-type TreePayload = sol!((uint256,uint256[],address[],uint256[][],uint256[],uint256[]));
+type TreePayload =
+    sol!((uint256,uint256[],address[],uint256[][],uint256[],uint256[],uint256[],uint256[]));
 type DigestPayload =
-    sol!((uint256,address,uint256,bytes32,uint256,uint256[],address[],bytes32,bytes32,bytes32));
+    sol!((uint256,address,uint256,bytes32,uint256,uint256[],address[],bytes32,bytes32));
 type ClaimSetPayload = sol!((uint8[],uint256[],address[],uint256[],uint256[],uint256[]));
 type Bytes32Type = sol!(bytes32);
 type Bytes32ArrayType = sol!(bytes32[]);
@@ -54,11 +55,14 @@ fn parse_b256(value: &str) -> Result<B256, FfiError> {
 fn tree(payload: &str) -> Result<(SettlementTree, Vec<BigUint>), FfiError> {
     let decoded = <TreePayload as SolType>::abi_decode_params(&payload_bytes(payload)?)
         .map_err(|error| FfiError::InvalidAbi(error.to_string()))?;
-    let (incident_id, ids, users, amounts, spents, eligibles) = decoded;
+    let (incident_id, ids, users, amounts, spents, booster_amounts_used, boosteds, eligibles) =
+        decoded;
     let length = ids.len();
     if users.len() != length
         || amounts.len() != length
         || spents.len() != length
+        || booster_amounts_used.len() != length
+        || boosteds.len() != length
         || eligibles.len() != length
     {
         return Err(FfiError::InvalidInput(
@@ -72,14 +76,23 @@ fn tree(payload: &str) -> Result<(SettlementTree, Vec<BigUint>), FfiError> {
         .zip(users.into_iter().map(local_address))
         .zip(amounts)
         .zip(spents)
+        .zip(booster_amounts_used)
+        .zip(boosteds)
         .zip(eligibles)
         .map(
-            |((((claim_id, user), amounts), score_spent), eligible_amount)| MerkleRow {
-                claim_id,
-                user,
-                amounts: amounts.into_iter().map(big).collect(),
-                score_spent: big(score_spent),
-                eligible_amount: big(eligible_amount),
+            |(
+                (((((claim_id, user), amounts), score_spent), booster_amount_used), boosted_score),
+                eligible_amount,
+            )| {
+                MerkleRow {
+                    claim_id,
+                    user,
+                    amounts: amounts.into_iter().map(big).collect(),
+                    score_spent: big(score_spent),
+                    booster_amount_used: big(booster_amount_used),
+                    boosted_score: big(boosted_score),
+                    eligible_amount: big(eligible_amount),
+                }
             },
         )
         .collect::<Vec<_>>();
@@ -138,8 +151,7 @@ pub fn run(command: &str, payload: &str, argument: Option<&str>) -> Result<Strin
                 pool_payouts,
                 pool_addrs,
                 claim_set,
-                config_hash,
-                settlement_input_hash,
+                tee_pcr_hash,
             ) = decoded;
             let chain_id = u64::try_from(chain_id)
                 .map_err(|_| FfiError::InvalidInput("chain id exceeds uint64".to_owned()))?;
@@ -152,8 +164,7 @@ pub fn run(command: &str, payload: &str, argument: Option<&str>) -> Result<Strin
                 pool_payouts: pool_payouts.into_iter().map(big).collect(),
                 pool_addrs: pool_addrs.into_iter().map(local_address).collect(),
                 claim_set: b256_hex(claim_set),
-                config_hash: b256_hex(config_hash),
-                settlement_input_hash: b256_hex(settlement_input_hash),
+                tee_pcr_hash: b256_hex(tee_pcr_hash),
             })
             .map_err(|error| FfiError::Compute(error.to_string()))?;
             Ok(encode_bytes32(parse_b256(&digest)?))

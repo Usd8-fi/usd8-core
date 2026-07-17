@@ -8,7 +8,7 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SingleAssetCoverPoolTest} from "./SingleAssetCoverPool.t.sol";
 import {DefiInsurance} from "../src/DefiInsurance.sol";
-import {RegistryManaged} from "../src/RegistryManaged.sol";
+import {SharedBase} from "../src/SharedBase.sol";
 import {Registry} from "../src/Registry.sol";
 import {SingleAssetCoverPool} from "../src/SingleAssetCoverPool.sol";
 import {ERC4626Strategy} from "../src/strategies/ERC4626Strategy.sol";
@@ -106,7 +106,7 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
     function test_Audit_LastClaimStaysFrozenThroughRefund() public {
         // H-01: finalizing the FINAL unresolved claim must keep the incident active
         // (pool frozen) through the over-escrow refund, so a callback in the insured
-        // token can't re-enter completeRedeem and exit at the pre-loss share price.
+        // token can't re-enter redeem and exit at the pre-loss share price.
         FreezeProbeToken tok = new FreezeProbeToken(registry);
         tok.setDefi(address(defi));
         vm.prank(admin);
@@ -126,11 +126,11 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         vm.warp(block.timestamp + 5 days + 1);
         uint256[] memory amounts = _amounts(20e6);
         uint256 eligible = 60e18; // < escrow → 40e18 refund fires the probe
-        _settle(1, _leafSpent(1, claimId, bob, amounts, 0, eligible));
+        _settle(1, _leafSpent(1, claimId, bob, amounts, 0, 0, 0, eligible));
         vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1);
 
         vm.prank(bob);
-        defi.finalizeClaim(amounts, 0, eligible, new bytes32[](0));
+        defi.finalizeClaim(amounts, 0, 0, 0, eligible, new bytes32[](0));
 
         assertTrue(tok.probed(), "refund fired the probe");
         assertTrue(tok.frozenDuringRefund(), "H-01: incident still frozen during the last claim's refund");
@@ -149,41 +149,6 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         pool.receiveProfitDistribution(1);
         vm.stopPrank();
         assertEq(pool.rewardReserve(), 0, "nothing reserved");
-    }
-
-    /// @dev L-A: dispute may only target a STANDING SETTLED root. A pre-settlement
-    ///      dispute reverts NoStandingRoot, so it can't stamp disputedAt early (which
-    ///      would let CORRECTION_WINDOW auto-void a valid incident) or move the
-    ///      incident to Disputed while its claim window is still open. The
-    ///      pre-settlement emergency stop is closeIncident.
-    function test_Audit_DisputeRequiresStandingRoot() public {
-        _registerClaim(bob, lp1, 50e18);
-        (, uint64 wEnd,,,,,,,,) = defi.incidents(1);
-        assertLe(block.timestamp, wEnd, "still inside the claim window, no root settled");
-
-        // No standing root → dispute rejected.
-        vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.NoStandingRoot.selector, uint256(1)));
-        defi.disputeIncident();
-
-        // closeIncident IS the pre-settlement stop: it voids and unfreezes.
-        vm.prank(admin);
-        defi.closeIncident();
-        assertEq(defi.activeIncidentId(), 0, "closed incident is no longer active");
-    }
-
-    /// @dev L-A: once settled, dispute works normally (root standing, within the
-    ///      DISPUTE window) — the standing-root gate doesn't break the real flow.
-    function test_Audit_DisputeWorksOnceSettled() public {
-        uint256 claimId = _registerClaim(bob, lp1, 50e18);
-        vm.warp(block.timestamp + 5 days + 1); // claim window closed
-        _settle(1, _leaf(1, claimId, bob, _amounts(0)));
-
-        vm.prank(admin);
-        defi.disputeIncident();
-        (,, bytes32 root,,,,, DefiInsurance.Status status,,) = defi.incidents(1);
-        assertEq(root, bytes32(0), "bad root cleared");
-        assertTrue(status == DefiInsurance.Status.Disputed, "status Disputed");
     }
 
     /// @dev Beta mode: admin corrects a bad TEE root in ONE call (no separate
@@ -223,13 +188,11 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         bytes32 corrRoot = _leaf(1, claimId, bob, _amounts(0));
         uint256[] memory pp = _pp();
         vm.prank(admin);
-        vm.expectRevert(RegistryManaged.NotBetaMode.selector);
+        vm.expectRevert(SharedBase.NotBetaMode.selector);
         defi.adminCorrectSettlement(corrRoot, pp);
     }
 
-    /// @dev Full claim/settle/dispute/correct/finalize state machine in phase order
-    ///      (audit test gap 2): every out-of-phase action reverts at each stage, then
-    ///      the in-phase action advances the machine.
+    /// @dev Full claim/settle/beta-correct/finalize state machine in phase order.
     function test_Audit_PhaseOrderStateMachine() public {
         uint256 claimId = _registerClaim(bob, lp1, 50e18);
         uint256[] memory amounts = _amounts(0);
@@ -237,12 +200,12 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         uint256[] memory pp = _pp();
 
         // CLAIM phase: settle and finalize are both out of phase.
-        bytes memory sig = _teeSign(1, root, pp, TEST_SETTLEMENT_INPUT_HASH); // before expectRevert: helper reads incidents
+        bytes memory sig = _teeSign(1, root, pp); // before expectRevert: helper reads incidents
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.OutsideSettlementPhase.selector, uint256(1)));
-        defi.settleIncident(1, root, pp, TEST_CONFIG_HASH, TEST_SETTLEMENT_INPUT_HASH, sig);
+        defi.settleIncident(root, pp, sig);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
-        defi.finalizeClaim(amounts, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(amounts, 0, 0, 0, 50e18, new bytes32[](0));
 
         // Window closes: join and cancel are now out of phase.
         (, uint64 wEnd,,,,,,,,) = defi.incidents(1);
@@ -261,75 +224,51 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         _settle(1, root);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
-        defi.finalizeClaim(amounts, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(amounts, 0, 0, 0, 50e18, new bytes32[](0));
 
-        // Dispute clears the root; correction (post-window, allowed) restarts a
-        // FRESH dispute clock, so finalize is gated again…
+        // A beta correction restarts a fresh dispute clock, so finalize is gated again.
         vm.prank(admin);
-        defi.disputeIncident();
-        vm.prank(admin);
-        defi.correctSettlement(root, pp);
+        defi.adminCorrectSettlement(root, pp);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
-        defi.finalizeClaim(amounts, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(amounts, 0, 0, 0, 50e18, new bytes32[](0));
 
-        // …until the corrected root's DISPUTE period passes; then finalize pays and,
-        // as the last claim, retires the incident.
+        // Once the corrected root's dispute period passes, finalization retires it.
         vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1);
         _finalize(claimId, amounts, 0);
         assertEq(defi.activeIncidentId(), 0);
     }
 
-    /// @dev Async ERC-4626 conformance (audit test gap 4 / M-07): redeem is the
-    ///      single exit door — redeem(maxRedeem) succeeds exactly, after transfers
-    ///      of the excess and after a payout loss. The asset door is disabled
-    ///      outright: withdraw() always reverts and maxWithdraw() is always 0, so
-    ///      no advertised amount can ever revert.
-    function test_Audit_RedeemMaxRedeemConformsAfterTransferAndLoss() public {
+    /// @dev Requested shares are escrowed, remain loss-exposed until their exit epoch, then
+    ///      become a fixed claim while both standard ERC-4626 exit doors stay disabled.
+    function test_Audit_ExitClaimHandlesLossWhileStandardDoorsStayDisabled() public {
         uint256 shares = _stake(alice, 100e6);
         vm.prank(alice);
         pool.requestRedeem(shares / 2);
 
-        // Asset-denominated exit is unsupported, in every state.
         assertEq(pool.maxWithdraw(alice), 0);
+        assertEq(pool.maxRedeem(alice), 0);
         vm.prank(alice);
         vm.expectRevert(SingleAssetCoverPool.WithdrawNotSupported.selector);
         pool.withdraw(1e6, alice, alice);
+        vm.prank(alice);
+        vm.expectRevert(SingleAssetCoverPool.RedeemNotSupported.selector);
+        pool.redeem(1, alice, alice);
 
-        // Not matured: the share door advertises 0 too.
-        assertEq(pool.maxRedeem(alice), 0);
-
-        // Transfer the unlocked excess away, mature the request: maxRedeem
-        // advertises exactly the request, never more than the remaining balance
-        // (M-03 lock).
-        vm.startPrank(alice);
+        // Only the non-requested half remains in Alice's wallet and transferable.
+        vm.prank(alice);
         pool.transfer(bob, shares - shares / 2);
-        vm.warp(block.timestamp + pool.UNSTAKE_COOLDOWN());
-        assertEq(pool.maxRedeem(alice), shares / 2);
-        assertLe(pool.maxRedeem(alice), pool.balanceOf(alice));
-
-        // A payout loss drops the share price below 1.
-        vm.stopPrank();
         vm.prank(address(defi));
         pool.payClaim(carol, 30e6);
 
-        // redeem(maxRedeem) completes exactly at the advertised preview even at a
-        // fractional share price.
-        uint256 redeemable = pool.maxRedeem(alice); // before prank: view call would consume it
-        uint256 expectedAssets = pool.previewRedeem(redeemable);
+        uint256 expectedAssets = pool.previewRedeem(shares / 2);
+        (, uint64 exitEpoch) = pool.exitRequests(alice);
+        vm.warp(exitEpoch);
+        pool.settleMaturedExitEpochs(type(uint256).max);
         vm.prank(alice);
-        uint256 got = pool.redeem(redeemable, alice, alice);
+        uint256 got = pool.completeRedeem(alice);
         assertEq(got, expectedAssets);
         assertEq(usdc.balanceOf(alice), expectedAssets);
-
-        // Consumed request: the share door returns to 0.
-        assertEq(pool.maxRedeem(alice), 0);
-
-        // An expired request advertises 0 again (bob never completes his).
-        vm.prank(bob);
-        pool.requestRedeem(shares - shares / 2);
-        vm.warp(block.timestamp + pool.UNSTAKE_COOLDOWN() + pool.UNSTAKE_WINDOW() + 1);
-        assertEq(pool.maxRedeem(bob), 0);
     }
 
     function test_Audit_RewardsDurationBounded() public {
@@ -345,49 +284,25 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         assertEq(pool.rewardsDuration(), maxDur);
     }
 
-    function test_Audit_RequestedSharesAreLockedDuringCooldown() public {
+    function test_Audit_RequestedSharesAreEscrowedDuringCooldown() public {
         uint256 shares = _stake(alice, 100e6);
         vm.prank(alice);
         pool.requestRedeem(shares / 2);
 
-        // M-03: shares backing a live request can't leave; only the excess can.
-        vm.startPrank(alice);
-        vm.expectRevert(abi.encodeWithSelector(SingleAssetCoverPool.SharesLockedByRequest.selector, shares / 2));
-        pool.transfer(bob, shares / 2 + 1);
-        pool.transfer(bob, shares / 2); // exactly the unlocked excess is fine
-        vm.stopPrank();
-
-        // Cancel unlocks.
-        vm.startPrank(alice);
-        pool.cancelRedeemRequest();
+        assertEq(pool.balanceOf(address(pool)), shares / 2);
+        assertEq(pool.balanceOf(alice), shares / 2);
+        vm.prank(alice);
         pool.transfer(bob, shares / 2);
-        vm.stopPrank();
         assertEq(pool.balanceOf(alice), 0);
     }
 
-    function test_Audit_RequestLockLiftsOnExpiryAndRedeemStillWorks() public {
+    function test_Audit_MaturedExitReceiptNeverExpires() public {
         uint256 shares = _stake(alice, 100e6);
         vm.prank(alice);
         pool.requestRedeem(shares);
-
-        // Locked through cooldown + window…
-        vm.warp(block.timestamp + pool.UNSTAKE_COOLDOWN());
+        vm.warp(block.timestamp + 365 days);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(SingleAssetCoverPool.SharesLockedByRequest.selector, shares));
-        pool.transfer(bob, 1);
-        // …and the matured redeem itself passes (request deleted before the burn).
-        vm.prank(alice);
-        pool.completeRedeem();
-        assertEq(pool.balanceOf(alice), 0);
-
-        // Expired request no longer locks.
-        uint256 shares2 = _stake(carol, 50e6);
-        vm.prank(carol);
-        pool.requestRedeem(shares2);
-        vm.warp(block.timestamp + pool.UNSTAKE_COOLDOWN() + pool.UNSTAKE_WINDOW() + 1);
-        vm.prank(carol);
-        pool.transfer(bob, shares2);
-        assertEq(pool.balanceOf(bob), shares2);
+        assertEq(pool.completeRedeem(alice), 100e6);
     }
 
     function test_Audit_FirstStakerAfterLongEmptyGapEarnsDeferredRewardsOverRemainingDuration() public {
@@ -399,9 +314,10 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         uint256 shares = pool.balanceOf(alice);
         vm.prank(alice);
         pool.requestRedeem(shares);
-        vm.warp(block.timestamp + 7 days);
+        (, uint64 exitEpoch) = pool.exitRequests(alice);
+        vm.warp(exitEpoch);
         vm.prank(alice);
-        pool.completeRedeem();
+        pool.completeRedeem(alice);
         assertEq(pool.totalSupply(), 0);
 
         vm.warp(block.timestamp + 60 days);
@@ -409,12 +325,12 @@ contract AuditFindingsTest is SingleAssetCoverPoolTest {
         vm.prank(carol);
         assertEq(pool.claimReward(), 0, "M-01: nothing to harvest instantly");
 
-        // The ~23 days of unstreamed rewards (70e18 x 23/30) rebased to start at the
-        // new stake resume streaming over their full remaining duration.
-        vm.warp(block.timestamp + 23 days);
+        // Requesting stopped the only earning balance immediately, so the complete
+        // 30-day stream resumes for the next active staker.
+        vm.warp(block.timestamp + 30 days);
         vm.prank(carol);
         uint256 streamed = pool.claimReward();
-        assertApproxEqAbs(streamed, uint256(70e18) * 23 / 30, 1e6, "deferred remainder streams over 23 days");
+        assertApproxEqAbs(streamed, 70e18, 1e6, "deferred rewards stream over full duration");
     }
 }
 

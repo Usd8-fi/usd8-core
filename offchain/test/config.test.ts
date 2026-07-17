@@ -71,7 +71,7 @@ describe("configHash booster-policy commitment", () => {
 
   it("commits to both booster policy constants", () => {
     const actual = configHash();
-    expect(actual).toBe("0x2d7421cd81981dfbc0f63ad781d74a4e3b7b431d51887c3ccd72edcd66778f5e");
+    expect(actual).toBe("0xf8b37feed57796fcf5d1918cf649015b943296484faabd9a1d30b75d348d5ff0");
     expect(actual).toBe(hashWithPolicy(BOOSTER_ID, BOOSTER_BOOST_BPS));
     expect(actual).not.toBe(hashWithPolicy(BOOSTER_ID + 1n, BOOSTER_BOOST_BPS));
     expect(actual).not.toBe(hashWithPolicy(BOOSTER_ID, BOOSTER_BOOST_BPS + 1n));

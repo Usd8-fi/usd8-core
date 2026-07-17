@@ -523,6 +523,29 @@ pub async fn booster_nft_at<R: Rpc + ?Sized>(
     Ok(from_alloy(value))
 }
 
+pub async fn incident_tee_pcr_hash_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    defi_insurance: Address,
+    incident_id: &BigUint,
+    block_number: u64,
+) -> Result<String, ChainError> {
+    let value = contract_call(
+        rpc,
+        defi_insurance,
+        &IDefiInsurance::incidentTeePcrHashCall {
+            incidentId: big_to_u256(incident_id, "incidentId")?,
+        },
+        Some(block_number),
+    )
+    .await?;
+    if value == B256::ZERO {
+        return Err(ChainError::InvalidConfiguration(
+            "incident teePcrHash is zero".to_owned(),
+        ));
+    }
+    Ok(format!("{value:#x}"))
+}
+
 pub async fn max_cover_pool_payout_bps_at<R: Rpc + ?Sized>(
     rpc: &R,
     registry: Address,

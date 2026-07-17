@@ -183,7 +183,7 @@ fn fixture(answer: I256) -> CallRpc {
 
 fn config() -> BootstrapConfig {
     BootstrapConfig::from_json(&format!(
-        r#"{{"version":"4.5.0","chainId":1,"registry":"{REGISTRY}","defiInsurance":"{DEFI}","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":{{"{ASSET}":"{FEED}"}},"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":1000}}"#
+        r#"{{"version":"4.8.0","chainId":1,"registry":"{REGISTRY}","defiInsurance":"{DEFI}","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":{{"{ASSET}":"{FEED}"}},"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":1000}}"#
     ))
     .unwrap()
 }

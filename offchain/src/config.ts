@@ -12,12 +12,15 @@ import { isAddress, keccak256, stringToHex } from "viem";
 // 4.2.0 rejects future-dated, reversed, and superseded oracle rounds.
 // 4.3.0 fails closed on claim-set and ERC-20 balance-replay mismatches.
 // 4.4.0 requires finalized settlement anchors and supports authenticated exact score checkpoints.
-// 4.5.0 binds the booster token ID and score multiplier policy into configHash.
-export const CONFIG_VERSION = "4.5.0";
+// 4.5.0 records the booster token ID and score multiplier policy in configHash.
+// 4.6.0 uses the minimal on-chain settlement digest; config/input hashes remain artifact metadata.
+// 4.7.0 separates raw score consumption from boosted payout score and commits both in each Merkle leaf.
+// 4.8.0 commits boosterAmountUsed and verifies booster arithmetic on-chain.
+export const CONFIG_VERSION = "4.8.0";
 
 // Settlement policy mirrored from DefiInsurance's public constants. Kept here as
 // the single TypeScript source used by computation, RPC orchestration, and the
-// signed config commitment.
+// reproducibility artifact.
 export const BOOSTER_ID = 1n;
 export const BOOSTER_BOOST_BPS = 100n;
 
@@ -27,17 +30,15 @@ export const BOOSTER_BOOST_BPS = 100n;
 // down per-feed if all configured oracles have tighter heartbeats. A stale feed
 // throws → no root is produced → the incident voids (escrow recoverable) rather
 // than settling on a frozen price the dispute window can't self-correct.
-// Lives here (not chain.ts) because it is settlement POLICY — part of what
-// {configHash} commits the signer to (M-04).
+// Lives here (not chain.ts) because it is settlement policy recorded by {configHash}.
 export const MAX_ORACLE_STALENESS = 86_400n;
 
 // eth_getLogs completeness policy (M-01). A truncating provider that silently
 // caps results makes the settler drop Transfer logs → wrong min-balance/score →
 // a wrong signed root. There is NO universal cap: providers differ (e.g.
 // Blockscout documents a 1,000-result eth_getLogs limit). So these MUST be set
-// to values at or below the CONFIGURED provider's documented limits, and they are
-// committed in {configHash} so which completeness policy produced a root is a
-// public, disputable fact. LOG_RESULT_CAP: if a single-block range still returns
+// to values at or below the CONFIGURED provider's documented limits. {configHash}
+// records which policy produced an artifact. LOG_RESULT_CAP: if a single-block range still returns
 // ≥ this, the settler FAILS CLOSED (throws) rather than sign a possibly-truncated
 // result — completeness can't be proven past one block. Defaults are conservative
 // (Blockscout-compatible); raise only to a value proven ≤ the real provider cap.
@@ -108,12 +109,10 @@ export function assetUsdFeedOf(asset: `0x${string}`): `0x${string}` {
 }
 
 /**
- * Commitment to every off-chain settlement input that isn't read from chain
+ * Artifact hash of every off-chain settlement input that isn't read from chain
  * state: the software/config version, chain, contract addresses, the pool-asset
- * feed map, and the staleness policy. Bound into the settlement signature
- * (M-04) and emitted by settleIncident, so which config produced a root is a
- * public, disputable fact — a root computed under a different feed map or
- * policy provably carries a different hash. Deterministic: keys sorted,
+ * feed map, and the staleness policy. Used for reproducibility only; it is not
+ * included in the on-chain settlement signature. Deterministic: keys sorted and
  * addresses lowercased.
  */
 export function configHash(): `0x${string}` {

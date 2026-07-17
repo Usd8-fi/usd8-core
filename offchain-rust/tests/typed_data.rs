@@ -34,13 +34,11 @@ fn pools_hash_and_full_digest_match_viem_and_solidity_vector() {
         pool_payouts: vec![n(1), n(2)],
         pool_addrs: pools,
         claim_set: format!("0x{}", "22".repeat(32)),
-        config_hash: format!("0x{}", "33".repeat(32)),
-        settlement_input_hash: "0x6fdf7088dad356db1a44c02996b33691d1ead1c10b008cf67abc2d456ba4eca0"
-            .to_owned(),
+        tee_pcr_hash: format!("0x{}", "44".repeat(32)),
     };
     assert_eq!(
         settlement_digest(&input).unwrap(),
-        "0x4d980a59007244ae1b9834e0b0668d248a0c250af222e33ca1ff96aba579b212"
+        "0x8c97ed7ca7361c63a6a7448e7f3a4e6720412fc4c2ee7e162000e9391d968f42"
     );
 }
 
@@ -55,8 +53,7 @@ fn typed_data_rejects_malformed_hashes_and_uint256_overflow() {
         pool_payouts: vec![],
         pool_addrs: vec![],
         claim_set: format!("0x{}", "00".repeat(32)),
-        config_hash: format!("0x{}", "00".repeat(32)),
-        settlement_input_hash: format!("0x{}", "00".repeat(32)),
+        tee_pcr_hash: format!("0x{}", "44".repeat(32)),
     };
     assert!(
         settlement_digest(&input)

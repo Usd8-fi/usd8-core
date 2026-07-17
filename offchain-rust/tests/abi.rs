@@ -10,6 +10,10 @@ fn generated_function_selectors_match_solidity_authority() {
         "a6c6a8f3"
     );
     assert_eq!(
+        hex::encode(IDefiInsurance::incidentTeePcrHashCall::SELECTOR),
+        "03d88b70"
+    );
+    assert_eq!(
         hex::encode(IDefiInsurance::getInsuredTokenCall::SELECTOR),
         "3f962199"
     );

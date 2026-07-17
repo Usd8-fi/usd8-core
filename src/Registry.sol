@@ -28,7 +28,7 @@ interface ICoverPool {
 
 /// @title  Registry
 /// @notice The single access + pause + topology hub for the whole
-///         USD8 system. Every core contract inherits {RegistryManaged}, holds this address,
+///         USD8 system. Every core contract inherits {SharedBase}, holds this address,
 ///         and asks it "may this caller act?" / "am I paused?" / "is the system
 ///         frozen for an incident?" instead of tracking that itself — one audited
 ///         source of truth, one console to govern and to halt the system.
@@ -46,7 +46,7 @@ interface ICoverPool {
 ///         incident is in flight ({frozen}), so a product's settlement runs against
 ///         a deterministic, unchanging system.
 /// @dev    UUPS-upgradeable (timelock-only {_authorizeUpgrade}). It is the ONE
-///         upgradeable hub: every {RegistryManaged} contract holds a fixed pointer to
+///         upgradeable hub: every {SharedBase} contract holds a fixed pointer to
 ///         this proxy and has no setRegistry, so the system evolves by upgrading this
 ///         contract in place — not by redeploy + re-point. Upgradeable because it now
 ///         carries durable per-user state (e.g. {scoreSpent}) that a fresh redeploy
@@ -135,7 +135,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     mapping(address account => uint256) public scoreSpent;
 
     /// @notice Beta launch mode. While true, functions gated by
-    ///         {RegistryManaged.onlyBetaMode} let a trusted admin stand in for the
+    ///         {SharedBase.onlyBetaMode} let a trusted admin stand in for the
     ///         timelock on specific operational shortcuts (currently only
     ///         {DefiInsurance.adminCorrectSettlement} — direct admin root
     ///         correction without the two-step timelock dance). ONE-WAY: starts
@@ -145,6 +145,22 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         restored. It never relaxes the master powers (upgrades, role
     ///         changes, strategy approval), which stay timelock-only always.
     bool public betaMode;
+
+    /// @notice Governance-approved commitment to the exact Nitro PCR0/PCR1/PCR2
+    ///         measurements allowed to sign settlements. Appended for upgrade safety.
+    bytes32 public teePcrHash;
+
+    /// @notice Canonical USD8 token used throughout the protocol.
+    address public usd8;
+
+    /// @notice Active Treasury holding USD8 mint/burn authority and reserves.
+    address public treasury;
+
+    /// @notice Canonical Morpho Vault V2 savings token (sUSD8).
+    address public savingsVault;
+
+    /// @notice Canonical USD8/USD composite price oracle.
+    address public usd8PriceOracle;
 
     // ─────────────────────────── Errors / events ───────────────────────────
 
@@ -157,6 +173,8 @@ contract Registry is Initializable, UUPSUpgradeable {
     error PoolNotFound(IERC20 asset);
     error InvalidMaxCoverPoolPayoutBps(uint256 bps);
     error UnauthorizedModule(address caller);
+    error CandidateIncidentActive(address module, uint256 incidentId);
+    error InvalidTeePcrHash();
 
     event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
     event MaxCoverPoolPayoutBpsSet(uint256 oldBps, uint256 newBps);
@@ -169,6 +187,11 @@ contract Registry is Initializable, UUPSUpgradeable {
     event BoosterNFTSet(address indexed oldBooster, address indexed newBooster);
     event ScoreSpentRecorded(address indexed account, uint256 amount, uint256 newTotal);
     event BetaModeEnded();
+    event TeePcrHashSet(bytes32 indexed oldHash, bytes32 indexed newHash);
+    event Usd8Set(address indexed oldUsd8, address indexed newUsd8);
+    event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
+    event SavingsVaultSet(address indexed oldSavingsVault, address indexed newSavingsVault);
+    event Usd8PriceOracleSet(address indexed oldOracle, address indexed newOracle);
 
     modifier onlyTimelock() {
         _requireTimelock(msg.sender);
@@ -210,7 +233,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     }
 
     /// @notice Permanently leave beta: admin shortcuts gated by
-    ///         {RegistryManaged.onlyBetaMode} stop working and those operations
+    ///         {SharedBase.onlyBetaMode} stop working and those operations
     ///         become timelock-only. Timelock only, ONE-WAY (no re-enable).
     function endBetaMode() external onlyTimelock {
         betaMode = false;
@@ -236,6 +259,44 @@ contract Registry is Initializable, UUPSUpgradeable {
         if (account == address(0)) revert ZeroAddress();
         isAdmin[account] = allowed;
         emit AdminSet(account, allowed);
+    }
+
+    /// @notice Set the exact enclave-code PCR commitment accepted by settlement.
+    ///         Timelock-only and immutable while an incident is active.
+    function setTeePcrHash(bytes32 newHash) external onlyTimelock notFrozen {
+        if (newHash == bytes32(0)) revert InvalidTeePcrHash();
+        emit TeePcrHashSet(teePcrHash, newHash);
+        teePcrHash = newHash;
+    }
+
+    // ─────────────────────────── Canonical topology (timelock only) ───────────────────────────
+
+    /// @notice Set the canonical USD8 token. Timelock only.
+    function setUsd8(address newUsd8) external onlyTimelock {
+        if (newUsd8 == address(0)) revert ZeroAddress();
+        emit Usd8Set(usd8, newUsd8);
+        usd8 = newUsd8;
+    }
+
+    /// @notice Set the active Treasury. Timelock only.
+    function setTreasury(address newTreasury) external onlyTimelock {
+        if (newTreasury == address(0)) revert ZeroAddress();
+        emit TreasurySet(treasury, newTreasury);
+        treasury = newTreasury;
+    }
+
+    /// @notice Set the canonical sUSD8 savings vault. Timelock only.
+    function setSavingsVault(address newSavingsVault) external onlyTimelock {
+        if (newSavingsVault == address(0)) revert ZeroAddress();
+        emit SavingsVaultSet(savingsVault, newSavingsVault);
+        savingsVault = newSavingsVault;
+    }
+
+    /// @notice Set the canonical USD8/USD price oracle. Timelock only.
+    function setUsd8PriceOracle(address newOracle) external onlyTimelock {
+        if (newOracle == address(0)) revert ZeroAddress();
+        emit Usd8PriceOracleSet(usd8PriceOracle, newOracle);
+        usd8PriceOracle = newOracle;
     }
 
     // ─────────────────────────── Topology (timelock; frozen-gated) ───────────────────────────
@@ -273,9 +334,11 @@ contract Registry is Initializable, UUPSUpgradeable {
     }
 
     /// @notice Set the single insurance payout module. Timelock only; blocked while
-    ///         frozen (never swap the module mid-incident). Setting it to zero
-    ///         clears the module, which also unfreezes the system — the emergency
-    ///         brake for a module stuck reporting an incident forever.
+    ///         frozen (never swap the module mid-incident). A nonzero candidate must
+    ///         also report no active incident, so installation cannot unexpectedly
+    ///         freeze the system. Setting it to zero clears the module, which also
+    ///         unfreezes the system — the emergency brake for a module stuck reporting
+    ///         an incident forever.
     /// @dev    Accepted side-effect (L7): because {frozen} is delegated to the
     ///         module, clearing it to zero mid-incident flips payoutIncidentActive() false and
     ///         reopens stake/completeUnstake — it can interrupt a live settlement.
@@ -285,9 +348,12 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         transparent emergency lever, not a routine control.
     function setDefiInsurance(address newModule) external onlyTimelock {
         // Clearing to zero is the emergency brake and MUST work even if the
-        // current module reverts (or is stuck non-zero) in activeIncidentId() — so the
-        // payoutIncidentActive() guard applies only when installing a new (non-zero) module.
-        if (newModule != address(0) && payoutIncidentActive()) revert Frozen();
+        // current module reverts (or is stuck non-zero) in activeIncidentId().
+        if (newModule != address(0)) {
+            if (payoutIncidentActive()) revert Frozen();
+            uint256 candidateIncidentId = IDefiInsurance(newModule).activeIncidentId();
+            if (candidateIncidentId != 0) revert CandidateIncidentActive(newModule, candidateIncidentId);
+        }
         emit DefiInsuranceSet(defiInsurance, newModule);
         defiInsurance = newModule;
     }
@@ -300,6 +366,10 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         segment at its own rate. The FIRST call for a token starts its scoring
     ///         (and registers it in {scoredTokenList} permanently); a call with
     ///         `rate == 0` turns scoring off from here — there is no separate remove.
+    /// @dev Token-curation requirement (audit L-02): generic historical replay supports
+    ///      only non-rebasing ERC-20s whose every balance change is represented by a
+    ///      canonical `Transfer` event with the actual balance delta. Use a reviewed
+    ///      token-specific snapshot/adapter instead for any other balance semantics.
     /// @param token  Scored ERC20 (e.g. USD8, sUSD8).
     /// @param rate   New score-per-whole-token-per-block, 1e18-scaled (0 = off).
     function setScoredToken(IERC20 token, uint128 rate) external onlyTimelock notFrozen {
@@ -415,7 +485,7 @@ contract Registry is Initializable, UUPSUpgradeable {
         return scoredTokenList.length;
     }
 
-    // ─────────────────────────── Checks (consumed by {RegistryManaged}) ───────────────────────────
+    // ─────────────────────────── Checks (consumed by {SharedBase}) ───────────────────────────
 
     /// @notice Revert unless caller is the timelock.
     function requireTimelock(address caller) external view {
@@ -434,7 +504,7 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     // Single source of truth for each check: the {onlyTimelock}/{onlyAdminOrTimelock}
     // modifiers (used by Registry's own functions) and the external require*
-    // (called cross-contract by {RegistryManaged} in the other contracts) both route here.
+    // (called cross-contract by {SharedBase} in the other contracts) both route here.
     function _requireTimelock(address caller) internal view {
         if (caller != timelock) revert UnauthorizedTimelock(caller);
     }

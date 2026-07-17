@@ -4,14 +4,16 @@ import {
   assertContractCodeAt,
   finalizedSettlementAnchors,
   getLogsChunked,
+  incidentTeePcrHashAt,
   makeClient,
   minBalanceOver,
+  minErc1155BalanceOver,
   priceUsd1e18,
   ratioAt,
   rpcMetricsOf,
   tokenBlockIntegral,
 } from "../src/chain.js";
-import { LOG_RESULT_CAP, MAX_LOG_RANGE, MAX_ORACLE_STALENESS } from "../src/config.js";
+import { CONFIG, LOG_RESULT_CAP, MAX_LOG_RANGE, MAX_ORACLE_STALENESS } from "../src/config.js";
 
 const CAP = Number(LOG_RESULT_CAP);
 const RANGE = Number(MAX_LOG_RANGE);
@@ -37,6 +39,29 @@ const key = (l: { blockNumber: bigint; logIndex: number }) => `${l.blockNumber}:
 const Q = { address: "0x0000000000000000000000000000000000000001" as const, event: {} };
 const ORACLE = "0x0000000000000000000000000000000000000002" as const;
 const blockHash = (n: bigint) => `0x${n.toString(16).padStart(64, "0")}` as `0x${string}`;
+
+describe("incident TEE PCR commitment", () => {
+  it("reads the incident snapshot and rejects an unset commitment", async () => {
+    const hash = `0x${"44".repeat(32)}` as `0x${string}`;
+    let request: any;
+    const client = (value: `0x${string}`) => ({
+      readContract: async (next: any) => {
+        request = next;
+        return value;
+      },
+    }) as any;
+    await expect(incidentTeePcrHashAt(client(hash), 7n, 100n)).resolves.toBe(hash);
+    expect(request).toMatchObject({
+      address: CONFIG.defiInsurance,
+      functionName: "incidentTeePcrHash",
+      args: [7n],
+      blockNumber: 100n,
+    });
+    await expect(incidentTeePcrHashAt(client(`0x${"0".repeat(64)}`), 7n, 100n)).rejects.toThrow(
+      /incident teePcrHash is zero/
+    );
+  });
+});
 
 describe("makeClient — authenticated single dRPC endpoint", () => {
   it("rejects an invalid transport timeout", () => {
@@ -346,6 +371,19 @@ describe("ERC-20 balance replay — L-02 semantic safety", () => {
   it("fails closed when score balance changes without a Transfer event", async () => {
     await expect(tokenBlockIntegral(hiddenBalanceChangeClient(), Q.address, ORACLE, 10n, 20n)).rejects.toThrow(
       /unsupported token balance semantics/
+    );
+  });
+});
+
+describe("ERC-1155 balance replay — booster semantic safety", () => {
+  it("fails closed when the endpoint balance changes without a transfer log", async () => {
+    const client = {
+      readContract: async ({ blockNumber }: { blockNumber: bigint }) => (blockNumber === 10n ? 3n : 2n),
+      getLogs: async () => [],
+    } as any;
+
+    await expect(minErc1155BalanceOver(client, Q.address, ORACLE, 1n, 10n, 20n)).rejects.toThrow(
+      /unsupported ERC-1155 balance semantics/
     );
   });
 });

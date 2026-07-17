@@ -7,7 +7,10 @@
 
 This package independently reproduces the claim-payout **merkle root** and
 EIP-712 `Settlement` digest. It remains open-source and deterministic so Rust
-outputs can be checked against a separately implemented oracle.
+outputs can be checked against a separately implemented oracle. Cross-language
+scripts, historical results, and migration notes live under
+[`rust-comparison/`](rust-comparison/README.md), keeping the Rust package itself
+standalone.
 
 There is **no trusted operator and no special hardware**. Everything the
 computation needs is read from chain state (the per-incident config,
@@ -108,11 +111,11 @@ npm run verify 1
 npm run compute 1
 ```
 
-`compute` prints, per claim, the exact `(amounts, scoreSpent, proof)` a
+`compute` prints, per claim, the exact `(amounts, scoreSpent, boosterAmountUsed, boostedScore, eligibleAmount, proof)` a
 claimant passes to `DefiInsurance.finalizeClaim`. It also publishes the
 canonical, address-sorted `(user, grossEarnedScore)` rows and their
-`settlementInputHash`; this is the per-incident input commitment included in
-the TEE's EIP-712 signature. Output also records finalized reference/open/window
+`settlementInputHash` as reproducibility metadata; it is not included in the
+TEE's EIP-712 signature. Output also records finalized reference/open/window
 block hashes; score-source metadata; logical RPC requests; HTTP attempts,
 responses, and retries; log bisections/errors/peak concurrency/elapsed time; and
 spent-score read count/concurrency/elapsed time.
@@ -141,23 +144,25 @@ and maximum-load tests.
    eligible portion and refunds any excess escrow. Loss remains priced at the
    pre-incident `referenceBlock`.
 4. **Score**: each holder's gross earned insurance score **as of `referenceBlock`**
-   (token·block integral of the scored tokens), minus cumulative spent score read
-   from `Registry.scoreSpent` at the end of `openBlock`; then committed boosters
-   multiply only the unspent remainder and are capped at the claimant's minimum
-   booster balance over `[joinBlock, windowEnd]`. The requested amount is capped
-   to that availability → `scoreSpent`. This is one input to the
+   (token·block integral of the scored tokens), minus cumulative raw spent score read
+   from `Registry.scoreSpent` at the end of `openBlock`. The requested raw amount is
+   capped to that unspent balance → `scoreSpent`; only this value is recorded on-chain.
+   `boosterAmountUsed` is the committed amount capped at the claimant's minimum
+   booster balance from end-of-`joinBlock` through `windowEnd`; it multiplies `scoreSpent` into
+   a separate `boostedScore`. This is one input to the
    geometric allocation weight, not the sole payout weight. Pinning to
    `referenceBlock` stops anyone farming fresh score during the claim window.
 5. **Covered need**: `claimCapUsd = floor(κ × lossUsd)`. This is both an input
    to allocation and the absolute maximum that claim can receive.
 6. **Capped geometric allocation**: calculate
-   `weight = floor(sqrt(claimCapUsd × scoreSpent))`, then solve
+   `weight = floor(sqrt(claimCapUsd × boostedScore))`, then solve
    `payoutUsd = min(claimCapUsd, lambda × weight)` against the incident LP-loss
    budget using deterministic water-filling. Split each payout per pool pro-rata
    to the pool mix aligned to `Registry.pools()` at `openBlock`.
 7. **Merkle root**: OZ `StandardMerkleTree` over
-   `(incidentId, claimId, user, amounts, scoreSpent, eligibleAmount)` — the exact leaf
-   encoding `finalizeClaim` verifies with `bytes32[] proof`.
+   `(incidentId, claimId, user, amounts, scoreSpent, boosterAmountUsed, boostedScore, eligibleAmount)`.
+   `finalizeClaim` verifies the proof, caps `boosterAmountUsed` to the committed
+   amount, and recomputes `boostedScore` exactly on-chain.
 
 ### Capped geometric allocation
 
@@ -167,7 +172,8 @@ weights matter, so their absolute unit scales cancel apart from integer flooring
 
 ```text
 C_i = floor(lossUsd_i * coverageBps / 10_000)
-S_i = min(requestedScore_i, boostedUnspentScore_i)
+R_i = min(requestedRawScore_i, rawUnspentScore_i)
+S_i = floor(R_i * boosterMultiplier_i)
 W_i = floor(sqrt(C_i * S_i))
 B   = floor(poolUsd * maxCoverPoolPayoutBps / 10_000)
 P_i = min(C_i, lambda * W_i)
@@ -177,8 +183,9 @@ The breaking allocator change introduced `CONFIG_VERSION = "4.0.0"`.
 Per-insured-token minimum claims use `4.1.0`; strict oracle-round validation uses
 `4.2.0`; replay-consistency checks use `4.3.0`; finalized anchors and authenticated
 score checkpoints use `4.4.0`; booster-policy commitments use `4.5.0`. The version is part of
-`configHash`, preventing builds with different settlement acceptance rules from carrying the same
-configuration commitment.
+`configHash`; the minimal settlement digest and artifact-only config/input hashes use `4.6.0`;
+separate raw and boosted settlement scores use `4.7.0`; committed booster usage
+and on-chain boost arithmetic validation use `4.8.0`.
 
 The square root gives need and score equal influence in log space and diminishing
 returns to accumulated score. Four times the spent score gives twice the weight.
@@ -207,7 +214,7 @@ Gross score uses `RpcScoreSource` by default. `CheckpointScoreSource` produces
 the same numerator arithmetic from a persistent global Transfer index, including
 one final WAD division across all tokens and no extra decimal rounding at
 checkpoint boundaries. Both feed the same `ScoreSource` interface, payout math,
-and canonical signed input rows.
+and canonical artifact input rows.
 
 All tunable parameters (coverage κ, TWAP/holding windows, the conversion recipe,
 the underlying oracle, the scored-token set) are read from contract state at the
@@ -227,7 +234,7 @@ pinnedBlock.timestamp - updatedAt <= MAX_ORACLE_STALENESS
 ```
 
 The feed address, feed implementation/class, decimals, and heartbeat must still
-be validated before activation. `MAX_ORACLE_STALENESS` is committed through
+be validated before activation. `MAX_ORACLE_STALENESS` is recorded in
 `configHash`; an invalid or stale round produces no settlement root rather than
 silently pricing a claim from an impossible or outdated timestamp.
 
