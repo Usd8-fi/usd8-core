@@ -366,9 +366,19 @@ fn fixture_with_min_claim(min_claim_amount: u128) -> (EngineRpc, BootstrapConfig
     ]
     .into_iter()
     .collect();
-    let config = BootstrapConfig::from_json(&format!(
-        r#"{{"version":"4.8.0","chainId":1,"registry":"{REGISTRY}","defiInsurance":"{DEFI}","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":{{"{ASSET}":"{FEED}"}},"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":1000}}"#
-    ))
+    let config = BootstrapConfig::derived(
+        Address::from_str(REGISTRY).unwrap(),
+        Address::from_str(DEFI).unwrap(),
+        1,
+        100,
+        [(
+            Address::from_str(ASSET).unwrap(),
+            Address::from_str(FEED).unwrap(),
+        )]
+        .into_iter()
+        .collect(),
+        129_600,
+    )
     .unwrap();
     (
         EngineRpc {
@@ -417,7 +427,6 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     assert_eq!(run.output.rows.len(), 1);
     assert_eq!(run.output.rows[0].eligible_amount, BigUint::from(100u8));
     assert_eq!(run.output.rows[0].score_spent, BigUint::from(60u8));
-    assert_eq!(run.output.rows[0].booster_amount_used, BigUint::from(0u8));
     assert_eq!(run.output.rows[0].boosted_score, BigUint::from(60u8));
     assert_eq!(run.output.rows[0].amounts, vec![BigUint::from(80u8)]);
     assert_eq!(run.output.pool_payouts, vec![BigUint::from(80u8)]);
@@ -431,6 +440,22 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(persisted, artifact);
     assert_eq!(persisted["teePcrHash"], format!("0x{}", "44".repeat(32)));
+    assert_eq!(
+        persisted["bootstrapConfig"]["registry"],
+        config.registry.to_string()
+    );
+    assert_eq!(
+        persisted["bootstrapConfig"]["maxOracleStaleness"],
+        config.max_oracle_staleness.to_string()
+    );
+    assert_eq!(persisted["bootstrapConfig"]["anchorBlock"], "90");
+    assert_eq!(
+        persisted["bootstrapConfig"]["assetUsdFeed"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(persisted["rows"][0]["amounts"][0], "80");
     assert!(persisted["rows"][0]["proof"].is_array());
     fs::remove_file(path).unwrap();

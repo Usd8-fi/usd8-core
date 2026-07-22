@@ -11,8 +11,8 @@ use usd8_settlement::abi::{
     IAggregatorV3, IDefiInsurance, IERC20, IRegistry, ISingleAssetCoverPool,
 };
 use usd8_settlement::chain::{
-    incident_at, incident_config_at, pool_state_at, pools_at, price_usd_1e18, ratio_at,
-    twap_ratio_before,
+    derive_bootstrap_config_at, incident_at, incident_config_at, pool_state_at, pools_at,
+    price_usd_1e18, ratio_at, twap_ratio_before,
 };
 use usd8_settlement::config::BootstrapConfig;
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
@@ -100,6 +100,36 @@ fn fixture(answer: I256) -> CallRpc {
         }),
     );
     insert(
+        REGISTRY,
+        IRegistry::defiInsuranceCall::SELECTOR,
+        encoded::<IRegistry::defiInsuranceCall>(&a(DEFI)),
+    );
+    insert(
+        DEFI,
+        IDefiInsurance::registryCall::SELECTOR,
+        encoded::<IDefiInsurance::registryCall>(&a(REGISTRY)),
+    );
+    insert(
+        DEFI,
+        IDefiInsurance::BOOSTER_IDCall::SELECTOR,
+        encoded::<IDefiInsurance::BOOSTER_IDCall>(&U256::from(1)),
+    );
+    insert(
+        DEFI,
+        IDefiInsurance::BOOSTER_BOOST_BPSCall::SELECTOR,
+        encoded::<IDefiInsurance::BOOSTER_BOOST_BPSCall>(&U256::from(100)),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::assetUsdFeedCall::SELECTOR,
+        encoded::<IRegistry::assetUsdFeedCall>(&a(FEED)),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::maxOracleStalenessCall::SELECTOR,
+        encoded::<IRegistry::maxOracleStalenessCall>(&129_600),
+    );
+    insert(
         DEFI,
         IDefiInsurance::getInsuredTokenCall::SELECTOR,
         encoded::<IDefiInsurance::getInsuredTokenCall>(&IDefiInsurance::InsuredToken {
@@ -182,10 +212,42 @@ fn fixture(answer: I256) -> CallRpc {
 }
 
 fn config() -> BootstrapConfig {
-    BootstrapConfig::from_json(&format!(
-        r#"{{"version":"4.8.0","chainId":1,"registry":"{REGISTRY}","defiInsurance":"{DEFI}","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":{{"{ASSET}":"{FEED}"}},"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":1000}}"#
-    ))
+    BootstrapConfig::derived(
+        Address::from_str(REGISTRY).unwrap(),
+        Address::from_str(DEFI).unwrap(),
+        1,
+        100,
+        [(
+            Address::from_str(ASSET).unwrap(),
+            Address::from_str(FEED).unwrap(),
+        )]
+        .into_iter()
+        .collect(),
+        129_600,
+    )
     .unwrap()
+}
+
+#[tokio::test]
+async fn registry_root_derives_historical_runtime_configuration() {
+    let rpc = fixture(I256::try_from(100_000_000i64).unwrap());
+    let registry = Address::from_str(REGISTRY).unwrap();
+    let defi = Address::from_str(DEFI).unwrap();
+    let config = derive_bootstrap_config_at(&rpc, registry, defi, 90)
+        .await
+        .unwrap();
+
+    assert_eq!(config.registry, registry);
+    assert_eq!(config.defi_insurance, defi);
+    assert_eq!(config.booster_id, 1);
+    assert_eq!(config.booster_boost_bps, 100);
+    assert_eq!(config.max_oracle_staleness, 129_600);
+    assert_eq!(
+        config
+            .asset_feed(Address::from_str(ASSET).unwrap())
+            .unwrap(),
+        Address::from_str(FEED).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -232,7 +294,7 @@ async fn oracle_and_conversion_reads_fail_closed_on_invalid_values() {
     assert!(
         price_usd_1e18(
             &negative,
-            cfg.asset_feed(ASSET).unwrap(),
+            cfg.asset_feed(Address::from_str(ASSET).unwrap()).unwrap(),
             100,
             cfg.max_oracle_staleness
         )

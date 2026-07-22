@@ -30,7 +30,6 @@ function outputOf(settlement) {
       grossEarnedScore: row.grossEarnedScore.toString(),
       earnedScore: row.earnedScore.toString(),
       scoreSpent: row.scoreSpent.toString(),
-      boosterAmountUsed: row.boosterAmountUsed.toString(),
       boostedScore: row.boostedScore.toString(),
       payoutUsd: row.payoutUsd.toString(),
       amounts: row.amounts.map(String),

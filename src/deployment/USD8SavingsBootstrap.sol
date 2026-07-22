@@ -5,11 +5,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {IVaultV2Factory} from "vault-v2/src/interfaces/IVaultV2Factory.sol";
-import {Registry} from "../Registry.sol";
 import {USD8} from "../USD8.sol";
 import {Treasury} from "../Treasury.sol";
 import {USD8SavingsAdapter} from "../adapters/USD8SavingsAdapter.sol";
-import {USD8SavingsGate} from "./USD8SavingsGate.sol";
 
 /// @title USD8 Savings Bootstrap
 /// @notice One-shot atomic deployment, configuration and dead-share seeding of canonical Morpho Vault V2 sUSD8.
@@ -20,12 +18,10 @@ contract USD8SavingsBootstrap {
         address bootstrap;
         address vault;
         address adapter;
-        address gate;
     }
 
     struct Config {
         address vaultFactory;
-        Registry registry;
         USD8 usd8;
         Treasury treasury;
         uint256 seedUsdc;
@@ -52,9 +48,9 @@ contract USD8SavingsBootstrap {
         if (msg.sender != owner) revert NotOwner();
         if (executed) revert AlreadyExecuted();
         if (
-            config.vaultFactory == address(0) || address(config.registry) == address(0)
-                || address(config.usd8) == address(0) || address(config.treasury) == address(0)
-                || config.seedSink == address(0) || config.governance == address(0)
+            config.vaultFactory == address(0) || address(config.usd8) == address(0)
+                || address(config.treasury) == address(0) || config.seedSink == address(0)
+                || config.governance == address(0)
         ) revert InvalidAddress();
         executed = true;
         d.bootstrap = address(this);
@@ -69,7 +65,6 @@ contract USD8SavingsBootstrap {
         vault.setCurator(address(this));
 
         d.adapter = address(new USD8SavingsAdapter(d.vault));
-        d.gate = address(new USD8SavingsGate(config.registry, d.vault));
 
         _execute(vault, abi.encodeCall(IVaultV2.setIsAllocator, (address(this), true)));
         _execute(vault, abi.encodeCall(IVaultV2.addAdapter, (d.adapter)));
@@ -77,10 +72,6 @@ contract USD8SavingsBootstrap {
         bytes memory idData = abi.encode("this", d.adapter);
         _execute(vault, abi.encodeCall(IVaultV2.increaseAbsoluteCap, (idData, type(uint128).max)));
         _execute(vault, abi.encodeCall(IVaultV2.increaseRelativeCap, (idData, 1e18)));
-        _execute(vault, abi.encodeCall(IVaultV2.setReceiveSharesGate, (d.gate)));
-        _execute(vault, abi.encodeCall(IVaultV2.setSendSharesGate, (d.gate)));
-        _execute(vault, abi.encodeCall(IVaultV2.setReceiveAssetsGate, (d.gate)));
-        _execute(vault, abi.encodeCall(IVaultV2.setSendAssetsGate, (d.gate)));
 
         vault.setMaxRate(config.maxRate);
         vault.setLiquidityAdapterAndData(d.adapter, "");

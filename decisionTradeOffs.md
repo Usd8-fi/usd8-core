@@ -14,6 +14,12 @@ Settlement allocates each claimant a maximum payout before users finalize. A cla
 
 **Accepted trade-off:** a non-finalizing claimant can reduce capital utilization for that incident, but cannot take the unused funds.
 
+### Settlement inherits governance-selected oracle policy
+
+Pool-asset USD feeds and the global maximum staleness are timelock-controlled Registry state snapshotted at incident open. This removes an uncommitted operator configuration, but settlement correctness inherits feed implementation, heartbeat, deviation, upgrade, and archive-RPC availability risks. Feed and staleness changes are blocked during an active incident, and missing or invalid historical values fail closed.
+
+**Accepted trade-off:** governance can change valuation policy between incidents; it cannot change the policy for an incident already open.
+
 ### 2. Treasury strategies inherit external ERC-4626 risks
 
 Treasury USDC may be deployed into approved external ERC-4626 vaults. USD8 does not attempt to reproduce or fully isolate their liquidity, accounting, governance, oracle, or smart-contract risks.

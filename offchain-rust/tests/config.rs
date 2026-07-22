@@ -1,127 +1,89 @@
-use usd8_settlement::config::BootstrapConfig;
+use std::collections::BTreeMap;
+use std::str::FromStr;
+use usd8_settlement::Address;
+use usd8_settlement::config::{
+    BootstrapConfig, CHAIN_ID, CONFIG_VERSION, LOG_RESULT_CAP, MAX_LOG_RANGE,
+};
 
-const VALID: &str = r#"{
-  "version": "4.8.0",
-  "chainId": 1,
-  "registry": "0x0000000000000000000000000000000000001000",
-  "defiInsurance": "0x0000000000000000000000000000000000002000",
-  "boosterId": "1",
-  "boosterBoostBps": "100",
-  "assetUsdFeed": {
-    "0x0000000000000000000000000000000000005000": "0x0000000000000000000000000000000000006000",
-    "0x0000000000000000000000000000000000003000": "0x0000000000000000000000000000000000004000"
-  },
-  "maxOracleStaleness": "86400",
-  "maxLogRange": "1000",
-  "logResultCap": 1000
-}"#;
+fn address(value: &str) -> Address {
+    Address::from_str(value).unwrap()
+}
+
+fn valid() -> BootstrapConfig {
+    BootstrapConfig::derived(
+        address("0x0000000000000000000000000000000000001000"),
+        address("0x0000000000000000000000000000000000002000"),
+        1,
+        100,
+        [
+            (
+                address("0x0000000000000000000000000000000000003000"),
+                address("0x0000000000000000000000000000000000004000"),
+            ),
+            (
+                address("0x0000000000000000000000000000000000005000"),
+                address("0x0000000000000000000000000000000000006000"),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        129_600,
+    )
+    .unwrap()
+}
 
 #[test]
-fn config_hash_matches_golden_value_and_sorts_feed_keys() {
-    let config = BootstrapConfig::from_json(VALID).unwrap();
+fn derived_config_commitment_is_canonical_and_binds_baked_rpc_policy() {
+    let config = valid();
+    assert_eq!(CONFIG_VERSION, "5.0.0");
+    assert_eq!(CHAIN_ID, 1);
+    assert_eq!(MAX_LOG_RANGE, 1_000);
+    assert_eq!(LOG_RESULT_CAP, 1_000);
     assert_eq!(
         config.commitment_json().unwrap(),
-        r#"{"version":"4.8.0","chainId":1,"registry":"0x0000000000000000000000000000000000001000","defiInsurance":"0x0000000000000000000000000000000000002000","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":[["0x0000000000000000000000000000000000003000","0x0000000000000000000000000000000000004000"],["0x0000000000000000000000000000000000005000","0x0000000000000000000000000000000000006000"]],"maxOracleStaleness":"86400","maxLogRange":"1000","logResultCap":"1000"}"#
+        r#"{"version":"5.0.0","chainId":"1","registry":"0x0000000000000000000000000000000000001000","defiInsurance":"0x0000000000000000000000000000000000002000","boosterId":"1","boosterBoostBps":"100","assetUsdFeed":[["0x0000000000000000000000000000000000003000","0x0000000000000000000000000000000000004000"],["0x0000000000000000000000000000000000005000","0x0000000000000000000000000000000000006000"]],"maxOracleStaleness":"129600","maxLogRange":"1000","logResultCap":"1000"}"#
     );
     assert_eq!(
         config.hash().unwrap(),
-        "0x7aedf89d353c18ee09f578cb8b276f20a52e3c85629ad35b2c155d9f39b3b56d"
+        "0xf4c864ca629a28b3755712eeec7a8a3c80be0bf5f1e6d8d8abaab4eb84674449"
     );
 }
 
 #[test]
-fn bootstrap_validation_rejects_placeholders_and_noncanonical_maps() {
-    let zero = VALID.replacen(
-        "0x0000000000000000000000000000000000001000",
-        "0x0000000000000000000000000000000000000000",
-        1,
+fn derived_config_rejects_invalid_onchain_state() {
+    let registry = address("0x0000000000000000000000000000000000001000");
+    let defi = address("0x0000000000000000000000000000000000002000");
+    assert!(
+        BootstrapConfig::derived(
+            Address::from_bytes([0; 20]),
+            defi,
+            1,
+            100,
+            BTreeMap::new(),
+            1
+        )
+        .is_err()
     );
     assert!(
-        BootstrapConfig::from_json(&zero)
-            .unwrap_err()
-            .to_string()
-            .contains("registry address is zero")
+        BootstrapConfig::derived(
+            registry,
+            Address::from_bytes([0; 20]),
+            1,
+            100,
+            BTreeMap::new(),
+            1
+        )
+        .is_err()
     );
+    assert!(BootstrapConfig::derived(registry, defi, 2, 100, BTreeMap::new(), 1).is_err());
+    assert!(BootstrapConfig::derived(registry, defi, 1, 101, BTreeMap::new(), 1).is_err());
+    assert!(BootstrapConfig::derived(registry, defi, 1, 100, BTreeMap::new(), 0).is_err());
 
-    let same = VALID.replacen(
-        "0x0000000000000000000000000000000000002000",
-        "0x0000000000000000000000000000000000001000",
-        1,
-    );
-    assert!(
-        BootstrapConfig::from_json(&same)
-            .unwrap_err()
-            .to_string()
-            .contains("must differ")
-    );
-
-    let uppercase_key = VALID.replacen(
-        "0x0000000000000000000000000000000000005000",
-        "0X0000000000000000000000000000000000005000",
-        1,
-    );
-    assert!(
-        BootstrapConfig::from_json(&uppercase_key)
-            .unwrap_err()
-            .to_string()
-            .contains("key must be lowercase")
-    );
-}
-
-#[test]
-fn bootstrap_validation_rejects_unknown_or_unsupported_policy() {
-    let unknown = VALID.replacen("\"chainId\": 1,", "\"chainId\": 1, \"extra\": true,", 1);
-    assert!(BootstrapConfig::from_json(&unknown).is_err());
-
-    let version = VALID.replacen("4.8.0", "5.0.0", 1);
-    assert!(
-        BootstrapConfig::from_json(&version)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported config version")
-    );
-
-    let zero_range = VALID.replacen("\"maxLogRange\": \"1000\"", "\"maxLogRange\": \"0\"", 1);
-    assert!(
-        BootstrapConfig::from_json(&zero_range)
-            .unwrap_err()
-            .to_string()
-            .contains("maxLogRange must be positive")
-    );
-
-    let excessive_range =
-        VALID.replacen("\"maxLogRange\": \"1000\"", "\"maxLogRange\": \"2049\"", 1);
-    assert!(
-        BootstrapConfig::from_json(&excessive_range)
-            .unwrap_err()
-            .to_string()
-            .contains("maxLogRange exceeds maximum 2048")
-    );
-
-    let excessive_cap = VALID.replacen("\"logResultCap\": 1000", "\"logResultCap\": 10001", 1);
-    assert!(
-        BootstrapConfig::from_json(&excessive_cap)
-            .unwrap_err()
-            .to_string()
-            .contains("logResultCap exceeds maximum 10000")
-    );
-}
-
-#[test]
-fn feed_lookup_is_case_insensitive_but_requires_complete_mapping() {
-    let config = BootstrapConfig::from_json(VALID).unwrap();
-    assert_eq!(
-        config
-            .asset_feed("0x0000000000000000000000000000000000003000")
-            .unwrap()
-            .to_string(),
-        "0x0000000000000000000000000000000000004000"
-    );
-    assert!(
-        config
-            .asset_feed("0x0000000000000000000000000000000000009999")
-            .unwrap_err()
-            .to_string()
-            .contains("no assetUsdFeed")
-    );
+    let feeds = [(
+        address("0x0000000000000000000000000000000000003000"),
+        Address::from_bytes([0; 20]),
+    )]
+    .into_iter()
+    .collect();
+    assert!(BootstrapConfig::derived(registry, defi, 1, 100, feeds, 1).is_err());
 }

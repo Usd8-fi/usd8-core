@@ -28,7 +28,6 @@ fn claim(
         spent_score: 0u8.into(),
         score_to_spend: score_to_spend.into(),
         booster_amount: booster_amount.into(),
-        booster_held: booster_amount.into(),
     }
 }
 

@@ -5,7 +5,13 @@ fn binary() -> &'static str {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(binary()).args(args).output().unwrap()
+    Command::new(binary())
+        .env_remove("USD8_REGISTRY")
+        .env_remove("ETH_RPC_URL")
+        .env_remove("DRPC_KEY")
+        .args(args)
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -17,6 +23,7 @@ fn help_and_usage_exit_codes_are_stable() {
     for args in [
         vec!["compute"],
         vec!["compute", "01"],
+        vec!["compute", "7", "--config", "removed.json"],
         vec!["verify", "7", "--unknown"],
         vec!["ffi", "unknown", "0x"],
         vec!["ffi", "proof", "0x"],
@@ -31,6 +38,22 @@ fn help_and_usage_exit_codes_are_stable() {
         );
         assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
     }
+}
+
+#[test]
+fn attested_compute_requires_the_approved_credentialed_provider() {
+    let output = run(&[
+        "attested-compute",
+        "7",
+        "--registry",
+        "0x0000000000000000000000000000000000001000",
+        "--rpc-url",
+        "https://lb.drpc.org/ogrpc?network=ethereum",
+        "--no-drpc-key",
+        "--raw-score",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires DRPC_KEY"));
 }
 
 #[test]

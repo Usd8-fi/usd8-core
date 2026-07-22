@@ -51,6 +51,13 @@ contract SettlementIntegrationTest is Test {
 
     function setUp() public {
         vm.roll(1000);
+        vm.etch(FEED, hex"00");
+        vm.mockCall(FEED, abi.encodeWithSignature("decimals()"), abi.encode(uint8(8)));
+        vm.mockCall(
+            FEED,
+            abi.encodeWithSignature("latestRoundData()"),
+            abi.encode(uint80(1), int256(1e8), uint256(1), uint256(1), uint80(1))
+        );
         usdc = new MockERC20("USDC", "USDC", 6);
         lp = new MockERC20("LP", "LP", 18);
         booster = new MockERC1155();
@@ -73,11 +80,15 @@ contract SettlementIntegrationTest is Test {
             )
         );
 
-        defi = new DefiInsurance(registry);
+        defi = DefiInsurance(
+            address(
+                new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (registry)))
+            )
+        );
 
         vm.startPrank(admin);
         registry.setTeePcrHash(TEE_PCR_HASH);
-        registry.addPool(address(pool));
+        registry.addPool(address(pool), FEED);
         registry.setDefiInsurance(address(defi));
         defi.addInsuredToken(IERC20(address(lp)), 8000, 1e18, FEED, address(0), "");
         defi.setTeeSigner(vm.addr(TEE_PK), true);
@@ -166,7 +177,6 @@ contract SettlementIntegrationTest is Test {
             _addr(bob, carol),
             amounts,
             _u256(60, 40), // raw score spent
-            _u256(0, 0), // booster amount used
             _u256(60, 40), // boosted payout score (no boosters in this fixture)
             _u256(100e18, 100e18)
         );
@@ -182,9 +192,9 @@ contract SettlementIntegrationTest is Test {
         vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1); // past DISPUTE_PERIOD
 
         vm.prank(bob);
-        defi.finalizeClaim(_u256(bobPay), 60, 0, 60, 100e18, proofBob);
+        defi.finalizeClaim(_u256(bobPay), 60, 60, 100e18, proofBob);
         vm.prank(carol);
-        defi.finalizeClaim(_u256(carolPay), 40, 0, 40, 100e18, proofCarol);
+        defi.finalizeClaim(_u256(carolPay), 40, 40, 100e18, proofCarol);
 
         // ── Payouts match the off-chain amounts and only raw score is recorded. ──
         assertEq(usdc.balanceOf(bob), bobPay, "bob payout != off-chain amount");
@@ -195,7 +205,7 @@ contract SettlementIntegrationTest is Test {
 
     /// @dev Golden-vector check: the selected FFI EIP-712 settlement digest must
     ///      equal the contract's _hashTypedDataV4 digest byte-for-byte, over 0/1/N
-    ///      pools (H-01). Covers the whole digest — domain separator, typehash,
+    ///      pools. Covers the whole digest — domain separator, typehash,
     ///      poolPayouts array encoding, and the `pools` packed-address hash — not
     ///      just the Merkle root. `solc` is the authority; both Rust and the
     ///      TypeScript oracle must reproduce it.
@@ -226,7 +236,7 @@ contract SettlementIntegrationTest is Test {
         }
     }
 
-    /// @dev Cross-language check of the claim-set accumulator (M-06): replay the
+    /// @dev Cross-language check of the claim-set accumulator: replay the
     ///      same join/cancel sequence off-chain and require it to reproduce the
     ///      contract's {Incident.claimSetHash} exactly.
     function test_OffchainClaimSetReplayMatchesOnchain() public {

@@ -35,19 +35,16 @@ npm run build      # compiles src/ → dist/
 
 ## Configure
 
-Edit `src/config.ts` with the deployed addresses and the per-asset USD price
-feeds (the chain is locked to Ethereum mainnet — chain id 1 — and is not
-configurable):
+No settlement settings file is used. Set the single Registry proxy root; the
+runtime derives DefiInsurance, booster policy, pool topology, pool-asset feeds,
+and oracle staleness from historical chain state at the incident `openBlock`:
 
-```ts
-export const CONFIG = {
-  registry:      "0x…",  // Registry (topology: pools, scored tokens, boosterNFT)
-  defiInsurance: "0x…",  // DefiInsurance
-  // Pool asset pricing is no longer on-chain: map each registered pool asset
-  // (lowercased address) → its Chainlink-style USD feed. Every pool asset needs one.
-  assetUsdFeed: { "0xa0b8…eb48": "0x8fff…f6" }, // e.g. USDC → USDC/USD feed
-};
+```bash
+export USD8_REGISTRY="0x…"
 ```
+
+Ethereum mainnet and conservative 1,000-block/1,000-result RPC limits are baked
+into the measured code.
 
 Set `DRPC_KEY` for a live oracle shadow against dRPC Ethereum. The key is sent in
 the `Drpc-Key` HTTP header to dRPC's documented
@@ -75,7 +72,7 @@ DefiInsurance, pools, and configured price feeds must contain bytecode at their
 pinned historical blocks. Log
 queries use bounded ranges, recursively bisect full pages, and now also bisect
 explicit timeout/range/result-size errors. HTTP requests have a 30-second timeout;
-claimant reads use at most eight concurrent requests. A single-block ambiguity
+claimant reads use at most 24 concurrent requests. A single-block ambiguity
 fails closed.
 
 ### Optional authenticated score checkpoint
@@ -111,7 +108,7 @@ npm run verify 1
 npm run compute 1
 ```
 
-`compute` prints, per claim, the exact `(amounts, scoreSpent, boosterAmountUsed, boostedScore, eligibleAmount, proof)` a
+`compute` prints, per claim, the exact `(amounts, scoreSpent, boostedScore, eligibleAmount, proof)` a
 claimant passes to `DefiInsurance.finalizeClaim`. It also publishes the
 canonical, address-sorted `(user, grossEarnedScore)` rows and their
 `settlementInputHash` as reproducibility metadata; it is not included in the
@@ -147,9 +144,8 @@ and maximum-load tests.
    (token·block integral of the scored tokens), minus cumulative raw spent score read
    from `Registry.scoreSpent` at the end of `openBlock`. The requested raw amount is
    capped to that unspent balance → `scoreSpent`; only this value is recorded on-chain.
-   `boosterAmountUsed` is the committed amount capped at the claimant's minimum
-   booster balance from end-of-`joinBlock` through `windowEnd`; it multiplies `scoreSpent` into
-   a separate `boostedScore`. This is one input to the
+   The booster amount escrowed by `joinClaim` multiplies `scoreSpent` into a
+   separate `boostedScore`. This is one input to the
    geometric allocation weight, not the sole payout weight. Pinning to
    `referenceBlock` stops anyone farming fresh score during the claim window.
 5. **Covered need**: `claimCapUsd = floor(κ × lossUsd)`. This is both an input
@@ -160,9 +156,9 @@ and maximum-load tests.
    budget using deterministic water-filling. Split each payout per pool pro-rata
    to the pool mix aligned to `Registry.pools()` at `openBlock`.
 7. **Merkle root**: OZ `StandardMerkleTree` over
-   `(incidentId, claimId, user, amounts, scoreSpent, boosterAmountUsed, boostedScore, eligibleAmount)`.
-   `finalizeClaim` verifies the proof, caps `boosterAmountUsed` to the committed
-   amount, and recomputes `boostedScore` exactly on-chain.
+   `(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount)`.
+   `finalizeClaim` verifies the proof and recomputes `boostedScore` from the
+   escrowed booster amount exactly on-chain.
 
 ### Capped geometric allocation
 
@@ -216,11 +212,10 @@ one final WAD division across all tokens and no extra decimal rounding at
 checkpoint boundaries. Both feed the same `ScoreSource` interface, payout math,
 and canonical artifact input rows.
 
-All tunable parameters (coverage κ, TWAP/holding windows, the conversion recipe,
-the underlying oracle, the scored-token set) are read from contract state at the
-incident's `openBlock`, not hard-coded here — so two people running this at
-different times get the identical root. Only the per-asset pool-valuation feeds
-(`assetUsdFeed`) live in `config.ts`.
+All tunable parameters—including coverage κ, TWAP/holding windows, conversion
+recipes, insured-token oracles, scored-token histories, pool-asset feeds, and the
+global oracle-staleness policy—are read from contract state at the incident's
+`openBlock`. Registry and DefiInsurance pointers are validated in both directions.
 
 ### Oracle validity at the pinned block
 
@@ -230,13 +225,11 @@ answer and satisfies:
 ```text
 0 < startedAt <= updatedAt <= pinnedBlock.timestamp
 answeredInRound >= roundId
-pinnedBlock.timestamp - updatedAt <= MAX_ORACLE_STALENESS
+pinnedBlock.timestamp - updatedAt <= Registry.maxOracleStaleness(openBlock)
 ```
 
-The feed address, feed implementation/class, decimals, and heartbeat must still
-be validated before activation. `MAX_ORACLE_STALENESS` is recorded in
-`configHash`; an invalid or stale round produces no settlement root rather than
-silently pricing a claim from an impossible or outdated timestamp.
+Feed implementation, decimals, heartbeat, and deviation behavior must be
+validated before governance activates it. Invalid or stale rounds fail closed.
 
 ## Tests
 
@@ -263,7 +256,7 @@ it never breaks the default Solidity suite.
 ## Layout
 
 ```
-src/config.ts    contract addresses + per-asset USD feeds (the only thing to edit; chain locked to mainnet)
+src/config.ts    baked chain/RPC safety policy and Registry-derived runtime configuration
 src/chain.ts     read-only RPC helpers (events, prices, balances, config)
 src/compute.ts   the settlement algorithm (pure, given the chain reads)
 src/score.ts     ScoreSource abstraction + Phase-1 raw-RPC implementation

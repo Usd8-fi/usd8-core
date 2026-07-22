@@ -60,9 +60,8 @@ contract USD8 is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, UUPSUp
     }
 
     /// @inheritdoc UUPSUpgradeable
-    /// @dev Only the timelock can authorize. Treasury cannot upgrade unless it
-    ///      is also the timelock.
-    function _authorizeUpgrade(address) internal view override onlyTimelock {}
+    /// @dev Only the timelock can authorize, and only while Registry beta mode is active.
+    function _authorizeUpgrade(address) internal view override onlyTimelock onlyBetaMode {}
 
     // ─────────────────────────── Mint / burn (treasury) ───────────────────────────
 

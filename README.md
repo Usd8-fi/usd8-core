@@ -1,20 +1,38 @@
 # USD8 Core
 
-USD8 is a stable coin offering free defi insurance to users. This repo contains the contracts for USD8 protocol. The system is under active development, currently no bounties are offered, do not submit vulnerability reports.
+USD8 is a stable coin offering free defi insurance to users. This repo contains the contracts for USD8 protocol.
 
 
 ## Contents
 
 - [Protocol overview](#protocol-overview)
 - [USD8 and Treasury](#usd8-and-treasury)
-- [Insurance score](#insurance-score)
+  - [Mint and Redeem USD8](#mint-and-redeem-usd8)
+  - [Reserve yield](#reserve-yield)
+  - [Morpho savings sUSD8](#morpho-savings-susd8)
+  - [Insurance score](#insurance-score)
 - [Cover pools](#cover-pools)
+  - [Deposit and withdraw](#deposit-and-withdraw)
+  - [High APY](#high-apy)
+  - [Payouts and limits](#payouts-and-limits)
 - [Defi insurance](#defi-insurance)
+  - [Insured tokens](#insured-tokens)
+  - [Claim lifecycle](#claim-lifecycle)
+  - [Boosters](#boosters)
+  - [Eligibility](#eligibility)
+  - [Insured token valuation](#insured-token-valuation)
+  - [Payout allocation](#payout-allocation)
 - [Governance and trust assumptions](#governance-and-trust-assumptions)
-- [Repository layout](#repository-layout)
+  - [Beta mode and permanent disablement of upgradeability](#beta-mode-and-permanent-disablement-of-upgradeability)
+  - [Repository layout](#repository-layout)
+  - [Codebase structure](#codebase-structure)
 - [Getting started](#getting-started)
-- [Security](#security)
-- [License](#license)
+  - [Prerequisites](#prerequisites)
+  - [Install and build](#install-and-build)
+  - [Mainnet deployment order](#mainnet-deployment-order)
+  - [Test](#test)
+  - [Security](#security)
+  - [License](#license)
 
 <br/><br/><br/><br/>
 
@@ -47,45 +65,20 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 
 | Component | Role |
 |---|---|
-| [`Registry`](src/Registry.sol) | UUPS access-control, pause, topology, pool, payout-module, scored-token, booster, and incident-freeze hub. |
-| [`USD8`](src/USD8.sol) | UUPS ERC-20 stablecoin. Only its timelock-configured Treasury may mint or burn it. |
-| [`Treasury`](src/Treasury.sol) | Mints USD8 against USDC, manages the USDC reserve and approved strategies, harvests surplus, and routes USD8 revenue. |
+| [`Registry`](src/Registry.sol) | Beta-only UUPS access-control, pause, topology, pool/feed, oracle-staleness, payout-module, scored-token, booster, and incident-freeze hub. |
+| [`USD8`](src/USD8.sol) | Beta-only UUPS ERC-20 stablecoin. Only its timelock-configured Treasury may mint or burn it. |
+| [`Treasury`](src/Treasury.sol) | Beta-only UUPS reserve module that mints USD8 against USDC, manages approved strategies, harvests surplus, and routes USD8 revenue. |
 | Morpho Vault V2 savings | Official Morpho Vault V2 share token with symbol `sUSD8`, backed by [`USD8SavingsAdapter`](src/adapters/USD8SavingsAdapter.sol). There is no custom sUSD8 vault contract. |
 | [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) | One ERC-4626 staking pool per cover asset. Stakers earn USD8 rewards and accept claim-loss risk. |
-| [`DefiInsurance`](src/DefiInsurance.sol) | Insured-token configuration, claimant escrow, incident lifecycle, TEE-signed settlement, disputes, and claim payouts. |
-| [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) | Adapter for deploying Treasury USDC into an approved ERC-4626 USDC vault. One adapter is used per vault. |
+| [`DefiInsurance`](src/DefiInsurance.sol) | Beta-only UUPS insured-token configuration, claimant escrow, incident lifecycle, TEE-signed settlement, disputes, and claim payouts. |
+| [`StrategyBase`](src/strategies/StrategyBase.sol) | Shared strategy swap boundary. Each strategy declares its deployment token. Approved routes may swap USDC into that token, or any non-position token back to USDC; USDC output goes directly to Treasury. |
+| [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) | `StrategyBase` adapter for deploying Treasury USDC into an approved ERC-4626 USDC vault. Its deployment token is USDC, so only non-position-token → USDC swaps are available. |
 <br/><br/><br/><br/>
 
 
 # USD8 and Treasury
 
-```
 
-        ┌───────────┐
-        │   Users   │
-        └───────────┘
-              │                           ┌────────────────┐
-              │ 1.Mint/Redeem             │  USD8 Savings  │
-              │   USD8<->USDC       ┌────►│  Morpho Vault  │
-              │                     │     └────────────────┘
-              ▼                     │
-┌───────────────────────────┐       │
-│                           │       │
-│       USD8 Treasury       │       │     ┌───────────────┐
-│           (USDC)          │       ├────►│  USD8 Cover   │
-│                           │       │     │    Pool 1     │
-└────────────┬──────────────┘       │     └───────────────┘
-             │                      │
-             │                      │
-             │  2. Deploy USDC      │     ┌───────────────┐
-             │                      ├────►│   USD8 Cover  │
-             ▼                      │     │     Pool 2    │
-   ┌────────────────────┐           │     └───────────────┘
-   │   Yield Strategies ├───────────┘
-   └────────────────────┘   3. Profit Distribution
-
-
-```
 
 ## Mint and Redeem USD8
 - anyone can mint and redeem USD8 with USDC 1 to 1
@@ -130,7 +123,7 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
        │
        ▼
  ┌──────────────┐
- │  Cover Pool  │──── claim yield ───▶ USD8
+ │  Cover Pool  │────► claim yield in USD8
  └──────┬───────┘
         │ withdraw
         ▼
@@ -152,8 +145,8 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 ```
 
 ## High APY
-- Cover Pool receive a high payout from the treasury yield
-- yield is in USD8, not compounded, thus not covering any loss. Claim anytime.
+- Cover Pool size is capped according to USD8 supply, thus the APY can be high
+- yield is in USD8, not compounded and not exposing to any loss. Claim anytime.
 
 ## Payouts and limits
 - Cover pools will payout to Defi insurance as requested
@@ -228,18 +221,25 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 - can be used when filing a claim
 
 
-## Eligibility and valuation
+## Eligibility
 
-Settlement reconstructs each live claim from `ClaimRegistered` and `ClaimCancelled` events. A claimant's eligible amount is:
+Users need to hold the insured token for 7 days to be eligible for insurance. Offchain TEE reconstructs each live claim from `ClaimRegistered` and `ClaimCancelled` events. A claimant's eligible amount is:
 
 ```text
 eligibleAmount = min(
   escrowReceived,
-  minimum insured-token balance over the pre-incident holding window
+  minimum insured-token balance over the pre-incident 7 days holding window
 )
 ```
 
-The token-to-underlying TWAP ends at the pre-incident `referenceBlock`. The underlying/USD oracle is pinned to the claim-window-end block. Excess escrow above `eligibleAmount` is refunded during finalization.
+Excess escrow above `eligibleAmount` is refunded during finalization.
+
+## Insured token valuation
+There are 3 conversions during a payout.
+
+1. insured token -> underlying token : TWAP price over past 7 days from incident block at every 300 blocks(1 hour).
+2. underlying token -> USD : spot price of underlying/USD at `claimWindowEnd`
+3. USD -> cover pool assets : spot price at `claimWindowEnd`
 
 
 ## Payout allocation
@@ -251,7 +251,7 @@ For each claim:
 ```text
 C_i = floor(preIncidentEligibleValueUsd * coverageBps / 10_000)
 R_i = min(requestedRawScore, rawUnspentScore)
-S_i = floor(R_i * (10_000 + boosterAmountUsed_i * boosterBoostBps) / 10_000)
+S_i = floor(R_i * (10_000 + boosterAmount_i * boosterBoostBps) / 10_000)
 W_i = floor(sqrt(C_i * S_i))
 B   = floor(totalCoverPoolUsd * maxCoverPoolPayoutBps / 10_000)
 P_i = min(C_i, lambda * W_i)
@@ -268,10 +268,21 @@ The settlement code builds one Merkle root over the exact claim set and payout r
 
 # Governance and trust assumptions
 
-- Registry admin and timelock roles are privileged by design during beta. They control upgrades, topology, strategy admission and allocation, profit routing, pauses, insured-token parameters, and incident/root operations.
-- Beta mode can be ended permanently; after that, settlement correction is timelock-only.
+- Registry admin and timelock roles are privileged by design. They control upgrades, topology, settlement price feeds and staleness policy, strategy admission and allocation, profit routing, pauses, insured-token parameters, and incident/root operations.
+- The timelock alone approves strategy swap target/spender pairs. Admins and the timelock may execute fresh routes. Each strategy permits only USDC → its declared deployment token or any non-position token → USDC; verified USDC output goes directly to Treasury and position tokens cannot be sold through this entrypoint.
 - Any authorized TEE signer can open or sign a settlement. Compromise of one signer is bounded by the dispute window, pool payout caps, and governance close/correction powers.
 - All TEE algorithms are open sourced, user can verify their insurance score, payout amount independently.
+
+## Beta mode and permanent disablement of upgradeability
+
+USD8 launches with Registry `betaMode` enabled. It is a narrow, temporary safety boundary around two classes of critical action:
+
+- UUPS upgrades to Registry, USD8, Treasury, and DefiInsurance require the timelock and are permitted only while beta mode is active.
+- `adminCorrectSettlement` lets an admin or the timelock replace or void a standing settlement root during its dispute period. It remains subject to the normal incident phase checks and per-pool payout caps.
+
+The timelock can call `endBetaMode()` only while no incident is active. There is no function to re-enable beta mode, so this permanently disables all four UUPS upgrade paths and the direct settlement-correction shortcut for both admins and the timelock. Ordinary governance powers such as parameter changes, topology management, pauses, and strategy controls are not removed.
+
+Cover pools use a separate Ownable beacon and are not controlled by Registry beta mode. The timelock can renounce beacon ownership separately after beta.
 
 
 ## Repository layout
@@ -284,6 +295,7 @@ src/
   SingleAssetCoverPool.sol      one-asset staking and claim-loss pool
   DefiInsurance.sol             insured tokens, incidents, escrow, and payouts
   adapters/USD8SavingsAdapter.sol
+  strategies/StrategyBase.sol
   strategies/ERC4626Strategy.sol
 
 offchain-rust/
@@ -296,20 +308,54 @@ offchain/                       TypeScript CI/shadow oracle; not production
 
 script/
   01_DeployTimelock.s.sol       step 1: governance timelock
-  02_DeployUSD8System.s.sol     step 2: mainnet system and initial wiring
+  02_DeployUSD8System.s.sol     step 2: complete mainnet system, including sUSD8
 test/                           Foundry tests
 offchain/test/                  Vitest settlement tests
 ```
+## Codebase structure
 
-## Getting started
+```
+                  ┌────────────────┐
+                  │                │
+                  │    Registry    │
+                  │                │
+                  └────────────────┘
+                           ▲
+                           │  Lookups
+┌──────────────────────────┴─────────────────────────┐
+│                                             Shared │
+│                                             Base   │
+│                                                    │
+│      ┌────────────────┐         ┌───────────┐      │
+│      │                │  Mint   │           │      │
+│      │    Treasury    ├────────►│   Usd8    │      │
+│      │                │  Burn   │           │      │
+│      └────────────────┘         └───────────┘      │
+│                                                    │
+│                              ┌──────────────────┐  │
+│                              │                  │  │
+│                              │   Cover Pool 1   │  │
+│  ┌───────────────┐        ┌─►│                  │  │
+│  │               │        │  └──────────────────┘  │
+│  │      Defi     ├────────┤                        │
+│  │   Insurance   │ Payout │  ┌──────────────────┐  │
+│  │               │requests│  │                  │  │
+│  └───────────────┘        └─►│   Cover Pool 2   │  │
+│                              │                  │  │
+│                              └──────────────────┘  │
+│                                                    │
+└────────────────────────────────────────────────────┘
+```
+<br/><br/><br/><br/>
+# Getting started
 
-### Prerequisites
+## Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `cast`, `anvil`)
 - Rust 1.91.1 for the production settlement runtime
 - Node.js 22.22.3 and npm only for differential-oracle tests
 
-### Install and build
+## Install and build
 
 ```bash
 git clone https://github.com/Usd8-fi/usd8-core.git
@@ -326,11 +372,14 @@ npm ci --include=dev
 npm run build
 ```
 
-### Mainnet deployment order
+## Mainnet deployment order
 
 ```bash
 # Keep the Etherscan key in the ignored local .env or shell environment.
 source .env
+
+# Set only after independently reviewing the configured Aave launch strategy.
+export AAVE_STRATEGY_REVIEWED=true
 
 # 1. Deploy and verify the standalone governance timelock.
 forge script script/01_DeployTimelock.s.sol:DeployTimelockScript \
@@ -338,17 +387,24 @@ forge script script/01_DeployTimelock.s.sol:DeployTimelockScript \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 
 # Copy the verified address printed by step 1.
-export TIMELOCK_ADDRESS=0x...
+TIMELOCK_ADDRESS=0x...
 
-# 2. Deploy, wire, and verify the USD8 system.
+# 2. Deploy, wire, and verify the complete USD8 system, including canonical
+# sUSD8 deployment, configuration and its backed 10-USDC dead-share seed.
+# The broadcaster must hold at least 10 USDC before running this command.
 forge script script/02_DeployUSD8System.s.sol:DeployUSD8SystemScript \
+  --sig "run(address)" "$TIMELOCK_ADDRESS" \
   --rpc-url "$ETH_RPC_URL" --broadcast --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 ```
 
-If broadcast succeeds but verification is interrupted, rerun the corresponding command with `--resume --verify`; do not broadcast a new deployment. Step 2 validates that the timelock address contains contract code and checks its 24-hour delay, proposer/canceller, open executor, and self-admin role before broadcasting. The deploying account must also hold the configured USDC seed amount.
+Step 2 configures sUSD8 while the broadcaster still holds temporary bootstrap
+authority, then transfers Registry and vault governance to the verified timelock.
+sUSD8 scoring therefore starts during genesis without a 24-hour activation wait.
 
-### Test
+If broadcast succeeds but verification is interrupted, rerun the corresponding command with `--resume --verify`; do not broadcast a new deployment. Step 2 validates that the timelock address contains contract code and checks its 24-hour delay, proposer/canceller, open executor, and self-admin role before broadcasting.
+
+## Test
 
 ```bash
 # Solidity
@@ -370,17 +426,6 @@ RUN_INTEGRATION=1 USE_RUST_FFI=1 forge test --offline --ffi --match-path test/Se
 RUN_INTEGRATION=1 USE_RUST_FFI=0 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 ```
 
-### Format
-
-```bash
-forge fmt
-```
-
-### Coverage
-
-```bash
-forge coverage
-```
 
 ## Security
 

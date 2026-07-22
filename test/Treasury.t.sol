@@ -332,7 +332,17 @@ contract TreasuryTest is Test {
         assertEq(treasuryB.getReserveBalance(), 100e6);
     }
 
-    /// @dev M-06: evolve the Treasury by UUPS-upgrading its proxy IN PLACE —
+    function test_TreasuryUpgradePermanentlyDisabledAfterBetaEnds() public {
+        vm.prank(timelock);
+        registry.endBetaMode();
+
+        address v2 = address(new TreasuryV2());
+        vm.expectRevert(SharedBase.NotBetaMode.selector);
+        vm.prank(timelock);
+        UUPSUpgradeable(address(treasury)).upgradeToAndCall(v2, "");
+    }
+
+    /// @dev Evolves the Treasury by UUPS-upgrading its proxy in place while
     ///      same address, reserve/strategies/authority all preserved, timelock-gated.
     function test_TreasuryUpgradeInPlacePreservesStateAndAuthority() public {
         MockStrategy strat = new MockStrategy(usdc);
@@ -661,9 +671,11 @@ contract TreasuryTest is Test {
         assertEq(usdc.balanceOf(address(treasury)), 0);
     }
 
-    /// @dev Treasury allows at most one full USDC of aggregate reserve-accounting
+    /// @dev Treasury allows at most 100 USDC base units of aggregate reserve-accounting
     ///      difference per mint or redeem, without per-strategy configuration.
-    function test_RedeemUsesFixedOneUsdcReserveTolerance() public {
+    function test_RedeemUsesHundredBaseUnitReserveTolerance() public {
+        assertEq(treasury.RESERVE_CHECK_TOLERANCE(), 100);
+
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
         usdc.approve(address(treasury), 100e6);
@@ -677,12 +689,12 @@ contract TreasuryTest is Test {
         vm.stopPrank();
         usdc.mint(address(strat), 10e6);
 
-        strat.setLossOnNextWithdraw(1e6);
+        strat.setLossOnNextWithdraw(100);
         vm.prank(alice);
         treasury.redeemUSD8(50e18, 0);
         assertEq(usdc.balanceOf(alice), 50e6);
 
-        strat.setLossOnNextWithdraw(1e6 + 1);
+        strat.setLossOnNextWithdraw(101);
         vm.expectPartialRevert(Treasury.ReserveSupplyStatusWorsened.selector);
         vm.prank(alice);
         treasury.redeemUSD8(10e18, 0);
@@ -1291,13 +1303,13 @@ contract TreasuryTest is Test {
         assertLt(endUsdc, startUsdc, "attacker strictly loses USDC on the round-trip");
     }
 
-    // -- Post-allocation reserve invariant (audit test gap 7) --------------
+    // -- Post-allocation reserve invariant ---------------------------------
 
     /// @dev Allocating reserve through the REAL ERC4626Strategy into an honest
     ///      vault is reserve-neutral: getReserveBalance() is identical before and
     ///      after deposit, and again after a full withdrawal — USDC only changes
     ///      classification (idle ↔ strategy-held), never total.
-    function test_Audit_StrategyAllocationIsReserveNeutral() public {
+    function test_StrategyAllocationIsReserveNeutral() public {
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
         usdc.approve(address(treasury), 100e6);
@@ -1305,7 +1317,7 @@ contract TreasuryTest is Test {
         vm.stopPrank();
 
         HonestVault vault = new HonestVault(IERC20(USDC_ADDR));
-        ERC4626Strategy strat = new ERC4626Strategy(address(treasury), vault);
+        ERC4626Strategy strat = new ERC4626Strategy(address(treasury), registry, vault);
         vm.prank(timelock);
         treasury.addStrategy(strat, 0);
 
@@ -1394,7 +1406,7 @@ contract WrongUsdcStrategy is IStrategy {
 }
 
 /// @dev Trivial upgrade target: same storage layout as Treasury plus a version()
-///      probe, to prove in-place UUPS upgrades preserve state (M-06).
+///      probe, to prove in-place UUPS upgrades preserve state.
 contract TreasuryV2 is Treasury {
     function version() external pure returns (uint256) {
         return 2;

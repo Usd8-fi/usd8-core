@@ -11,9 +11,12 @@ pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
+import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
@@ -49,10 +52,19 @@ interface ISingleAssetCoverPool {
 ///         {SUBMIT_DEADLINE}. During beta, governance may correct or void the root during
 ///         {DISPUTE_PERIOD}; claimants then pull Merkle-proven payouts during
 ///         {FINALIZE_WINDOW}. Missing and expired roots void automatically.
-/// @dev Non-upgradeable. Registry replacement is safe only between incidents. This
-///      contract escrows insured tokens; boosters remain with claimants until burned at
-///      finalization. Consumed score is emitted and mirrored on the {Registry}.
-contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
+/// @dev UUPS-upgradeable during Registry beta mode only. Once beta ends, upgrades
+///      are permanently disabled. Registry replacement is safe only between incidents. This
+///      contract escrows insured tokens and committed boosters. Boosters burn on
+///      finalization or return on cancellation/withdrawal. Consumed score is emitted
+///      and mirrored on the {Registry}.
+contract DefiInsurance is
+    Initializable,
+    UUPSUpgradeable,
+    ReentrancyGuardTransient,
+    EIP712Upgradeable,
+    ERC1155Holder,
+    SharedBase
+{
     using SafeERC20 for IERC20;
 
     // ─────────────────────────── State ───────────────────────────
@@ -170,7 +182,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
     /// @param user Claimant.
     /// @param incidentId Incident id.
     /// @param insuredTokenAmount Escrowed insured-token amount.
-    /// @param boosterAmount Booster units committed but not escrowed.
+    /// @param boosterAmount Booster units escrowed when the claim is filed.
     /// @param resolved Whether any resolution path has completed.
     /// @param boosterCollection Booster collection snapshotted at registration.
     struct Claim {
@@ -198,9 +210,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
     ///         the collection address lives on the pool ({Registry.boosterNFT}).
     uint256 public constant BOOSTER_ID = 1;
 
-    /// @notice Hard-coded booster policy: each committed unit of {BOOSTER_ID}
+    /// @notice Hard-coded booster policy: each escrowed unit of {BOOSTER_ID}
     ///         adds 100 bps (+1%) to the claimant's insurance-score multiplier.
-    ///         Applied off-chain by the settlement code.
+    ///         Applied off-chain and verified on-chain at finalization.
     uint256 public constant BOOSTER_BOOST_BPS = 100;
 
     // ─────────────────────────── State (settlement config) ───────────────────────────
@@ -303,10 +315,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
     /// @notice Signed eligible escrow exceeds the amount actually escrowed.
     error EligibleExceedsEscrow(uint256 eligibleAmount, uint256 escrow);
 
-    /// @notice Settlement applied more booster units than the claimant committed.
-    error BoosterAmountUsedExceedsCommitted(uint256 used, uint256 committed);
-
-    /// @notice Merkle row's boosted score does not match its raw score and applied booster units.
+    /// @notice Merkle row's boosted score does not match its raw score and escrowed booster units.
     error InvalidBoostedScore(uint256 provided, uint256 expected);
 
     /// @notice The claim still has a possible payout path and cannot be withdrawn.
@@ -399,12 +408,18 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
     ///         also mirrored on-chain via {Registry.recordScoreSpent}.
     event ScoreSpent(address indexed user, uint256 amount, uint256 indexed incidentId);
 
-    // ─────────────────────────── Constructor ─────────────────────
+    // ─────────────────────────── Initialization ─────────────────────
 
-    /// @notice Deploy this non-upgradeable payout module.
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice Initialize the payout-module proxy. Callable once.
     /// @param _registry Shared access and topology registry; its timelock delay must
     ///        leave enough of {DISPUTE_PERIOD} to intervene on a bad root.
-    constructor(Registry _registry) EIP712("DefiInsurance", "1") {
+    function initialize(Registry _registry) external initializer {
+        __EIP712_init("DefiInsurance", "1");
         _setRegistry(_registry);
         nextIncidentId = 1;
         nextClaimId = 1;
@@ -415,6 +430,10 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
             sampleStepBlocks: 300 // ~1h TWAP sample stride (≈168 samples over a 7d window)
         });
     }
+
+    /// @dev Timelock-only during beta and blocked while an incident is active;
+    ///      Registry.endBetaMode disables this forever.
+    function _authorizeUpgrade(address) internal view override onlyTimelock onlyBetaMode notDuringIncident {}
 
     /// @dev Freezes settlement-critical configuration from incident open through resolution.
     modifier notDuringIncident() {
@@ -627,7 +646,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
     /// @param insuredToken Token being claimed.
     /// @param insuredTokenAmount Requested escrow; received amount must meet the minimum.
     /// @param scoreToSpend Requested score spend; settlement caps it to availability.
-    /// @param boosterAmount Booster units retained by the claimant until finalization burn.
+    /// @param boosterAmount Booster units transferred into escrow with the claim.
     /// @param referenceBlock Pre-incident block for the first claim; otherwise zero.
     /// @param signature TEE open signature for the first claim; otherwise empty.
     /// @return claimId The newly minted claim id.
@@ -687,9 +706,9 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
             if (boosterAmount > type(uint128).max) revert BoosterAmountTooLarge(boosterAmount);
             address booster = registry().boosterNFT();
             if (booster == address(0)) revert BoosterNFTUnset();
-            // Not escrowed: recorded and burned from the claimant at finalize.
             claims[claimId].boosterAmount = uint128(boosterAmount);
-            claims[claimId].boosterCollection = booster; // snapshot the collection to burn from
+            claims[claimId].boosterCollection = booster;
+            IERC1155(booster).safeTransferFrom(msg.sender, address(this), BOOSTER_ID, boosterAmount, "");
         }
 
         Incident storage reg = incidents[incidentId];
@@ -706,6 +725,14 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
         uint256 balanceBefore = token.balanceOf(address(this));
         token.safeTransferFrom(from, address(this), amount);
         received = token.balanceOf(address(this)) - balanceBefore;
+    }
+
+    /// @dev Return a claim's escrowed boosters on a non-finalization exit.
+    function _returnBoosters(Claim storage c, address recipient) internal {
+        uint256 amount = c.boosterAmount;
+        if (amount != 0) {
+            IERC1155(c.boosterCollection).safeTransferFrom(address(this), recipient, BOOSTER_ID, amount, "");
+        }
     }
 
     /// @notice Cancel your live claim on the active incident while its window is
@@ -731,6 +758,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
         inc.claimSetHash = keccak256(abi.encode(inc.claimSetHash, claimId));
         activeClaimId[incidentId][msg.sender] = 0; // may re-file within the window
         escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
+        _returnBoosters(c, msg.sender);
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
 
         emit ClaimCancelled(claimId, msg.sender);
@@ -837,14 +865,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
     ///         amounts within their remaining incident budgets.
     /// @param amounts Per-pool payouts aligned to the incident pool snapshot.
     /// @param scoreSpent Raw historical score consumed by this claim and recorded in the Registry.
-    /// @param boosterAmountUsed Historically eligible committed booster units applied to the score.
     /// @param boostedScore Booster-adjusted score used only for off-chain payout weighting.
     /// @param eligibleAmount Covered escrow amount; cannot exceed total escrow.
     /// @param proof Merkle proof against the standing root.
     function finalizeClaim(
         uint256[] calldata amounts,
         uint256 scoreSpent,
-        uint256 boosterAmountUsed,
         uint256 boostedScore,
         uint256 eligibleAmount,
         bytes32[] calldata proof
@@ -868,20 +894,16 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
             // Verify the row against the open-time pool ordering.
             if (amounts.length != incidentPools[incidentId].length) revert InvalidProof(claimId);
             // StandardMerkleTree double-hashed claim leaf.
-            bytes32 leaf = _settlementLeaf(
-                incidentId, claimId, msg.sender, amounts, scoreSpent, boosterAmountUsed, boostedScore, eligibleAmount
-            );
+            bytes32 leaf =
+                _settlementLeaf(incidentId, claimId, msg.sender, amounts, scoreSpent, boostedScore, eligibleAmount);
             if (!MerkleProof.verifyCalldata(proof, inc.root, leaf)) revert InvalidProof(claimId);
         }
 
         Claim storage c = claims[claimId];
         {
-            uint256 committedBoosterAmount = c.boosterAmount;
-            if (boosterAmountUsed > committedBoosterAmount) {
-                revert BoosterAmountUsedExceedsCommitted(boosterAmountUsed, committedBoosterAmount);
-            }
-            uint256 expectedBoostedScore =
-                Math.mulDiv(scoreSpent, BPS_DENOMINATOR + boosterAmountUsed * BOOSTER_BOOST_BPS, BPS_DENOMINATOR);
+            uint256 expectedBoostedScore = Math.mulDiv(
+                scoreSpent, BPS_DENOMINATOR + uint256(c.boosterAmount) * BOOSTER_BOOST_BPS, BPS_DENOMINATOR
+            );
             if (boostedScore != expectedBoostedScore) revert InvalidBoostedScore(boostedScore, expectedBoostedScore);
         }
 
@@ -897,12 +919,11 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
             if (refund > 0) inc.insuredToken.safeTransfer(msg.sender, refund);
         }
 
-        // Burn committed boosters from the snapshotted collection. Missing balance or
-        // approval blocks only this claim until the bounded finalization window expires.
+        // Burn the boosters escrowed when the claim was filed.
         {
             uint256 boosterAmount = c.boosterAmount;
             if (boosterAmount != 0) {
-                IERC1155Burnable(c.boosterCollection).burn(msg.sender, BOOSTER_ID, boosterAmount);
+                IERC1155Burnable(c.boosterCollection).burn(address(this), BOOSTER_ID, boosterAmount);
                 // Preserve the committed-and-burned amount as permanent claim history.
             }
         }
@@ -931,17 +952,12 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
         address user,
         uint256[] calldata amounts,
         uint256 scoreSpent,
-        uint256 boosterAmountUsed,
         uint256 boostedScore,
         uint256 eligibleAmount
     ) internal pure returns (bytes32) {
         return keccak256(
             bytes.concat(
-                keccak256(
-                    abi.encode(
-                        incidentId, claimId, user, amounts, scoreSpent, boosterAmountUsed, boostedScore, eligibleAmount
-                    )
-                )
+                keccak256(abi.encode(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount))
             )
         );
     }
@@ -981,6 +997,7 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
         c.resolved = true;
         inc.unresolved -= 1;
         escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
+        _returnBoosters(c, msg.sender);
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
 
         emit ClaimWithdrawn(claimId, msg.sender);
@@ -1011,13 +1028,17 @@ contract DefiInsurance is ReentrancyGuardTransient, EIP712, SharedBase {
         return insuredTokens[insuredToken];
     }
 
+    /// @notice Whether `token` is currently approved for insurance.
+    function isInsuredToken(IERC20 token) external view returns (bool) {
+        return insuredTokens[token].maxCoverageBps != 0;
+    }
+
     /// @notice Number of insured tokens currently in the approval list.
     function insuredTokenListLength() external view returns (uint256) {
         return insuredTokenList.length;
     }
 
-    /// @notice Units of {BOOSTER_ID} committed by a claim (0 if none). Not escrowed
-    ///         — burned from the claimant's wallet at finalize.
+    /// @notice Units of {BOOSTER_ID} committed and initially escrowed by a claim (0 if none).
     /// @param claimId  Claim to query.
     function getClaimBoosterAmount(uint256 claimId) external view returns (uint256) {
         return claims[claimId].boosterAmount;

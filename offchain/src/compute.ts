@@ -6,11 +6,9 @@ import { type PublicClient, keccak256, encodePacked, encodeAbiParameters } from 
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
 import {
   WAD,
-  ZERO_ADDRESS,
   ratioAt,
   priceUsd1e18,
   minBalanceOver,
-  minErc1155BalanceOver,
   type IncidentConfig,
   type InputEvent,
 } from "./chain.js";
@@ -48,7 +46,6 @@ export interface SettledRow {
   grossEarnedScore: bigint; // raw lifetime score at referenceBlock, before spent-score subtraction
   earnedScore: bigint; // raw score available to spend = raw lifetime − prior raw score spent
   scoreSpent: bigint; // raw score consumed = min(requested, raw available), recorded via ScoreSpent
-  boosterAmountUsed: bigint; // min(committed, continuously held), committed in the payout leaf
   boostedScore: bigint; // scoreSpent × booster multiplier, used only for payout weighting
   payoutUsd: bigint; // 1e18, post-coverage-cap and capped-geometric allocation
   amounts: bigint[]; // aligned to the registered pool list (one scalar per pool)
@@ -107,8 +104,6 @@ export async function settle(
     poolBalances: bigint[]; // SingleAssetCoverPool.totalAssets() per pool at windowEndBlock
     poolAssetUsd1e18: bigint[]; // USD price per whole asset token at windowEndBlock
     poolAssetDecimals: number[];
-    boosterCollection: `0x${string}`; // Registry.boosterNFT() at openBlock (0 = none)
-    boosterId: bigint;
     grossScoreOf: GrossScoreProvider; // raw lifetime score at referenceBlock, before spent/booster
     spentOf: (user: `0x${string}`) => bigint; // insurance score already spent (ScoreSpent ledger)
     maxCoverPoolPayoutBps: bigint; // Registry.maxCoverPoolPayoutBps: per-incident cap, as a share of each pool's balance
@@ -145,21 +140,7 @@ export async function settle(
     // "after" price.
     const lossUsd = (((eligible * twap) / WAD) * underlyingUsd) / 10n ** BigInt(opts.insuredDecimals);
 
-    // Booster boost is capped at the claimant's MIN booster balance over
-    // [joinBlock, windowEnd] — boosters are not escrowed, so they must hold them
-    // continuously (they are burned at finalize). No read when none committed.
-    let boost = 0n;
-    if (e.boosterAmount > 0n && opts.boosterCollection !== ZERO_ADDRESS) {
-      const held = await minErc1155BalanceOver(
-        client,
-        opts.boosterCollection,
-        e.user,
-        opts.boosterId,
-        e.blockNumber,
-        opts.windowEndBlock
-      );
-      boost = e.boosterAmount < held ? e.boosterAmount : held;
-    }
+    const boost = e.boosterAmount;
 
     // Raw lifetime earned score as of referenceBlock, minus what's already been
     // spent on prior claims → the UNSPENT remainder. Pinned pre-incident (like
@@ -181,7 +162,6 @@ export async function settle(
       grossEarnedScore,
       earnedScore: unspent,
       scoreSpent,
-      boosterAmountUsed: boost,
       boostedScore,
       payoutUsd: 0n,
       amounts: [],
@@ -272,21 +252,20 @@ export async function settle(
 
 // Leaf encoding — SINGLE source of truth. The on-chain leaf in
 // DefiInsurance.finalizeClaim (keccak256(bytes.concat(keccak256(abi.encode(
-// incidentId, claimId, user, amounts, scoreSpent, boosterAmountUsed, boostedScore, eligible))))) and the FFI helper
+// incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligible))))) and the FFI helper
 // both mirror this exact tuple and type order; `scoreSpent` is raw score recorded
-// on-chain, `boosterAmountUsed` is the historically eligible booster quantity, and
-// `boostedScore` is used only for payout weighting. `amounts` aligns
+// on-chain and `boostedScore` is used only for payout weighting. `amounts` aligns
 // to the registered pool list, and `eligible` is the covered insured-token amount
 // (forfeited from escrow, rest refunded at finalize). Drift here breaks every proof.
-export const LEAF_ENCODING = ["uint256", "uint256", "address", "uint256[]", "uint256", "uint256", "uint256", "uint256"] as const;
+export const LEAF_ENCODING = ["uint256", "uint256", "address", "uint256[]", "uint256", "uint256", "uint256"] as const;
 
 /** Build the OZ StandardMerkleTree over settlement rows using {LEAF_ENCODING}. */
 export function settlementTree(
   incidentId: bigint,
-  rows: { claimId: bigint; user: `0x${string}`; amounts: bigint[]; scoreSpent: bigint; boosterAmountUsed: bigint; boostedScore: bigint; eligibleAmount: bigint }[]
+  rows: { claimId: bigint; user: `0x${string}`; amounts: bigint[]; scoreSpent: bigint; boostedScore: bigint; eligibleAmount: bigint }[]
 ) {
   return StandardMerkleTree.of(
-    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent, r.boosterAmountUsed, r.boostedScore, r.eligibleAmount]) as unknown as any[][],
+    rows.map((r) => [incidentId, r.claimId, r.user, r.amounts, r.scoreSpent, r.boostedScore, r.eligibleAmount]) as unknown as any[][],
     LEAF_ENCODING as unknown as string[]
   );
 }

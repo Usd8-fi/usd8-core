@@ -30,6 +30,14 @@ contract TrustedTreasuryBinding {
 }
 
 contract DeployUSD8SystemScriptHarness is DeployUSD8SystemScript {
+    function validateLaunchStrategyReviewForTest(bool reviewed) external pure {
+        _validateLaunchStrategyReview(reviewed);
+    }
+
+    function wstethUsdOracleForTest() external pure returns (address) {
+        return WSTETH_USD_ORACLE;
+    }
+
     function validateForTest(address timelock, address proposer) external view {
         _validateTimelock(timelock, proposer);
     }
@@ -38,7 +46,7 @@ contract DeployUSD8SystemScriptHarness is DeployUSD8SystemScript {
         _validateTreasuryBinding(usd8, registry, treasury);
     }
 
-    function insuredTokenConfigsForTest() external pure returns (InsuredTokenDeploymentConfig[3] memory) {
+    function insuredTokenConfigsForTest() external pure returns (InsuredTokenDeploymentConfig[2] memory) {
         return _initialInsuredTokenConfigs();
     }
 
@@ -46,26 +54,51 @@ contract DeployUSD8SystemScriptHarness is DeployUSD8SystemScript {
         _addInitialInsuredTokens(defiInsurance);
     }
 
-    function protocolInsuredTokenConfigsForTest(address usd8, address savings, address usd8PriceOracle)
+    function coreProtocolInsuredTokenConfigForTest(address usd8, address usd8PriceOracle)
         external
         pure
-        returns (InsuredTokenDeploymentConfig[2] memory)
+        returns (InsuredTokenDeploymentConfig memory)
     {
-        return _protocolInsuredTokenConfigs(usd8, savings, usd8PriceOracle);
+        return _coreProtocolInsuredTokenConfig(usd8, usd8PriceOracle);
     }
 
-    function addProtocolInsuredTokensForTest(
+    function addCoreProtocolInsuredTokenForTest(DefiInsurance defiInsurance, address usd8, address usd8PriceOracle)
+        external
+    {
+        _addCoreProtocolInsuredToken(defiInsurance, usd8, usd8PriceOracle);
+    }
+
+    function configureSavingsForTest(
+        Registry registry,
         DefiInsurance defiInsurance,
-        address usd8,
-        address savings,
+        Treasury treasury,
+        address vault,
+        address adapter,
         address usd8PriceOracle
     ) external {
-        _addProtocolInsuredTokens(defiInsurance, usd8, savings, usd8PriceOracle);
+        _configureSavings(registry, defiInsurance, treasury, vault, adapter, usd8PriceOracle);
     }
 }
 
 contract DeploymentScriptsTest is Test {
     address proposer = makeAddr("proposer");
+
+    function test_SystemDeploymentRunTakesTimelockParameter() public pure {
+        bytes memory callData = abi.encodeCall(DeployUSD8SystemScript.run, (address(0x1234)));
+        assertEq(bytes4(callData), bytes4(keccak256("run(address)")));
+    }
+
+    function test_SystemDeploymentUsesCanonicalWstethUsdOracle() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        assertEq(script.wstethUsdOracleForTest(), 0x164b276057258d81941e97B0a900D4C7B358bCe0);
+    }
+
+    function test_SystemDeploymentRequiresExplicitLaunchStrategyReview() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        vm.expectRevert(DeployUSD8SystemScript.LaunchStrategyReviewNotConfirmed.selector);
+        script.validateLaunchStrategyReviewForTest(false);
+        script.validateLaunchStrategyReviewForTest(true);
+    }
 
     function _deployCustomTimelock(uint256 delay, address proposer_, bool openExecutor, address externalAdmin)
         internal
@@ -261,30 +294,21 @@ contract DeploymentScriptsTest is Test {
         DeployUSD8SystemScript script = new DeployUSD8SystemScript();
 
         vm.expectRevert(abi.encodeWithSignature("WrongChainId(uint256,uint256)", uint256(31_337), uint256(1)));
-        script.run();
-    }
-
-    function test_InitialSavingsProfitWeightIsZero() public {
-        DeployUSD8SystemScript script = new DeployUSD8SystemScript();
-        assertEq(script.INITIAL_SAVINGS_PROFIT_WEIGHT(), 0, "dead seed shares must not receive launch revenue");
+        script.run(address(0));
     }
 
     function test_InitialInsuredTokenConfigurations() public {
         DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
-        DeployUSD8SystemScript.InsuredTokenDeploymentConfig[3] memory configs = script.insuredTokenConfigsForTest();
+        DeployUSD8SystemScript.InsuredTokenDeploymentConfig[2] memory configs = script.insuredTokenConfigsForTest();
         bytes memory conversionCallData = abi.encodeCall(IERC4626.convertToAssets, (1e18));
 
         assertEq(configs[0].token, 0xE1753F2e00940cC31213dd92013cF019DFE4ca1d, "new ERC-4626 sGHO");
         assertEq(configs[0].maxCoverageBps, 8000);
         assertEq(configs[0].underlyingPriceOracle, 0xff221Bf2E61B62182210b3d42dE7f77da5b5b41F);
 
-        assertEq(configs[1].token, 0x0655977FEb2f289A4aB78af67BAB0d17aAb84367, "scrvUSD");
+        assertEq(configs[1].token, 0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD, "sUSDS");
         assertEq(configs[1].maxCoverageBps, 7000);
-        assertEq(configs[1].underlyingPriceOracle, 0xf3A0a2363Ee3e5FC1CcF923F4eA9c06BaC1A6834);
-
-        assertEq(configs[2].token, 0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD, "sUSDS");
-        assertEq(configs[2].maxCoverageBps, 7000);
-        assertEq(configs[2].underlyingPriceOracle, 0x592700e4FcDd674dC54d2681DED3B63f54F63f9A);
+        assertEq(configs[1].underlyingPriceOracle, 0x592700e4FcDd674dC54d2681DED3B63f54F63f9A);
 
         for (uint256 i; i < configs.length; ++i) {
             assertEq(configs[i].minClaimAmount, 1e18);
@@ -302,15 +326,19 @@ contract DeploymentScriptsTest is Test {
                 )
             )
         );
-        DefiInsurance defiInsurance = new DefiInsurance(registry);
-        DeployUSD8SystemScript.InsuredTokenDeploymentConfig[3] memory expected = script.insuredTokenConfigsForTest();
+        DefiInsurance defiInsurance = DefiInsurance(
+            address(
+                new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (registry)))
+            )
+        );
+        DeployUSD8SystemScript.InsuredTokenDeploymentConfig[2] memory expected = script.insuredTokenConfigsForTest();
         for (uint256 i; i < expected.length; ++i) {
             vm.mockCall(expected[i].conversionAddress, expected[i].conversionCallData, abi.encode(1e18));
         }
 
         script.addInitialInsuredTokensForTest(defiInsurance);
 
-        assertEq(defiInsurance.insuredTokenListLength(), 3);
+        assertEq(defiInsurance.insuredTokenListLength(), 2);
         for (uint256 i; i < expected.length; ++i) {
             assertEq(address(defiInsurance.insuredTokenList(i)), expected[i].token);
             DefiInsurance.InsuredToken memory stored = defiInsurance.getInsuredToken(IERC20(expected[i].token));
@@ -322,27 +350,19 @@ contract DeploymentScriptsTest is Test {
         }
     }
 
-    function test_ProtocolInsuredTokenConfigurationsAndWiring() public {
+    function test_CoreProtocolInsuredTokenConfiguration() public {
         DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
         address usd8 = makeAddr("USD8");
-        address savings = makeAddr("sUSD8");
         address usd8PriceOracle = makeAddr("USD8/USD oracle");
-        DeployUSD8SystemScript.InsuredTokenDeploymentConfig[2] memory configs =
-            script.protocolInsuredTokenConfigsForTest(usd8, savings, usd8PriceOracle);
+        DeployUSD8SystemScript.InsuredTokenDeploymentConfig memory config =
+            script.coreProtocolInsuredTokenConfigForTest(usd8, usd8PriceOracle);
 
-        assertEq(configs[0].token, usd8);
-        assertEq(configs[0].maxCoverageBps, 8000);
-        assertEq(configs[0].minClaimAmount, 1e18);
-        assertEq(configs[0].underlyingPriceOracle, usd8PriceOracle);
-        assertEq(configs[0].conversionAddress, address(0));
-        assertEq(configs[0].conversionCallData, bytes(""));
-
-        assertEq(configs[1].token, savings);
-        assertEq(configs[1].maxCoverageBps, 8000);
-        assertEq(configs[1].minClaimAmount, 1e18);
-        assertEq(configs[1].underlyingPriceOracle, usd8PriceOracle);
-        assertEq(configs[1].conversionAddress, savings);
-        assertEq(configs[1].conversionCallData, abi.encodeCall(IERC4626.convertToAssets, (1e18)));
+        assertEq(config.token, usd8);
+        assertEq(config.maxCoverageBps, 8000);
+        assertEq(config.minClaimAmount, 1e18);
+        assertEq(config.underlyingPriceOracle, usd8PriceOracle);
+        assertEq(config.conversionAddress, address(0));
+        assertEq(config.conversionCallData, bytes(""));
 
         Registry registry = Registry(
             address(
@@ -351,18 +371,70 @@ contract DeploymentScriptsTest is Test {
                 )
             )
         );
-        DefiInsurance defiInsurance = new DefiInsurance(registry);
-        vm.mockCall(savings, configs[1].conversionCallData, abi.encode(1e18));
-        script.addProtocolInsuredTokensForTest(defiInsurance, usd8, savings, usd8PriceOracle);
+        DefiInsurance defiInsurance = DefiInsurance(
+            address(
+                new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (registry)))
+            )
+        );
+        script.addCoreProtocolInsuredTokenForTest(defiInsurance, usd8, usd8PriceOracle);
 
-        assertEq(defiInsurance.insuredTokenListLength(), 2);
-        for (uint256 i; i < configs.length; ++i) {
-            DefiInsurance.InsuredToken memory stored = defiInsurance.getInsuredToken(IERC20(configs[i].token));
-            assertEq(stored.maxCoverageBps, configs[i].maxCoverageBps);
-            assertEq(stored.minClaimAmount, configs[i].minClaimAmount);
-            assertEq(stored.underlyingPriceOracle, configs[i].underlyingPriceOracle);
-            assertEq(stored.underlyingConversionAddress, configs[i].conversionAddress);
-            assertEq(stored.underlyingConversionCallData, configs[i].conversionCallData);
-        }
+        assertEq(defiInsurance.insuredTokenListLength(), 1);
+        DefiInsurance.InsuredToken memory stored = defiInsurance.getInsuredToken(IERC20(usd8));
+        assertEq(stored.maxCoverageBps, config.maxCoverageBps);
+        assertEq(stored.minClaimAmount, config.minClaimAmount);
+        assertEq(stored.underlyingPriceOracle, config.underlyingPriceOracle);
+        assertEq(stored.underlyingConversionAddress, config.conversionAddress);
+        assertEq(stored.underlyingConversionCallData, config.conversionCallData);
+    }
+
+    function test_CoreGenesisConfiguresSavingsWithoutTimelockDelay() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        Registry registry = Registry(
+            address(
+                new ERC1967Proxy(
+                    address(new Registry()), abi.encodeCall(Registry.initialize, (address(script), address(this)))
+                )
+            )
+        );
+        USD8 usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
+        Treasury treasury = Treasury(
+            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
+        );
+        DefiInsurance defiInsurance = DefiInsurance(
+            address(
+                new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (registry)))
+            )
+        );
+        address oracle = makeAddr("USD8/USD oracle");
+        vm.etch(oracle, hex"00");
+        vm.startPrank(address(script));
+        registry.setUsd8(address(usd8));
+        registry.setTreasury(address(treasury));
+        registry.setDefiInsurance(address(defiInsurance));
+        registry.setUsd8PriceOracle(oracle);
+        vm.stopPrank();
+
+        address vault = makeAddr("genesis sUSD8 vault");
+        address adapter = makeAddr("genesis sUSD8 adapter");
+        vm.etch(vault, hex"00");
+        vm.etch(adapter, hex"00");
+        vm.mockCall(vault, abi.encodeCall(IERC4626.convertToAssets, (1e18)), abi.encode(1e18));
+
+        script.configureSavingsForTest(registry, defiInsurance, treasury, vault, adapter, oracle);
+
+        assertEq(registry.savingsVault(), vault);
+        IERC20[] memory scored = registry.getScoredTokens();
+        assertEq(scored.length, 1);
+        assertEq(address(scored[0]), vault);
+        Registry.RatePoint[] memory rates = registry.getScoredRateHistory(IERC20(vault));
+        assertEq(rates.length, 1);
+        assertEq(rates[0].rate, script.SUSD8_SCORE_RATE());
+        assertEq(defiInsurance.insuredTokenListLength(), 1);
+        assertEq(address(defiInsurance.insuredTokenList(0)), vault);
+        assertEq(treasury.profitReceiversLength(), 1);
+        (address receiver, uint256 weight, Treasury.RevenueDistributionMode mode) = treasury.profitReceivers(0);
+        assertEq(receiver, adapter);
+        assertEq(weight, 0);
+        assertEq(uint8(mode), uint8(Treasury.RevenueDistributionMode.ReceiveProfitDistribution));
     }
 }

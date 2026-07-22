@@ -13,6 +13,7 @@ import {Test} from "forge-std/Test.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {Registry} from "../src/Registry.sol";
+import {SharedBase} from "../src/SharedBase.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -21,6 +22,12 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// @dev Minimal v2 implementation used to exercise the upgrade path.
 contract USD8V2 is USD8 {
+    function version() external pure returns (uint256) {
+        return 2;
+    }
+}
+
+contract RegistryV2 is Registry {
     function version() external pure returns (uint256) {
         return 2;
     }
@@ -289,6 +296,33 @@ contract USD8Test is Test {
         vm.expectRevert(_unauthorizedTimelock(treasury));
         vm.prank(treasury);
         usd8.upgradeToAndCall(address(v2), "");
+    }
+
+    function test_UpgradePermanentlyDisabledAfterBetaEnds() public {
+        vm.prank(timelock);
+        registry.endBetaMode();
+
+        USD8V2 v2 = new USD8V2();
+        vm.expectRevert(SharedBase.NotBetaMode.selector);
+        vm.prank(timelock);
+        usd8.upgradeToAndCall(address(v2), "");
+    }
+
+    function test_RegistryUpgradeAllowedDuringBeta() public {
+        RegistryV2 v2 = new RegistryV2();
+        vm.prank(timelock);
+        registry.upgradeToAndCall(address(v2), "");
+        assertEq(RegistryV2(address(registry)).version(), 2);
+    }
+
+    function test_RegistryUpgradePermanentlyDisabledAfterBetaEnds() public {
+        vm.prank(timelock);
+        registry.endBetaMode();
+
+        RegistryV2 v2 = new RegistryV2();
+        vm.expectRevert(Registry.UpgradesPermanentlyDisabled.selector);
+        vm.prank(timelock);
+        registry.upgradeToAndCall(address(v2), "");
     }
 
     // -- ERC20Permit (EIP-2612) -------------------------------------------

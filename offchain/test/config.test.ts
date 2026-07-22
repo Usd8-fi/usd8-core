@@ -1,14 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { keccak256, stringToHex } from "viem";
 import {
   BOOSTER_BOOST_BPS,
   BOOSTER_ID,
   CHAIN_ID,
-  CONFIG,
   CONFIG_VERSION,
   LOG_RESULT_CAP,
   MAX_LOG_RANGE,
-  MAX_ORACLE_STALENESS,
   assertBootstrapConfig,
   configHash,
   type Config,
@@ -22,58 +19,50 @@ const FEED = "0x0000000000000000000000000000000000004000" as const;
 const valid = (): Config => ({
   registry: REGISTRY,
   defiInsurance: DEFI,
+  boosterId: BOOSTER_ID,
+  boosterBoostBps: BOOSTER_BOOST_BPS,
   assetUsdFeed: { [ASSET]: FEED },
+  maxOracleStaleness: 129_600n,
 });
 
-describe("assertBootstrapConfig", () => {
-  it("accepts distinct nonzero contracts and lowercase asset-feed keys", () => {
+describe("Registry-derived configuration", () => {
+  it("accepts complete historical on-chain state", () => {
     expect(() => assertBootstrapConfig(valid())).not.toThrow();
+    expect(CONFIG_VERSION).toBe("5.0.0");
+    expect(CHAIN_ID).toBe(1);
+    expect(MAX_LOG_RANGE).toBe(1_000n);
+    expect(LOG_RESULT_CAP).toBe(1_000);
   });
 
-  it("rejects zero, duplicate, malformed, or noncanonical addresses", () => {
+  it("rejects invalid topology or policy", () => {
     expect(() => assertBootstrapConfig({ ...valid(), registry: "0x0000000000000000000000000000000000000000" })).toThrow(
       /registry.*zero/
     );
     expect(() => assertBootstrapConfig({ ...valid(), defiInsurance: REGISTRY })).toThrow(/must differ/);
-    expect(() => assertBootstrapConfig({ ...valid(), registry: "0x1234" as `0x${string}` })).toThrow(/invalid registry/);
+    expect(() => assertBootstrapConfig({ ...valid(), boosterId: 2n })).toThrow(/unsupported booster/);
+    expect(() => assertBootstrapConfig({ ...valid(), maxOracleStaleness: 0n })).toThrow(/positive/);
     expect(() =>
-      assertBootstrapConfig({
-        ...valid(),
-        assetUsdFeed: { [ASSET.toUpperCase()]: FEED },
-      })
+      assertBootstrapConfig({ ...valid(), assetUsdFeed: { [ASSET.toUpperCase()]: FEED } })
     ).toThrow(/lowercase/);
   });
-});
 
-describe("configHash booster-policy commitment", () => {
-  const hashWithPolicy = (boosterId: bigint, boosterBoostBps: bigint) => {
-    const feeds = Object.keys(CONFIG.assetUsdFeed)
-      .map((key) => key.toLowerCase())
-      .sort()
-      .map((key) => [key, CONFIG.assetUsdFeed[key].toLowerCase()]);
-    return keccak256(
-      stringToHex(
-        JSON.stringify({
-          version: CONFIG_VERSION,
-          chainId: CHAIN_ID,
-          registry: CONFIG.registry.toLowerCase(),
-          defiInsurance: CONFIG.defiInsurance.toLowerCase(),
-          boosterId: boosterId.toString(),
-          boosterBoostBps: boosterBoostBps.toString(),
-          assetUsdFeed: feeds,
-          maxOracleStaleness: MAX_ORACLE_STALENESS.toString(),
-          maxLogRange: MAX_LOG_RANGE.toString(),
-          logResultCap: LOG_RESULT_CAP.toString(),
-        })
-      )
-    );
-  };
+  it("matches the Rust v5 derived-config commitment vector", () => {
+    const vector: Config = {
+      ...valid(),
+      assetUsdFeed: {
+        [ASSET]: FEED,
+        "0x0000000000000000000000000000000000005000": "0x0000000000000000000000000000000000006000",
+      },
+    };
+    expect(configHash(vector)).toBe("0xf4c864ca629a28b3755712eeec7a8a3c80be0bf5f1e6d8d8abaab4eb84674449");
+  });
 
-  it("commits to both booster policy constants", () => {
-    const actual = configHash();
-    expect(actual).toBe("0xf8b37feed57796fcf5d1918cf649015b943296484faabd9a1d30b75d348d5ff0");
-    expect(actual).toBe(hashWithPolicy(BOOSTER_ID, BOOSTER_BOOST_BPS));
-    expect(actual).not.toBe(hashWithPolicy(BOOSTER_ID + 1n, BOOSTER_BOOST_BPS));
-    expect(actual).not.toBe(hashWithPolicy(BOOSTER_ID, BOOSTER_BOOST_BPS + 1n));
+  it("commits derived state and baked RPC limits deterministically", () => {
+    const base = valid();
+    const hash = configHash(base);
+    expect(hash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(configHash({ ...base, boosterBoostBps: 101n })).not.toBe(hash);
+    expect(configHash({ ...base, maxOracleStaleness: 172_800n })).not.toBe(hash);
+    expect(configHash({ ...base, assetUsdFeed: { [ASSET]: "0x0000000000000000000000000000000000005000" } })).not.toBe(hash);
   });
 });

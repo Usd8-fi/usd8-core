@@ -115,6 +115,14 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
     Registry registry;
 
     function setUp() public {
+        address feed = address(0xfeed);
+        vm.etch(feed, hex"00");
+        vm.mockCall(feed, abi.encodeWithSignature("decimals()"), abi.encode(uint8(8)));
+        vm.mockCall(
+            feed,
+            abi.encodeWithSignature("latestRoundData()"),
+            abi.encode(uint80(1), int256(1e8), uint256(1), uint256(1), uint80(1))
+        );
         registry = Registry(
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
         );
@@ -136,7 +144,7 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
             )
         );
         vm.startPrank(admin);
-        registry.addPool(address(pool));
+        registry.addPool(address(pool), feed);
         vm.stopPrank();
 
         handler = new PoolHandler(pool, usd8, asset, admin);

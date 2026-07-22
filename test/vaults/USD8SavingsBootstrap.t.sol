@@ -52,7 +52,6 @@ contract USD8SavingsBootstrapTest is Test {
         d = bootstrap.run(
             USD8SavingsBootstrap.Config({
                 vaultFactory: address(vaultFactory),
-                registry: registry,
                 usd8: usd8,
                 treasury: treasury,
                 seedUsdc: SEED_USDC,
@@ -86,36 +85,27 @@ contract USD8SavingsBootstrapTest is Test {
         assertEq(usd8.balanceOf(d.adapter), SEED_USDC * treasury.USDC_TO_USD8_SCALE());
         assertEq(adapter.deployer(), d.bootstrap, "bootstrap should deploy the single adapter directly");
         assertEq(adapter.realAssets(), SEED_USDC * treasury.USDC_TO_USD8_SCALE());
-        assertEq(vault.sendAssetsGate(), d.gate);
-        assertEq(vault.receiveAssetsGate(), d.gate);
-        assertEq(vault.sendSharesGate(), d.gate);
-        assertEq(vault.receiveSharesGate(), d.gate);
+        assertEq(vault.sendAssetsGate(), address(0));
+        assertEq(vault.receiveAssetsGate(), address(0));
+        assertEq(vault.sendSharesGate(), address(0));
+        assertEq(vault.receiveSharesGate(), address(0));
     }
 
     /// forge-config: default.isolate = true
-    function test_RegistryPauseGateBlocksAndRestoresVaultUserFlows() public {
+    function test_RegistryPauseDoesNotControlMorphoVault() public {
         USD8SavingsBootstrap.Deployment memory d = _bootstrap();
         IVaultV2 vault = IVaultV2(d.vault);
         address alice = makeAddr("alice");
 
         usdc.mint(alice, 10e6);
+        registry.setPaused(d.vault, true);
+
         vm.startPrank(alice);
         usdc.approve(address(treasury), 10e6);
         treasury.mintUSD8(10e6);
         usd8.approve(d.vault, 10e18);
         uint256 shares = vault.deposit(10e18, alice);
-        vm.stopPrank();
-
-        registry.setPaused(d.vault, true);
-        vm.startPrank(alice);
-        vm.expectRevert();
-        vault.deposit(1, alice);
-        vm.expectRevert();
-        vault.redeem(shares, alice, alice);
-        vm.stopPrank();
-
-        registry.setPaused(d.vault, false);
-        vm.prank(alice);
         assertGt(vault.redeem(shares, alice, alice), 0);
+        vm.stopPrank();
     }
 }

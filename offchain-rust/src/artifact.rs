@@ -67,7 +67,6 @@ pub fn verify_run(run: &SettlementRun, config: &BootstrapConfig) -> Result<(), A
             user: row.user,
             amounts: row.amounts.clone(),
             score_spent: row.score_spent.clone(),
-            booster_amount_used: row.booster_amount_used.clone(),
             boosted_score: row.boosted_score.clone(),
             eligible_amount: row.eligible_amount.clone(),
         })

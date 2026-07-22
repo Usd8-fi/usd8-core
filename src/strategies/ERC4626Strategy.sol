@@ -13,6 +13,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IStrategy} from "../interfaces/IStrategy.sol";
+import {Registry} from "../Registry.sol";
+import {StrategyBase} from "./StrategyBase.sol";
 
 /// @title  ERC4626Strategy
 /// @notice {IStrategy} adapter that deploys USDC into any ERC-4626 vault whose
@@ -24,7 +26,9 @@ import {IStrategy} from "../interfaces/IStrategy.sol";
 ///
 ///         Registry model:
 ///         - {deploy} and {withdraw} are callable only by {treasury}.
-///         - No admin functions, no parameters to tune, no upgrades.
+///         - Swaps inherit {StrategyBase}: an admin or timelock may use fresh
+///           calldata only through a timelock-approved target/spender pair.
+///         - No upgrades and no mutable vault or principal-allocation parameters.
 ///         - If the underlying vault breaks, Treasury force-removes this
 ///           strategy and admin deploys a replacement targeting another vault.
 ///
@@ -43,24 +47,12 @@ import {IStrategy} from "../interfaces/IStrategy.sol";
 ///         trip {Treasury-reserveSupplyStatusCheck} on the next mint/redeem if
 ///         the surplus shrinks — admin should vet fee structure before approval.
 /// @custom:security-contact rick@usd8.fi
-contract ERC4626Strategy is IStrategy {
+contract ERC4626Strategy is IStrategy, StrategyBase {
     using SafeERC20 for IERC20;
-
-    /// @notice Mainnet USDC.
-    IERC20 public constant USDC = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);
-
-    /// @notice The Treasury allowed to call {deploy} and {withdraw}.
-    address public immutable treasury;
 
     /// @notice The ERC-4626 vault this strategy deposits into. Immutable —
     ///         deploy a new strategy contract to target a different vault.
     IERC4626 public immutable vault;
-
-    /// @notice Thrown when a non-Treasury account calls a gated function.
-    error UnauthorizedTreasury(address caller);
-
-    /// @notice Thrown when a zero address is supplied where one is not allowed.
-    error ZeroAddress();
 
     /// @notice Thrown when the supplied vault's asset() is not USDC.
     error VaultAssetMismatch(address expected, address actual);
@@ -85,20 +77,15 @@ contract ERC4626Strategy is IStrategy {
     event Withdrawn(uint256 amount);
 
     /// @param _treasury The Treasury contract that owns this strategy.
+    /// @param _registry Shared role and approved-swap-route registry.
     /// @param _vault    The ERC-4626 vault to deposit into. Must report asset() == USDC.
-    constructor(address _treasury, IERC4626 _vault) {
-        if (_treasury == address(0) || address(_vault) == address(0)) revert ZeroAddress();
+    constructor(address _treasury, Registry _registry, IERC4626 _vault) StrategyBase(_treasury, _registry, USDC) {
+        if (address(_vault) == address(0)) revert ZeroAddress();
         address vaultAsset = _vault.asset();
         if (vaultAsset != address(USDC)) revert VaultAssetMismatch(address(USDC), vaultAsset);
-        treasury = _treasury;
         vault = _vault;
         // One-time unlimited approval to the trusted, fixed vault.
         USDC.forceApprove(address(_vault), type(uint256).max);
-    }
-
-    modifier onlyTreasury() {
-        if (msg.sender != treasury) revert UnauthorizedTreasury(msg.sender);
-        _;
     }
 
     /// @inheritdoc IStrategy
@@ -151,5 +138,13 @@ contract ERC4626Strategy is IStrategy {
     ///      and any fee-share dilution at the current vault share price.
     function totalAssets() public view returns (uint256) {
         return vault.convertToAssets(vault.balanceOf(address(this)));
+    }
+
+    function _isPositionToken(address token) internal view override returns (bool) {
+        return token == address(vault);
+    }
+
+    function _principalBalance() internal view override returns (uint256) {
+        return vault.balanceOf(address(this));
     }
 }

@@ -49,6 +49,10 @@ USER_AGENT = "usd8-real-history-benchmark/1.0"
 TRUSTED_DRPC_HOSTS = frozenset({"lb.drpc.org", "lb.drpc.live"})
 
 
+def is_transient_rpc_error(status: int, code: int) -> bool:
+    return status in (408, 429, 500, 502, 503, 504) or code in (12, 19, -32000, -32005)
+
+
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         del req, fp, code, msg, headers, newurl
@@ -149,7 +153,7 @@ class RpcClient:
             )
             if range_limited:
                 raise RpcError(code, message, splittable=True)
-            transient = status in (408, 429, 500, 502, 503, 504) or code in (19, -32000, -32005)
+            transient = is_transient_rpc_error(status, code)
             if transient and attempt < 5:
                 with self._lock:
                     self.retry_count += 1

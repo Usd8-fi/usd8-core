@@ -4,7 +4,7 @@ import { assertAbiSubset, assertFirstPartyAbiParity } from "../src/abiParity.js"
 
 describe("ABI parity", () => {
   it("matches every handwritten first-party entry to current Foundry artifacts", async () => {
-    await expect(assertFirstPartyAbiParity(new URL("../../out/", import.meta.url))).resolves.toEqual({ checked: 15 });
+    await expect(assertFirstPartyAbiParity(new URL("../../out/", import.meta.url))).resolves.toEqual({ checked: 21 });
   });
 
   it("detects return-type and event-indexing drift that selectors alone miss", () => {

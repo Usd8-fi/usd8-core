@@ -85,8 +85,8 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     uint256 public constant HARVEST_BUFFER_DIVISOR = 1000;
 
     /// @notice Maximum aggregate reserve-accounting difference allowed by one
-    ///         mint or redeem, in USDC base units. One full USDC = 1e6.
-    uint256 public constant RESERVE_CHECK_TOLERANCE = 1e6;
+    ///         mint or redeem, in USDC base units (100 = 0.0001 USDC).
+    uint256 public constant RESERVE_CHECK_TOLERANCE = 100;
 
     /// @notice Approved strategies, in timelock-determined order. Membership
     ///         in this array IS the approval — there is no separate
@@ -220,9 +220,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
         return USD8(registry().usd8());
     }
 
-    /// @dev Only the timelock can upgrade the Treasury in place. Registry topology
-    ///      may separately rotate the active Treasury when governance performs a migration.
-    function _authorizeUpgrade(address) internal override onlyTimelock {}
+    /// @dev Only the timelock can upgrade the Treasury in place, and only during beta.
+    ///      Registry topology may separately rotate the active Treasury during migration.
+    function _authorizeUpgrade(address) internal view override onlyTimelock onlyBetaMode {}
 
     // ─────────────────────────── Modifiers ───────────────────────
 
@@ -230,8 +230,8 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///      system starts healthy or in surplus, surplus must not decrease; if it
     ///      starts distressed, the reserve/supply ratio must not decrease.
     ///
-    ///      Each check allows one full USDC of aggregate accounting difference.
-    ///      This accommodates strategy rounding without per-strategy configuration.
+    ///      Each check allows 100 USDC base units of aggregate accounting difference.
+    ///      This accommodates dust rounding without per-strategy configuration.
     ///      Tolerance only decides revert-vs-pass: the redeemer's payout remains
     ///      fixed by the formula and the allowance cannot itself be withdrawn.
     modifier reserveSupplyStatusCheck() {

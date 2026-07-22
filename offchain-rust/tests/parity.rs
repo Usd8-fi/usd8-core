@@ -44,7 +44,6 @@ fn capped_geometric_allocation_matches_golden_vector() {
                 spent_score: 0u8.into(),
                 score_to_spend: 60u8.into(),
                 booster_amount: 0u8.into(),
-                booster_held: 0u8.into(),
             },
             ClaimInput {
                 claim_id: 2u8.into(),
@@ -55,7 +54,6 @@ fn capped_geometric_allocation_matches_golden_vector() {
                 spent_score: 0u8.into(),
                 score_to_spend: 40u8.into(),
                 booster_amount: 0u8.into(),
-                booster_held: 0u8.into(),
             },
         ],
     };
@@ -89,14 +87,12 @@ fn booster_changes_payout_score_without_inflating_raw_score_spent() {
             spent_score: 40u8.into(),
             score_to_spend: 1_000u16.into(),
             booster_amount: 2u8.into(),
-            booster_held: 2u8.into(),
         }],
     };
 
     let output = allocate(&input).unwrap();
     assert_eq!(output.rows[0].earned_score, 60u8.into());
     assert_eq!(output.rows[0].score_spent, 60u8.into());
-    assert_eq!(output.rows[0].booster_amount_used, 2u8.into());
     assert_eq!(output.rows[0].boosted_score, 61u8.into());
 }
 
@@ -108,7 +104,6 @@ fn standard_merkle_root_and_proofs_match_golden_vectors() {
             user: address(BOB),
             amounts: vec![wad(60)],
             score_spent: 60u8.into(),
-            booster_amount_used: 2u8.into(),
             boosted_score: 61u8.into(),
             eligible_amount: wad(100),
         },
@@ -117,7 +112,6 @@ fn standard_merkle_root_and_proofs_match_golden_vectors() {
             user: address(CAROL),
             amounts: vec![wad(40)],
             score_spent: 40u8.into(),
-            booster_amount_used: 0u8.into(),
             boosted_score: 40u8.into(),
             eligible_amount: wad(100),
         },
@@ -125,15 +119,15 @@ fn standard_merkle_root_and_proofs_match_golden_vectors() {
     let tree = SettlementTree::new(&1u8.into(), &rows).unwrap();
     assert_eq!(
         tree.root_hex(),
-        "0x81b13a66446b6a3eca95cef284db8819186613b142b636e65d15b756f2749ff1"
+        "0xf1856ac31823baefec4176cc5c01403c974256e16e0f03572ce8da482595a695"
     );
     assert_eq!(
         tree.proof_hex(&1u8.into()).unwrap(),
-        vec!["0xa0888d3286e1502efd52cd3934ffb99b7bc7fb5e6cfe1e1fd8b208c6b8714b39"]
+        vec!["0x83b69733304617e45b299fb7cbbce4257c570a16409cced96d5af3bb632f8c7c"]
     );
     assert_eq!(
         tree.proof_hex(&2u8.into()).unwrap(),
-        vec!["0x1fe6d3a89577cd9a8b7c95bcd2ad23d69755bfe291f4917749246eb7f6ade659"]
+        vec!["0x4c007f1bddb62260585589d89bd932ab65daafafb39744cd88ba5b5d667d5c59"]
     );
 }
 

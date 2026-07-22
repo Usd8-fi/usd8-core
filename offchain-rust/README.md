@@ -28,45 +28,52 @@ of the latest Alloy release. Vulnerabilities remain denied. Remove the NSM
 exception when the pinned toolchain can use NSM API 0.5.x; remove the others
 when Alloy removes those dependencies.
 
-## Production configuration
+## Production bootstrap
 
-Copy `config/example.json`, then replace every example address with the deployed
-address for the selected chain. The exact, unknown-field-denying schema is:
+There is no settlement JSON configuration. Supply one fixed Registry proxy
+address through `--registry` or `USD8_REGISTRY`. At the incident `openBlock`, the
+runtime derives and validates both directions of the Registry/DefiInsurance
+binding, booster policy, pool topology, every pool-asset USD feed, and the global
+oracle-staleness limit. Chain ID is fixed to Ethereum mainnet.
 
-- `version`: currently `4.8.0`;
-- `chainId`, deployed `registry`, and deployed `defiInsurance`;
-- decimal strings `boosterId` (`1`) and `boosterBoostBps` (`100`);
-- `assetUsdFeed`: lowercase pool-asset address keys to nonzero Chainlink-style
-  feed addresses, covering every active pool asset;
-- positive decimal string `maxOracleStaleness`, `maxLogRange` in `1..=2048`,
-  and `logResultCap` in `1..=10000`.
+`MAX_LOG_RANGE = 1000` and `LOG_RESULT_CAP = 1000` are compiled into the measured
+runtime because they describe approved RPC behavior rather than protocol state.
+The derived state and baked limits are committed in the artifact `configHash`.
+Missing feeds, zero policy, unsupported booster policy, wrong chain, wiring
+mismatch, or missing historical bytecode fail closed. Version 5 applies only to
+incidents opened after these Registry selectors and values exist; rollout must
+have no active incident and configure every active pool feed before reopening.
 
-The runtime records the canonical `configHash` in the artifact; it is not part
-of the on-chain settlement digest. It rejects zero/duplicate contracts, unsupported policy
-versions, noncanonical feed keys, missing feeds, wrong chain ID, or contracts
-without historical bytecode. `config/example.json` contains placeholders and
-must not be used for a production settlement.
+The Registry-only CLI intentionally resolves the currently registered
+DefiInsurance. Governance must not rotate that module until all incidents it
+owns are closed and their artifacts are archived; reproducing an older rotated
+module requires its archived artifact/runtime rather than bare incident ID,
+because incident IDs are module-local.
 
 ## Compute and verify
 
 Use an archive-capable RPC with historical `eth_call`, `eth_getCode`,
-`eth_getLogs`, and `finalized` block support:
+`eth_getLogs`, and `finalized` block support. The attested production release is
+pinned to an approved provider verified not to silently cap below the baked
+1,000-result threshold; otherwise completeness cannot be inferred from a short
+page:
 
 ```bash
 export ETH_RPC_URL='https://trusted-rpc.example'
+export USD8_REGISTRY='0x…'
 
 target/release/usd8-settlement compute 7 \
-  --config config/mainnet.json \
+  --registry "$USD8_REGISTRY" \
   --raw-score \
   --output artifacts/incident-7.json
 
 target/release/usd8-settlement verify 7 \
-  --config config/mainnet.json \
+  --registry "$USD8_REGISTRY" \
   --raw-score
 
 # Inside the Nitro Enclave; fails unless local PCR0-2 match the incident snapshot.
 target/release/usd8-settlement attested-compute 7 \
-  --config config/mainnet.json \
+  --registry "$USD8_REGISTRY" \
   --raw-score \
   --output artifacts/incident-7-attested.json
 ```
@@ -74,8 +81,8 @@ target/release/usd8-settlement attested-compute 7 \
 `--rpc-url` overrides `ETH_RPC_URL`. `--output` uses a same-directory temporary
 file, `fsync`, atomic rename, directory `fsync`, byte-for-byte read-back, and
 JSON read-back. Its parent directory must already exist. Without `--output`, the
-artifact is written to stdout. Config, checkpoint, checkpoint-lock, and output
-paths are resolved before RPC work and rejected if any writable paths alias.
+artifact is written to stdout. Checkpoint, checkpoint-lock, and output paths are resolved before RPC work and
+rejected if writable paths alias.
 `compute` includes each proof; `verify` omits proofs and compares the reproduced
 root with the latest on-chain root. `attested-compute` additionally requests a fresh nonce-bound NSM attestation,
 binds the 32-byte EIP-712 settlement digest into the attestation `user_data`,
@@ -90,8 +97,10 @@ It fails outside a Nitro Enclave or on any mismatch. Its artifact includes the
 raw COSE attestation document, `nitroAttestedDigest`, and measured commitment for
 independent AWS certificate-chain, signature, nonce, `user_data`, and PCR validation.
 
-Optional flags are `--timeout-ms <1..=120000>`, `--no-drpc-key`,
-`--checkpoint <path>`, `--checkpoint-key-env <name>`, and `--raw-score`.
+Optional flags are `--timeout-ms <1..=120000>`, `--no-drpc-key` (compute/verify
+only), `--checkpoint <path>`, `--checkpoint-key-env <name>`, and `--raw-score`.
+`attested-compute` requires `DRPC_KEY`, which also restricts the URL to the exact
+approved dRPC HTTPS hosts.
 Checkpoint and raw modes are mutually exclusive. The default checkpoint key
 variable is `SCORE_CHECKPOINT_KEY`; `SCORE_CHECKPOINT_PATH` supplies a default
 path when neither score-mode flag is present.
@@ -102,19 +111,20 @@ Exit codes are stable:
 - `1`: verify mismatch or fatal chain/config/I/O/invariant failure;
 - `2`: malformed command-line usage.
 
-The artifact includes schema/config versions and hash, `teePcrHash`, all four block anchors,
+The artifact includes schema/config versions, hash, and the full derived
+Registry/module/feed/staleness bootstrap preimage anchored at `openBlock`, plus
+`teePcrHash`, all four block anchors,
 RPC/log metrics, score-source provenance, claim-set and settlement-input
 commitments, ordered pools and payouts, root/on-chain root/match flag, EIP-712
 digest, canonical score input rows, payout rows, and optional proofs. Before any
 output, Rust independently recomputes the claim-set hash, input hash, Merkle
 root/proofs, per-pool row totals, and settlement digest. Each payout leaf commits
-`scoreSpent` (raw score recorded in the Registry), `boosterAmountUsed` (the
-historically eligible committed units), and `boostedScore` (the booster-adjusted
-value used only for allocation). The contract caps the used units to the claim's
-commitment and recomputes the boosted score before finalizing.
+`scoreSpent` (raw score recorded in the Registry) and `boostedScore` (the
+booster-adjusted value used only for allocation). The contract recomputes the
+boosted score from the claim's escrowed booster amount before finalizing.
 
-Booster holding eligibility is block-boundary based: it starts from the
-end-of-block state of the filing block and continues through `windowEnd`.
+Boosters are escrowed by `joinClaim`; settlement therefore uses the committed
+amount directly without replaying ERC-1155 balance history.
 
 ## Authenticated score checkpoint
 
@@ -127,7 +137,7 @@ export SCORE_CHECKPOINT_PATH="$PWD/state/mainnet-score.json"
 export SCORE_CHECKPOINT_KEY="$(openssl rand -base64 48)"
 
 target/release/usd8-settlement compute 7 \
-  --config config/mainnet.json \
+  --registry "$USD8_REGISTRY" \
   --checkpoint "$SCORE_CHECKPOINT_PATH" \
   --output artifacts/incident-7.json
 ```
@@ -186,7 +196,7 @@ The runtime fails closed unless it can:
 2. prove provisional and finalized incident anchors agree;
 3. reconstruct registered/cancelled claims in chain order and match on-chain
    claim-set hash plus unresolved count at the exact window boundary;
-4. reconcile ERC-20/ERC-1155 replay endpoints with historical contract views;
+4. reconcile ERC-20 replay endpoints with historical contract views;
 5. obtain complete logs through bounded ranges, explicit range/result-size
    bisection, and silent-result-cap bisection, failing on an unsplittable single
    block or any request/deadline budget exhaustion;

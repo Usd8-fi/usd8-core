@@ -16,6 +16,7 @@
 import {
   makeClient,
   DEFI_ABI,
+  REGISTRY_ABI,
   assertContractCodeAt,
   readInputEvents,
   assertBlockAnchorsUnchanged,
@@ -23,7 +24,6 @@ import {
   incidentConfigOf,
   poolsAt,
   poolTotalAssetsAt,
-  boosterNftAt,
   incidentTeePcrHashAt,
   maxCoverPoolPayoutBpsAt,
   spentScoreOf,
@@ -39,7 +39,11 @@ import {
   BOOSTER_ID,
   CHAIN_ID,
   DEFAULT_RPC_CONCURRENCY,
+  MAX_LOG_RANGE,
+  LOG_RESULT_CAP,
   assertBootstrapConfig,
+  setRegistryRoot,
+  setDerivedConfig,
   assetUsdFeedOf,
   configHash,
 } from "./config.js";
@@ -86,19 +90,22 @@ interface RunMetadata {
 async function buildSettlement(
   incidentId: bigint
 ): Promise<{ s: Settlement; onchainRoot: `0x${string}`; metadata: RunMetadata }> {
-  assertBootstrapConfig();
+  const registry = setRegistryRoot(process.env.USD8_REGISTRY?.trim() ?? "");
   const connection = rpc();
   const client = makeClient(connection.url, connection.drpcKey);
 
-  // Guard against pointing the tool at the wrong RPC: addresses can collide on a
-  // fork/testnet and silently produce a misleading root.
   const actualChainId = await client.getChainId();
   if (actualChainId !== CHAIN_ID) {
     throw new Error(`wrong chain: RPC reports ${actualChainId}, expected ${CHAIN_ID} (mainnet)`);
   }
 
+  const defiInsurance = (await client.readContract({
+    address: registry,
+    abi: REGISTRY_ABI,
+    functionName: "defiInsurance",
+  })) as `0x${string}`;
   const inc = (await client.readContract({
-    address: CONFIG.defiInsurance,
+    address: defiInsurance,
     abi: DEFI_ABI,
     functionName: "incidents",
     args: [incidentId],
@@ -108,6 +115,46 @@ async function buildSettlement(
   const windowEnd = inc[1];
   const referenceBlock = inc[5]; // pre-incident block (HWM block or admin-pinned)
   const openBlock = inc[6]; // block the incident opened at — config/topology anchor
+  if (insuredToken === "0x0000000000000000000000000000000000000000") {
+    throw new Error(`incident ${incidentId} does not exist`);
+  }
+
+  const [historicalDefi, reverseRegistry, boosterId, boosterBoostBps, maxOracleStaleness, topology] = await Promise.all([
+    client.readContract({ address: registry, abi: REGISTRY_ABI, functionName: "defiInsurance", blockNumber: openBlock }),
+    client.readContract({ address: defiInsurance, abi: DEFI_ABI, functionName: "registry", blockNumber: openBlock }),
+    client.readContract({ address: defiInsurance, abi: DEFI_ABI, functionName: "BOOSTER_ID", blockNumber: openBlock }),
+    client.readContract({ address: defiInsurance, abi: DEFI_ABI, functionName: "BOOSTER_BOOST_BPS", blockNumber: openBlock }),
+    client.readContract({ address: registry, abi: REGISTRY_ABI, functionName: "maxOracleStaleness", blockNumber: openBlock }),
+    client.readContract({ address: registry, abi: REGISTRY_ABI, functionName: "coverPools", blockNumber: openBlock }),
+  ]);
+  if ((historicalDefi as string).toLowerCase() !== defiInsurance.toLowerCase()) {
+    throw new Error(`Registry defiInsurance changed at incident openBlock ${openBlock}`);
+  }
+  if ((reverseRegistry as string).toLowerCase() !== registry.toLowerCase()) {
+    throw new Error(`DefiInsurance.registry() does not match Registry root ${registry}`);
+  }
+  const [bootstrapAssets] = topology as readonly [`0x${string}`[], `0x${string}`[]];
+  const feedPairs = await Promise.all(
+    bootstrapAssets.map(async (asset) => [
+      asset.toLowerCase(),
+      (await client.readContract({
+        address: registry,
+        abi: REGISTRY_ABI,
+        functionName: "assetUsdFeed",
+        args: [asset],
+        blockNumber: openBlock,
+      })) as `0x${string}`,
+    ] as const)
+  );
+  setDerivedConfig({
+    registry,
+    defiInsurance,
+    boosterId: boosterId as bigint,
+    boosterBoostBps: boosterBoostBps as bigint,
+    assetUsdFeed: Object.fromEntries(feedPairs),
+    maxOracleStaleness: maxOracleStaleness as bigint,
+  });
+  assertBootstrapConfig();
 
   // Deterministic block anchors: openBlock (config + topology + spent-score
   // cutoff), referenceBlock (earned score — the pre-incident point), and the
@@ -200,7 +247,6 @@ async function buildSettlement(
     poolAssetDecimals.push(await decimalsOf(client, assets[i], windowEndBlock));
   }
 
-  const boosterCollection = await boosterNftAt(client, openBlock);
   // Per-incident payout cap — read at openBlock (topology anchor); it can't change
   // mid-incident (Registry.setMaxPayoutBps is frozen-gated), so this is the same
   // value settleIncident checks the committed poolPayouts against.
@@ -233,8 +279,6 @@ async function buildSettlement(
     poolBalances,
     poolAssetUsd1e18,
     poolAssetDecimals,
-    boosterCollection,
-    boosterId: BOOSTER_ID,
     grossScoreOf: (user) => scoreSource.grossScoreOf(user),
     spentOf,
     maxCoverPoolPayoutBps,
@@ -269,6 +313,21 @@ function printSettlement(s: Settlement, metadata: RunMetadata, withProofs: boole
     configVersion: CONFIG_VERSION,
     // Reproducibility metadata plus the commitments bound by the settlement digest.
     configHash: configHash(),
+    bootstrapConfig: {
+      version: CONFIG_VERSION,
+      chainId: CHAIN_ID.toString(),
+      registry: CONFIG.registry,
+      defiInsurance: CONFIG.defiInsurance,
+      boosterId: CONFIG.boosterId.toString(),
+      boosterBoostBps: CONFIG.boosterBoostBps.toString(),
+      assetUsdFeed: Object.keys(CONFIG.assetUsdFeed)
+        .sort()
+        .map((asset) => [asset, CONFIG.assetUsdFeed[asset]]),
+      maxOracleStaleness: CONFIG.maxOracleStaleness.toString(),
+      maxLogRange: MAX_LOG_RANGE.toString(),
+      logResultCap: LOG_RESULT_CAP.toString(),
+      anchorBlock: metadata.anchors.open.number.toString(),
+    },
     teePcrHash: metadata.teePcrHash,
     claimSetHash: s.claimSetHash,
     settlementInputHash: s.settlementInputHash,
@@ -317,12 +376,11 @@ function printSettlement(s: Settlement, metadata: RunMetadata, withProofs: boole
       grossEarnedScore: r.grossEarnedScore.toString(),
       earnedScore: r.earnedScore.toString(),
       scoreSpent: r.scoreSpent.toString(),
-      boosterAmountUsed: r.boosterAmountUsed.toString(),
       boostedScore: r.boostedScore.toString(),
       payoutUsd: r.payoutUsd.toString(),
       amounts: r.amounts.map((a) => a.toString()),
-      // Exact finalizeClaim values: amounts, raw scoreSpent, boosterAmountUsed,
-      // boostedScore, eligibleAmount, and proof.
+      // Exact finalizeClaim values: amounts, raw scoreSpent, boostedScore,
+      // eligibleAmount, and proof.
       ...(proofs ? { proof: proofs.get(r.claimId)! } : {}),
     })),
   };

@@ -54,7 +54,6 @@ const INS = "0x0000000000000000000000000000000000001115" as const;
 const ASSET = "0x0000000000000000000000000000000000000a55" as const;
 const SCORED = "0x0000000000000000000000000000000000005c04" as const;
 const ORACLE = "0x000000000000000000000000000000000000044c" as const;
-const BOOSTER = "0x00000000000000000000000000000000b0057e40" as const;
 const ZERO = "0x0000000000000000000000000000000000000000" as const;
 
 const cfg: IncidentConfig = {
@@ -82,8 +81,6 @@ function baseOpts(assetBalance: bigint) {
     poolBalances: [assetBalance],
     poolAssetUsd1e18: [WAD], // $1 per asset token
     poolAssetDecimals: [18],
-    boosterCollection: BOOSTER,
-    boosterId: 1n,
     grossScoreOf: vi.fn(async (u: `0x${string}`) => h.integrals.get(u.toLowerCase()) ?? 0n),
     spentOf: (_u: `0x${string}`) => 0n,
     maxCoverPoolPayoutBps: 10_000n, // no per-incident cap by default; a dedicated test exercises it
@@ -307,45 +304,21 @@ describe("earnedScoreOf — raw lifetime score", () => {
   });
 });
 
-describe("settle — booster cap", () => {
-  // A committed boost is capped at the claimant's MIN booster balance over
-  // [joinBlock, windowEnd] (boosters aren't escrowed, so continuous holding is
-  // required). bob commits 2 units; his effective boost is min(2, held).
+describe("settle — escrowed boosters", () => {
   function boostReg(user: `0x${string}`, boosterAmount: bigint): InputEvent {
     return { kind: "register", claimId: 1n, user, amount: 100n * WAD, scoreToSpend: 1_000_000n, boosterAmount, blockNumber: 105n, logIndex: 0 };
   }
 
-  it("held boosters ≥ committed → full boost applied", async () => {
+  it("applies the full escrowed booster amount without historical balance reads", async () => {
     h.integrals.clear();
     h.minBalances.clear();
     h.boosterBalances.clear();
     h.integrals.set(BOB.toLowerCase(), 100n);
-    h.boosterBalances.set(BOB.toLowerCase(), 2n); // holds ≥ the 2 committed
     const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], baseOpts(10_000n * WAD));
     // Raw availability stays 100; 100 × 10200/10000 = 102 is separate.
     expect(s.rows[0].earnedScore).toEqual(100n);
     expect(s.rows[0].scoreSpent).toEqual(100n);
-    expect(s.rows[0].boosterAmountUsed).toEqual(2n);
     expect(s.rows[0].boostedScore).toEqual(102n);
-  });
-
-  it("boost capped at min held; sold-down boosters don't count", async () => {
-    h.integrals.clear();
-    h.minBalances.clear();
-    h.boosterBalances.clear();
-    h.integrals.set(BOB.toLowerCase(), 100n);
-    h.boosterBalances.set(BOB.toLowerCase(), 0n); // committed 2 but held 0 over the window
-    const s = await settle({} as any, 1n, cfg, [boostReg(BOB, 2n)], baseOpts(10_000n * WAD));
-    expect(s.rows[0].earnedScore).toEqual(100n); // no boost
-    expect((chain.minErc1155BalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls.length).toBe(1);
-  });
-
-  it("no committed boosters → no ERC1155 read", async () => {
-    h.integrals.clear();
-    h.minBalances.clear();
-    h.boosterBalances.clear();
-    h.integrals.set(BOB.toLowerCase(), 100n);
-    await settle({} as any, 1n, cfg, [boostReg(BOB, 0n)], baseOpts(10_000n * WAD));
     expect((chain.minErc1155BalanceOver as unknown as { mock: { calls: any[][] } }).mock.calls.length).toBe(0);
   });
 
@@ -354,7 +327,7 @@ describe("settle — booster cap", () => {
     h.minBalances.clear();
     h.boosterBalances.clear();
     h.integrals.set(BOB.toLowerCase(), 100n); // raw lifetime earned = 100
-    h.boosterBalances.set(BOB.toLowerCase(), 2n); // holds the 2 committed
+
     // 40 was already spent, leaving 60 raw score. The claim can consume only those
     // 60 raw units; the 2% booster creates a separate payout weight of 61.
     const opts = { ...baseOpts(10_000n * WAD), spentOf: (_u: `0x${string}`) => 40n };
@@ -362,7 +335,6 @@ describe("settle — booster cap", () => {
     expect(s.rows[0].grossEarnedScore).toEqual(100n);
     expect(s.rows[0].earnedScore).toEqual(60n);
     expect(s.rows[0].scoreSpent).toEqual(60n);
-    expect(s.rows[0].boosterAmountUsed).toEqual(2n);
     expect(s.rows[0].boostedScore).toEqual(61n);
     expect(s.settlementInputHash).toBe(settlementInputHashOf([{ user: BOB, grossEarnedScore: 100n }]));
   });
@@ -429,8 +401,8 @@ describe("settlementInputHash — canonical gross-score commitment", () => {
 
 describe("settlementTree / proofs", () => {
   const rows = [
-    { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n, boosterAmountUsed: 2n, boostedScore: 61n, eligibleAmount: 100n * WAD },
-    { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n, boosterAmountUsed: 0n, boostedScore: 40n, eligibleAmount: 100n * WAD },
+    { claimId: 1n, user: BOB, amounts: [60n * WAD], scoreSpent: 60n, boostedScore: 61n, eligibleAmount: 100n * WAD },
+    { claimId: 2n, user: CAROL, amounts: [40n * WAD], scoreSpent: 40n, boostedScore: 40n, eligibleAmount: 100n * WAD },
   ];
 
   it("proofs verify against the root with the canonical leaf encoding", () => {
@@ -457,7 +429,7 @@ describe("settlementTree / proofs", () => {
     expect(settlementTree(1n, rows).root).toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], amounts: [61n * WAD] }, rows[1]]).root).not.toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], scoreSpent: 59n }, rows[1]]).root).not.toEqual(base);
-    expect(settlementTree(1n, [{ ...rows[0], boosterAmountUsed: 1n }, rows[1]]).root).not.toEqual(base);
+
     expect(settlementTree(1n, [{ ...rows[0], boostedScore: 60n }, rows[1]]).root).not.toEqual(base);
     expect(settlementTree(1n, [{ ...rows[0], eligibleAmount: 99n * WAD }, rows[1]]).root).not.toEqual(base);
   });

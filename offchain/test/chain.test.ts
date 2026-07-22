@@ -13,7 +13,7 @@ import {
   rpcMetricsOf,
   tokenBlockIntegral,
 } from "../src/chain.js";
-import { CONFIG, LOG_RESULT_CAP, MAX_LOG_RANGE, MAX_ORACLE_STALENESS } from "../src/config.js";
+import { CONFIG, LOG_RESULT_CAP, MAX_LOG_RANGE } from "../src/config.js";
 
 const CAP = Number(LOG_RESULT_CAP);
 const RANGE = Number(MAX_LOG_RANGE);
@@ -350,7 +350,8 @@ describe("priceUsd1e18 — L-02 pinned-block round validity", () => {
 
   it("rejects a round older than the committed staleness policy", async () => {
     const blockTs = 100_000n;
-    const client = oracleClient({ updatedAt: blockTs - MAX_ORACLE_STALENESS - 1n, blockTs });
+    CONFIG.maxOracleStaleness = 86_400n;
+    const client = oracleClient({ updatedAt: blockTs - CONFIG.maxOracleStaleness - 1n, blockTs });
     await expect(priceUsd1e18(client, ORACLE, 123n)).rejects.toThrow(/stale/);
   });
 });

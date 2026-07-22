@@ -37,10 +37,10 @@ runtime code. TypeScript must remain an oracle until both pass.
 
 ## Task 2: Rust bootstrap configuration and config commitment
 
-**Files:** create `src/config.rs`; test `tests/config.rs`; create `config/example.json`.
+**Files:** create `src/config.rs`; test `tests/config.rs`.
 
-1. RED/GREEN: parse exact config schema; reject zero/malformed/duplicate/noncanonical address keys and missing feed mappings.
-2. RED/GREEN: reproduce TypeScript `configHash` byte-for-byte, including version, chain, addresses, booster policy, staleness, and log completeness policy.
+1. RED/GREEN: derive configuration from one Registry address at `openBlock`; reject invalid module binding, unsupported booster policy, zero staleness, and missing feeds.
+2. RED/GREEN: reproduce TypeScript `configHash` byte-for-byte, including derived chain state and baked log completeness policy.
 3. RED/GREEN: secure RPC selection—dRPC key only to exact trusted HTTPS hosts, never in URL/output, redirects disabled.
 
 ## Task 3: Minimal ABI and EIP-712 primitives
@@ -107,7 +107,7 @@ runtime code. TypeScript must remain an oracle until both pass.
 **Files:** `src/main.rs`, `src/ffi.rs`, `Cargo.toml`; `tests/cli.rs`, `tests/ffi.rs`.
 
 1. Preserve legacy `usd8-settlement <fixture> [iterations] [warmup]` benchmark mode.
-2. Add `compute <incidentId> --config <path>` and `verify <incidentId> --config <path>` using `ETH_RPC_URL`/`DRPC_KEY` and optional checkpoint environment.
+2. Add `compute <incidentId> --registry <address>` and `verify <incidentId> --registry <address>` using `ETH_RPC_URL`/`DRPC_KEY` and optional checkpoint environment.
 3. Add atomic `--output` artifact writing and stdout mode; never print secrets.
 4. Add Rust FFI `root`, `proof`, `digest`, and `claimset` commands with ABI-compatible stdout for Foundry.
 5. RED/GREEN exact CLI exit codes: usage 2, mismatch 1, fatal 1, success 0.

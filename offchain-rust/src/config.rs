@@ -1,64 +1,34 @@
 use crate::Address;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha3::{Digest, Keccak256};
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use thiserror::Error;
 
-pub const SUPPORTED_CONFIG_VERSION: &str = "4.8.0";
-pub const SUPPORTED_BOOSTER_ID: u64 = 1;
-pub const SUPPORTED_BOOSTER_BOOST_BPS: u64 = 100;
-pub const MAX_LOG_RANGE: u64 = 2_048;
-pub const MAX_LOG_RESULT_CAP: u64 = 10_000;
+pub const CONFIG_VERSION: &str = "5.0.0";
+pub const CHAIN_ID: u64 = 1;
+pub const MAX_LOG_RANGE: u64 = 1_000;
+pub const LOG_RESULT_CAP: usize = 1_000;
+pub const MAX_LOG_RESULT_CAP: u64 = LOG_RESULT_CAP as u64;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("invalid config JSON: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("invalid {label} address: {value}")]
-    InvalidAddress { label: String, value: String },
-    #[error("{0} address is zero")]
-    ZeroAddress(String),
-    #[error("registry and defiInsurance addresses must differ")]
-    DuplicateContracts,
-    #[error("assetUsdFeed key must be lowercase: {0}")]
-    NoncanonicalAssetKey(String),
-    #[error("invalid decimal string for {field}: {value}")]
-    InvalidDecimal { field: String, value: String },
-    #[error("unsupported config version: {0}")]
-    UnsupportedVersion(String),
+    #[error("registry address is zero")]
+    ZeroRegistry,
+    #[error("defiInsurance address is zero")]
+    ZeroDefiInsurance,
     #[error("unsupported booster policy: id={id}, boostBps={boost_bps}")]
     UnsupportedBoosterPolicy { id: u64, boost_bps: u64 },
-    #[error("{0} must be positive")]
-    NonPositivePolicy(&'static str),
-    #[error("{field} exceeds maximum {maximum}: {value}")]
-    PolicyTooLarge {
-        field: &'static str,
-        value: u64,
-        maximum: u64,
-    },
-    #[error("no assetUsdFeed configured for pool asset {0}")]
-    MissingAssetFeed(String),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ConfigDto {
-    version: String,
-    chain_id: u64,
-    registry: String,
-    defi_insurance: String,
-    booster_id: String,
-    booster_boost_bps: String,
-    asset_usd_feed: BTreeMap<String, String>,
-    max_oracle_staleness: String,
-    max_log_range: String,
-    log_result_cap: u64,
+    #[error("maxOracleStaleness must be positive")]
+    InvalidOracleStaleness,
+    #[error("no on-chain USD feed configured for pool asset {0}")]
+    MissingAssetFeed(Address),
+    #[error("derived configuration JSON failed: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 #[derive(Clone, Debug)]
 pub struct BootstrapConfig {
-    pub version: String,
+    pub version: &'static str,
     pub chain_id: u64,
     pub registry: Address,
     pub defi_insurance: Address,
@@ -66,15 +36,13 @@ pub struct BootstrapConfig {
     pub booster_boost_bps: u64,
     pub asset_usd_feed: BTreeMap<Address, Address>,
     pub max_oracle_staleness: u64,
-    pub max_log_range: u64,
-    pub log_result_cap: u64,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Commitment<'a> {
     version: &'a str,
-    chain_id: u64,
+    chain_id: String,
     registry: String,
     defi_insurance: String,
     booster_id: String,
@@ -85,106 +53,52 @@ struct Commitment<'a> {
     log_result_cap: String,
 }
 
-fn decimal(field: &str, value: &str) -> Result<u64, ConfigError> {
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|_| ConfigError::InvalidDecimal {
-            field: field.to_owned(),
-            value: value.to_owned(),
-        })?;
-    if parsed.to_string() != value {
-        return Err(ConfigError::InvalidDecimal {
-            field: field.to_owned(),
-            value: value.to_owned(),
-        });
-    }
-    Ok(parsed)
-}
-
-fn configured_address(value: &str, label: &str) -> Result<Address, ConfigError> {
-    let address = Address::from_str(value).map_err(|_| ConfigError::InvalidAddress {
-        label: label.to_owned(),
-        value: value.to_owned(),
-    })?;
-    if address.is_zero() {
-        return Err(ConfigError::ZeroAddress(label.to_owned()));
-    }
-    Ok(address)
-}
-
 impl BootstrapConfig {
-    pub fn from_json(input: &str) -> Result<Self, ConfigError> {
-        let dto: ConfigDto = serde_json::from_str(input)?;
-        if dto.version != SUPPORTED_CONFIG_VERSION {
-            return Err(ConfigError::UnsupportedVersion(dto.version));
+    pub fn derived(
+        registry: Address,
+        defi_insurance: Address,
+        booster_id: u64,
+        booster_boost_bps: u64,
+        asset_usd_feed: BTreeMap<Address, Address>,
+        max_oracle_staleness: u64,
+    ) -> Result<Self, ConfigError> {
+        if registry.is_zero() {
+            return Err(ConfigError::ZeroRegistry);
         }
-        let registry = configured_address(&dto.registry, "registry")?;
-        let defi_insurance = configured_address(&dto.defi_insurance, "defiInsurance")?;
-        if registry == defi_insurance {
-            return Err(ConfigError::DuplicateContracts);
+        if defi_insurance.is_zero() {
+            return Err(ConfigError::ZeroDefiInsurance);
         }
-        let booster_id = decimal("boosterId", &dto.booster_id)?;
-        let booster_boost_bps = decimal("boosterBoostBps", &dto.booster_boost_bps)?;
-        if booster_id != SUPPORTED_BOOSTER_ID || booster_boost_bps != SUPPORTED_BOOSTER_BOOST_BPS {
+        if booster_id != 1 || booster_boost_bps != 100 {
             return Err(ConfigError::UnsupportedBoosterPolicy {
                 id: booster_id,
                 boost_bps: booster_boost_bps,
             });
         }
-        let max_oracle_staleness = decimal("maxOracleStaleness", &dto.max_oracle_staleness)?;
-        let max_log_range = decimal("maxLogRange", &dto.max_log_range)?;
         if max_oracle_staleness == 0 {
-            return Err(ConfigError::NonPositivePolicy("maxOracleStaleness"));
+            return Err(ConfigError::InvalidOracleStaleness);
         }
-        if max_log_range == 0 {
-            return Err(ConfigError::NonPositivePolicy("maxLogRange"));
+        if let Some(asset) = asset_usd_feed
+            .iter()
+            .find_map(|(asset, feed)| feed.is_zero().then_some(*asset))
+        {
+            return Err(ConfigError::MissingAssetFeed(asset));
         }
-        if max_log_range > MAX_LOG_RANGE {
-            return Err(ConfigError::PolicyTooLarge {
-                field: "maxLogRange",
-                value: max_log_range,
-                maximum: MAX_LOG_RANGE,
-            });
-        }
-        if dto.log_result_cap == 0 {
-            return Err(ConfigError::NonPositivePolicy("logResultCap"));
-        }
-        if dto.log_result_cap > MAX_LOG_RESULT_CAP {
-            return Err(ConfigError::PolicyTooLarge {
-                field: "logResultCap",
-                value: dto.log_result_cap,
-                maximum: MAX_LOG_RESULT_CAP,
-            });
-        }
-
-        let mut asset_usd_feed = BTreeMap::new();
-        for (asset, feed) in dto.asset_usd_feed {
-            if asset != asset.to_lowercase() {
-                return Err(ConfigError::NoncanonicalAssetKey(asset));
-            }
-            let asset_address = configured_address(&asset, "pool asset")?;
-            let feed_address = configured_address(&feed, &format!("USD feed for {asset}"))?;
-            asset_usd_feed.insert(asset_address, feed_address);
-        }
-
         Ok(Self {
-            version: SUPPORTED_CONFIG_VERSION.to_owned(),
-            chain_id: dto.chain_id,
+            version: CONFIG_VERSION,
+            chain_id: CHAIN_ID,
             registry,
             defi_insurance,
             booster_id,
             booster_boost_bps,
             asset_usd_feed,
             max_oracle_staleness,
-            max_log_range,
-            log_result_cap: dto.log_result_cap,
         })
     }
 
     fn commitment(&self) -> Commitment<'_> {
         Commitment {
-            version: &self.version,
-            chain_id: self.chain_id,
+            version: self.version,
+            chain_id: self.chain_id.to_string(),
             registry: self.registry.to_string(),
             defi_insurance: self.defi_insurance.to_string(),
             booster_id: self.booster_id.to_string(),
@@ -195,8 +109,8 @@ impl BootstrapConfig {
                 .map(|(asset, feed)| (asset.to_string(), feed.to_string()))
                 .collect(),
             max_oracle_staleness: self.max_oracle_staleness.to_string(),
-            max_log_range: self.max_log_range.to_string(),
-            log_result_cap: self.log_result_cap.to_string(),
+            max_log_range: MAX_LOG_RANGE.to_string(),
+            log_result_cap: LOG_RESULT_CAP.to_string(),
         }
     }
 
@@ -210,14 +124,10 @@ impl BootstrapConfig {
         Ok(format!("0x{}", hex::encode(hasher.finalize())))
     }
 
-    pub fn asset_feed(&self, asset: &str) -> Result<Address, ConfigError> {
-        let parsed = Address::from_str(asset).map_err(|_| ConfigError::InvalidAddress {
-            label: "pool asset".to_owned(),
-            value: asset.to_owned(),
-        })?;
+    pub fn asset_feed(&self, asset: Address) -> Result<Address, ConfigError> {
         self.asset_usd_feed
-            .get(&parsed)
+            .get(&asset)
             .copied()
-            .ok_or_else(|| ConfigError::MissingAssetFeed(parsed.to_string()))
+            .ok_or(ConfigError::MissingAssetFeed(asset))
     }
 }

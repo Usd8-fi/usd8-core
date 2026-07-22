@@ -8,7 +8,7 @@ import {
   parseAbiItem,
   type PublicClient,
 } from "viem";
-import { CONFIG, DEFAULT_RPC_TIMEOUT_MS, MAX_ORACLE_STALENESS, MAX_LOG_RANGE, LOG_RESULT_CAP } from "./config.js";
+import { CONFIG, DEFAULT_RPC_TIMEOUT_MS, MAX_LOG_RANGE, LOG_RESULT_CAP } from "./config.js";
 
 export const WAD = 10n ** 18n;
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
@@ -21,6 +21,9 @@ export const DEFI_ABI = parseAbi([
   "function incidentTeePcrHash(uint256 incidentId) view returns (bytes32)",
   "function getInsuredToken(address) view returns ((uint256 maxCoverageBps, address underlyingPriceOracle, address underlyingConversionAddress, bytes underlyingConversionCallData, uint128 minClaimAmount))",
   "function settlementParams() view returns (uint64 twapLookbackBlocks, uint64 holdingMarginBlocks, uint64 sampleStepBlocks)",
+  "function registry() view returns (address)",
+  "function BOOSTER_ID() view returns (uint256)",
+  "function BOOSTER_BOOST_BPS() view returns (uint256)",
 ]);
 
 // Registry surface: topology (pool set), scored tokens, booster collection.
@@ -32,6 +35,9 @@ export const REGISTRY_ABI = parseAbi([
   "function boosterNFT() view returns (address)",
   "function maxCoverPoolPayoutBps() view returns (uint256)",
   "function scoreSpent(address) view returns (uint256)",
+  "function defiInsurance() view returns (address)",
+  "function assetUsdFeed(address asset) view returns (address)",
+  "function maxOracleStaleness() view returns (uint64)",
 ]);
 
 // SingleAssetCoverPool surface: per-pool asset + valuation.
@@ -646,7 +652,7 @@ export async function ratioAt(
  * Reads the oracle's own `decimals()` and pins the block so the value is
  * reproducible. Rejects a non-positive answer, an incomplete round
  * (startedAt/updatedAt == 0 or reversed), a future-dated update, a superseded
- * round, and a feed staler than {MAX_ORACLE_STALENESS} at the pinned block.
+ * round, and a feed staler than the Registry policy at the incident openBlock.
  */
 export async function priceUsd1e18(client: PublicClient, oracle: `0x${string}`, blockNumber: bigint): Promise<bigint> {
   const [roundId, answer, startedAt, updatedAt, answeredInRound] = (await client.readContract({
@@ -669,8 +675,8 @@ export async function priceUsd1e18(client: PublicClient, oracle: `0x${string}`, 
   if (updatedAt > blockTs) {
     throw new Error(`oracle ${oracle} updatedAt ${updatedAt} is later than pinned block ts ${blockTs}`);
   }
-  if (blockTs - updatedAt > MAX_ORACLE_STALENESS) {
-    throw new Error(`oracle ${oracle} stale: updatedAt ${updatedAt}, block ts ${blockTs} (> ${MAX_ORACLE_STALENESS}s)`);
+  if (blockTs - updatedAt > CONFIG.maxOracleStaleness) {
+    throw new Error(`oracle ${oracle} stale: updatedAt ${updatedAt}, block ts ${blockTs} (> ${CONFIG.maxOracleStaleness}s)`);
   }
   const dec = BigInt(
     (await client.readContract({ address: oracle, abi: FEED_ABI, functionName: "decimals", blockNumber })) as number

@@ -32,6 +32,9 @@ sol! {
             uint64 holdingMarginBlocks,
             uint64 sampleStepBlocks
         );
+        function registry() external view returns (address);
+        function BOOSTER_ID() external view returns (uint256);
+        function BOOSTER_BOOST_BPS() external view returns (uint256);
 
         event ClaimRegistered(
             uint256 indexed claimId,
@@ -57,6 +60,9 @@ sol! {
         function boosterNFT() external view returns (address);
         function maxCoverPoolPayoutBps() external view returns (uint256);
         function scoreSpent(address account) external view returns (uint256);
+        function defiInsurance() external view returns (address);
+        function assetUsdFeed(address asset) external view returns (address);
+        function maxOracleStaleness() external view returns (uint64);
     }
 
     interface ISingleAssetCoverPool {

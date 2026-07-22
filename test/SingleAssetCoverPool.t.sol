@@ -11,6 +11,7 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
@@ -27,6 +28,35 @@ import {MockERC1155} from "./mocks/MockERC1155.sol";
 
 interface ICompleteRedeem {
     function completeRedeem(address receiver) external returns (uint256 assets);
+}
+
+/// @dev Insured token that records the pool-freeze state when DefiInsurance
+///      sends an over-escrow refund during claim finalization.
+contract RefundFreezeProbeToken is ERC20 {
+    Registry public reg;
+    address public defi;
+    bool public probed;
+    bool public frozenDuringRefund;
+
+    constructor(Registry _reg) ERC20("Probe", "PRB") {
+        reg = _reg;
+    }
+
+    function setDefi(address d) external {
+        defi = d;
+    }
+
+    function mint(address to, uint256 amt) external {
+        _mint(to, amt);
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (from == defi && defi != address(0)) {
+            frozenDuringRefund = reg.payoutIncidentActive();
+            probed = true;
+        }
+        super._update(from, to, value);
+    }
 }
 
 contract SingleAssetCoverPoolTest is Test {
@@ -56,6 +86,13 @@ contract SingleAssetCoverPoolTest is Test {
 
     function setUp() public {
         vm.roll(1000); // so openClaimIncident's referenceBlock (block.number - 1) is a valid past block
+        vm.etch(FEED, hex"00");
+        vm.mockCall(FEED, abi.encodeWithSignature("decimals()"), abi.encode(uint8(8)));
+        vm.mockCall(
+            FEED,
+            abi.encodeWithSignature("latestRoundData()"),
+            abi.encode(uint80(1), int256(1e8), uint256(1), uint256(1), uint80(1))
+        );
         usdc = new MockERC20("USDC", "USDC", 6);
         // admin doubles as timelock + admin on the shared Registry in tests.
         registry = Registry(
@@ -79,10 +116,14 @@ contract SingleAssetCoverPoolTest is Test {
         beacon = new UpgradeableBeacon(address(poolImpl), admin);
         pool = _deployPool(IERC20(address(usdc)));
 
-        defi = new DefiInsurance(registry);
+        defi = DefiInsurance(
+            address(
+                new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (registry)))
+            )
+        );
         vm.startPrank(admin);
         registry.setMaxCoverPoolPayoutBps(8000); // 80% for these tests (constructor default is 50%)
-        registry.addPool(address(pool));
+        registry.addPool(address(pool), FEED);
         registry.setBoosterNFT(address(booster));
         registry.setDefiInsurance(address(defi));
         defi.addInsuredToken(IERC20(address(lp1)), 8000, MIN_CLAIM, FEED, address(0), "");
@@ -147,7 +188,7 @@ contract SingleAssetCoverPoolTest is Test {
     }
 
     /// @dev OZ double-hashed leaf over (incidentId, claimId, user, amounts, rawScoreSpent,
-    ///      boosterAmountUsed, boostedScore, eligible). eligible defaults to the claim's escrow,
+    ///      boostedScore, eligible). eligible defaults to the claim's escrow,
     ///      which is what finalizeClaim forfeits, so refund is 0 and payouts are unchanged.
     function _leaf(uint256 incidentId, uint256 claimId, address user, uint256[] memory amounts)
         internal
@@ -155,7 +196,7 @@ contract SingleAssetCoverPoolTest is Test {
         returns (bytes32)
     {
         (,, uint128 escrow,,,) = defi.claims(claimId);
-        return _leafSpent(incidentId, claimId, user, amounts, 0, 0, 0, escrow);
+        return _leafSpent(incidentId, claimId, user, amounts, 0, 0, escrow);
     }
 
     function _leafSpent(
@@ -164,18 +205,11 @@ contract SingleAssetCoverPoolTest is Test {
         address user,
         uint256[] memory amounts,
         uint256 scoreSpent,
-        uint256 boosterAmountUsed,
         uint256 boostedScore,
         uint256 eligible
     ) internal pure returns (bytes32) {
         return keccak256(
-            bytes.concat(
-                keccak256(
-                    abi.encode(
-                        incidentId, claimId, user, amounts, scoreSpent, boosterAmountUsed, boostedScore, eligible
-                    )
-                )
-            )
+            bytes.concat(keccak256(abi.encode(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligible)))
         );
     }
 
@@ -294,23 +328,86 @@ contract SingleAssetCoverPoolTest is Test {
         assertEq(exitEpochAfter, exitEpochBefore);
     }
 
+    function test_DefiInsuranceUpgradeAllowedDuringBeta() public {
+        DefiInsuranceV2 v2 = new DefiInsuranceV2();
+
+        vm.prank(admin); // admin == timelock in this harness
+        defi.upgradeToAndCall(address(v2), "");
+        assertEq(DefiInsuranceV2(address(defi)).version(), 2);
+    }
+
+    function test_DefiInsuranceUpgradeBlockedDuringActiveIncident() public {
+        _registerClaim(bob, lp1, 50e18);
+        DefiInsuranceV2 v2 = new DefiInsuranceV2();
+
+        vm.expectRevert(DefiInsurance.IncidentsActive.selector);
+        vm.prank(admin); // admin == timelock in this harness
+        defi.upgradeToAndCall(address(v2), "");
+    }
+
+    function test_DefiInsuranceUpgradePermanentlyDisabledAfterBetaEnds() public {
+        vm.prank(admin);
+        registry.endBetaMode();
+
+        DefiInsuranceV2 v2 = new DefiInsuranceV2();
+        vm.expectRevert(SharedBase.NotBetaMode.selector);
+        vm.prank(admin);
+        defi.upgradeToAndCall(address(v2), "");
+    }
+
+    function test_DefiInsuranceImplementationCannotBeInitialized() public {
+        DefiInsurance implementation = new DefiInsurance();
+        vm.expectRevert();
+        implementation.initialize(registry);
+    }
+
     // ════════════════════ Pool topology (Registry) ════════════════════
+
+    function test_AddPoolRejectsInvalidFeedContract() public {
+        MockERC20 asset = new MockERC20("Bad feed", "BAD", 18);
+        SingleAssetCoverPool newPool = _deployPool(IERC20(address(asset)));
+
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Registry.InvalidAssetUsdFeed.selector, address(0xdead)));
+        registry.addPool(address(newPool), address(0xdead));
+        vm.expectRevert(abi.encodeWithSelector(Registry.InvalidAssetUsdFeed.selector, address(asset)));
+        registry.addPool(address(newPool), address(asset));
+        vm.stopPrank();
+    }
+
+    function test_AddPoolRejectsMissingFeed() public {
+        MockERC20 asset = new MockERC20("No feed", "NONE", 18);
+        SingleAssetCoverPool newPool = _deployPool(IERC20(address(asset)));
+        vm.prank(admin);
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        registry.addPool(address(newPool), address(0));
+    }
 
     function test_AddPoolDuplicateReverts() public {
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(Registry.PoolExists.selector, IERC20(address(usdc))));
-        registry.addPool(address(pool));
+        registry.addPool(address(pool), FEED);
+    }
+
+    function test_AddPoolRejectsInsuredToken() public {
+        SingleAssetCoverPool conflictingPool = _deployPool(IERC20(address(lp1)));
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Registry.TokenConflict.selector, IERC20(address(lp1))));
+        registry.addPool(address(conflictingPool), FEED);
     }
 
     function test_RemovePool() public {
         MockERC20 dai = new MockERC20("DAI", "DAI", 18);
         SingleAssetCoverPool daiPool = _deployPool(IERC20(address(dai)));
         vm.startPrank(admin);
-        registry.addPool(address(daiPool));
+        registry.addPool(address(daiPool), FEED);
         assertEq(registry.coverPoolsLength(), 2);
+        assertEq(registry.assetUsdFeed(IERC20(address(dai))), FEED);
         registry.removePool(address(daiPool));
         assertEq(registry.coverPoolsLength(), 1);
         assertEq(registry.coverPool(IERC20(address(dai))), address(0));
+        assertEq(registry.assetUsdFeed(IERC20(address(dai))), address(0));
 
         // Removing an unregistered asset reverts.
         vm.expectRevert(abi.encodeWithSelector(Registry.PoolNotFound.selector, IERC20(address(dai))));
@@ -325,7 +422,7 @@ contract SingleAssetCoverPoolTest is Test {
         MockFeeToken fee = new MockFeeToken(100); // 1% fee on transfer
         SingleAssetCoverPool feePool = _deployPool(IERC20(address(fee)));
         vm.prank(admin);
-        registry.addPool(address(feePool));
+        registry.addPool(address(feePool), FEED);
 
         fee.mint(alice, 100e18);
         vm.startPrank(alice);
@@ -459,7 +556,7 @@ contract SingleAssetCoverPoolTest is Test {
         SingleAssetCoverPool newPool = _deployPool(IERC20(address(newAsset)));
         vm.prank(admin);
         vm.expectRevert(Registry.Frozen.selector);
-        registry.addPool(address(newPool));
+        registry.addPool(address(newPool), FEED);
 
         // Removal is also blocked while an incident is active.
         vm.prank(admin);
@@ -623,10 +720,71 @@ contract SingleAssetCoverPoolTest is Test {
         vm.stopPrank();
     }
 
+    function test_RegistryStoresSettlementOraclePolicy() public {
+        assertEq(registry.maxOracleStaleness(), 36 hours);
+
+        vm.startPrank(admin);
+        registry.setAssetUsdFeed(IERC20(address(lp1)), FEED);
+        registry.setMaxOracleStaleness(48 hours);
+        vm.stopPrank();
+
+        assertEq(registry.assetUsdFeed(IERC20(address(lp1))), FEED);
+        assertEq(registry.maxOracleStaleness(), 48 hours);
+    }
+
+    function test_RegistryRejectsInvalidSettlementOraclePolicy() public {
+        vm.startPrank(admin);
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        registry.setAssetUsdFeed(IERC20(address(0)), FEED);
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        registry.setAssetUsdFeed(IERC20(address(lp1)), address(0));
+        vm.expectRevert(Registry.InvalidOracleStaleness.selector);
+        registry.setMaxOracleStaleness(0);
+        vm.stopPrank();
+    }
+
+    function test_SettlementOraclePolicyFrozenDuringIncident() public {
+        _registerClaim(alice, lp1, 10e18);
+
+        vm.startPrank(admin);
+        vm.expectRevert(Registry.Frozen.selector);
+        registry.setAssetUsdFeed(IERC20(address(lp1)), FEED);
+        vm.expectRevert(Registry.Frozen.selector);
+        registry.setMaxOracleStaleness(48 hours);
+        vm.stopPrank();
+    }
+
+    function test_ScoredTokenRateTimelineRejectsNonIncreasingBlock() public {
+        vm.startPrank(admin);
+        vm.roll(100);
+        registry.setScoredToken(IERC20(address(usd8)), 5);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Registry.NonIncreasingScoredRateBlock.selector, IERC20(address(usd8)), uint64(100), uint64(100)
+            )
+        );
+        registry.setScoredToken(IERC20(address(usd8)), 7);
+        vm.stopPrank();
+    }
+
+    function test_ScoredTokenRateTimelineAllowsDifferentTokensInSameBlock() public {
+        vm.startPrank(admin);
+        vm.roll(100);
+        registry.setScoredToken(IERC20(address(usd8)), 5);
+        registry.setScoredToken(IERC20(address(lp1)), 7);
+        vm.stopPrank();
+
+        Registry.RatePoint[] memory usd8History = registry.getScoredRateHistory(IERC20(address(usd8)));
+        Registry.RatePoint[] memory lp1History = registry.getScoredRateHistory(IERC20(address(lp1)));
+        assertEq(usd8History[0].fromBlock, 100);
+        assertEq(lp1History[0].fromBlock, 100);
+    }
+
     function test_SettlementConfigFrozenDuringIncident() public {
         _registerClaim(bob, lp1, 50e18); // opens incident
 
-        // M-01: settlement-critical config is frozen for the incident's whole life,
+        // Settlement-critical config is frozen for the incident's whole life,
         // so the off-chain openBlock config read can't be desynced by a mid-incident
         // mutation. setSettlementParams now reverts IncidentsActive.
         DefiInsurance.SettlementParams memory p =
@@ -641,7 +799,7 @@ contract SingleAssetCoverPoolTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev M-01: insured-token config setters are also frozen during an incident.
+    /// @dev Insured-token config setters are also frozen during an incident.
     function test_InsuredConfigFrozenDuringIncident() public {
         _registerClaim(bob, lp1, 50e18); // opens incident on lp1
         vm.startPrank(admin);
@@ -678,7 +836,7 @@ contract SingleAssetCoverPoolTest is Test {
         (,,,,,, uint64 openBlock,,,) = defi.incidents(1);
         assertEq(openBlock, expectedOpen);
 
-        // M-01: config is frozen while the incident is live, so the openBlock read
+        // Config is frozen while the incident is live, so the openBlock read
         // can't be desynced by a mid-incident retune — setSettlementParams reverts.
         DefiInsurance.SettlementParams memory p2 =
             DefiInsurance.SettlementParams({twapLookbackBlocks: 999, holdingMarginBlocks: 1, sampleStepBlocks: 1});
@@ -1198,7 +1356,7 @@ contract SingleAssetCoverPoolTest is Test {
         defi.openClaimIncident(IERC20(address(lp3)), uint64(block.number - 1));
     }
 
-    /// @dev L-04: an incident can't open unless this module is the registered
+    /// @dev An incident can't open unless this module is the registered
     ///      defiInsurance — else Registry.payoutIncidentActive() wouldn't freeze the pools.
     function test_OpenRevertsIfNotRegisteredDefiInsurance() public {
         vm.prank(admin);
@@ -1322,7 +1480,7 @@ contract SingleAssetCoverPoolTest is Test {
         reentrantPool.arm(50e18, _teeSignOpen(address(lp2), referenceBlock));
 
         vm.prank(admin);
-        registry.addPool(address(reentrantPool));
+        registry.addPool(address(reentrantPool), FEED);
         vm.prank(admin);
         defi.openClaimIncident(IERC20(address(lp1)), referenceBlock);
 
@@ -1443,7 +1601,7 @@ contract SingleAssetCoverPoolTest is Test {
         vm.prank(bob);
         // Incident no longer active ⇒ no live claim derivable; escrow recovery is the path.
         vm.expectRevert(DefiInsurance.NoActiveClaim.selector);
-        defi.finalizeClaim(_amounts(40e6), 0, 0, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(_amounts(40e6), 0, 0, 50e18, new bytes32[](0));
 
         vm.prank(bob);
         defi.withdrawNonFinalizedClaim(cid);
@@ -1544,7 +1702,7 @@ contract SingleAssetCoverPoolTest is Test {
         vm.warp(block.timestamp + 2 days + 1);
         vm.prank(bob);
         vm.expectRevert(DefiInsurance.NoActiveClaim.selector);
-        defi.finalizeClaim(amounts, 0, 0, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(amounts, 0, 0, 50e18, new bytes32[](0));
 
         vm.prank(bob);
         defi.withdrawNonFinalizedClaim(cid);
@@ -1687,7 +1845,7 @@ contract SingleAssetCoverPoolTest is Test {
     function _finalize(uint256 claimId, uint256[] memory amounts, uint256 scoreSpent) internal {
         (address user,, uint128 escrow,,,) = defi.claims(claimId);
         vm.prank(user);
-        defi.finalizeClaim(amounts, scoreSpent, 0, scoreSpent, escrow, new bytes32[](0));
+        defi.finalizeClaim(amounts, scoreSpent, scoreSpent, escrow, new bytes32[](0));
     }
 
     /// @dev EIP-712 IncidentOpen signature over (token, referenceBlock,
@@ -1900,7 +2058,7 @@ contract SingleAssetCoverPoolTest is Test {
         // Not open during the dispute period.
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
-        defi.finalizeClaim(amounts, 0, 0, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(amounts, 0, 0, 50e18, new bytes32[](0));
 
         vm.warp(block.timestamp + 4 days + 1);
         _finalize(cid, amounts, 0);
@@ -1928,12 +2086,12 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32[] memory proofBob = new bytes32[](1);
         proofBob[0] = leafCarol;
         vm.prank(bob);
-        defi.finalizeClaim(amountsBob, 0, 0, 0, 50e18, proofBob);
+        defi.finalizeClaim(amountsBob, 0, 0, 50e18, proofBob);
 
         bytes32[] memory proofCarol = new bytes32[](1);
         proofCarol[0] = leafBob;
         vm.prank(carol);
-        defi.finalizeClaim(amountsCarol, 0, 0, 0, 50e18, proofCarol);
+        defi.finalizeClaim(amountsCarol, 0, 0, 50e18, proofCarol);
 
         assertEq(usdc.balanceOf(bob), 40e6);
         assertEq(usdc.balanceOf(carol), 20e6);
@@ -1962,11 +2120,11 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32[] memory pB = new bytes32[](1);
         pB[0] = lC;
         vm.prank(bob);
-        defi.finalizeClaim(aB, 0, 0, 0, 50e18, pB);
+        defi.finalizeClaim(aB, 0, 0, 50e18, pB);
         bytes32[] memory pC = new bytes32[](1);
         pC[0] = lB;
         vm.prank(carol);
-        defi.finalizeClaim(aC, 0, 0, 0, 50e18, pC);
+        defi.finalizeClaim(aC, 0, 0, 50e18, pC);
 
         assertEq(usdc.balanceOf(bob), 40e6);
         assertEq(usdc.balanceOf(carol), 40e6);
@@ -1995,13 +2153,13 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32[] memory pB = new bytes32[](1);
         pB[0] = lC;
         vm.prank(bob);
-        defi.finalizeClaim(aB, 0, 0, 0, 50e18, pB); // budget 50e6 -> 10e6
+        defi.finalizeClaim(aB, 0, 0, 50e18, pB); // budget 50e6 -> 10e6
 
         bytes32[] memory pC = new bytes32[](1);
         pC[0] = lB;
         vm.prank(carol);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.PayoutCapExceeded.selector, 0, 40e6, 10e6));
-        defi.finalizeClaim(aC, 0, 0, 0, 50e18, pC); // 40e6 > 10e6 remaining
+        defi.finalizeClaim(aC, 0, 0, 50e18, pC); // 40e6 > 10e6 remaining
 
         assertEq(usdc.balanceOf(bob), 40e6); // early claim paid
         assertEq(usdc.balanceOf(carol), 0); // late claim capped out; recovers escrow later
@@ -2023,15 +2181,15 @@ contract SingleAssetCoverPoolTest is Test {
 
         uint256[] memory aB = _amounts(20e6);
         uint256[] memory aC = _amounts(10e6);
-        bytes32 lB = _leafSpent(1, cb, bob, aB, 0, 0, 0, 50e18); // eligible = E/2
-        bytes32 lC = _leafSpent(1, cc, carol, aC, 0, 0, 0, 100e18); // eligible > escrow
+        bytes32 lB = _leafSpent(1, cb, bob, aB, 0, 0, 50e18); // eligible = E/2
+        bytes32 lC = _leafSpent(1, cc, carol, aC, 0, 0, 100e18); // eligible > escrow
         _settle(1, _hashPair(lB, lC));
         vm.warp(block.timestamp + 4 days + 1);
 
         bytes32[] memory pB = new bytes32[](1);
         pB[0] = lC;
         vm.prank(bob);
-        defi.finalizeClaim(aB, 0, 0, 0, 50e18, pB);
+        defi.finalizeClaim(aB, 0, 0, 50e18, pB);
 
         // Refund = escrow − eligible = 50e18; the full 100e18 left the escrow ledger.
         assertEq(lp1.balanceOf(bob), 50e18);
@@ -2043,7 +2201,7 @@ contract SingleAssetCoverPoolTest is Test {
         pC[0] = lB;
         vm.prank(carol);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.EligibleExceedsEscrow.selector, 100e18, 50e18));
-        defi.finalizeClaim(aC, 0, 0, 0, 100e18, pC);
+        defi.finalizeClaim(aC, 0, 0, 100e18, pC);
     }
 
     function test_FinalizeWrongAmountsReverts() public {
@@ -2056,7 +2214,7 @@ contract SingleAssetCoverPoolTest is Test {
         // Root commits to 40e6 (single leaf); finalizing 90e6 fails the merkle check.
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.InvalidProof.selector, cid));
-        defi.finalizeClaim(_amounts(90e6), 0, 0, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(_amounts(90e6), 0, 0, 50e18, new bytes32[](0));
     }
 
     function test_FinalizeTwiceReverts() public {
@@ -2073,13 +2231,13 @@ contract SingleAssetCoverPoolTest is Test {
         bytes32[] memory proofB = new bytes32[](1);
         proofB[0] = leafC;
         vm.prank(bob);
-        defi.finalizeClaim(aB, 0, 0, 0, 50e18, proofB);
+        defi.finalizeClaim(aB, 0, 0, 50e18, proofB);
 
         // Second finalize by bob: his claim is resolved, but carol's keeps the incident
         // active so the claim is still derivable and the resolved guard fires.
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.ClaimAlreadyResolved.selector, cb));
-        defi.finalizeClaim(aB, 0, 0, 0, 50e18, proofB);
+        defi.finalizeClaim(aB, 0, 0, 50e18, proofB);
     }
 
     function test_PayoutExceedingPoolBalanceReverts() public {
@@ -2097,7 +2255,7 @@ contract SingleAssetCoverPoolTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.PayoutCapExceeded.selector, 0, 500e6, 80e6));
         vm.prank(bob);
-        defi.finalizeClaim(amounts, 0, 0, 0, 50e18, new bytes32[](0));
+        defi.finalizeClaim(amounts, 0, 0, 50e18, new bytes32[](0));
 
         // Escrow recoverable once the finalize window lapses.
         vm.warp(block.timestamp + 4 days + 4 days + 1);
@@ -2465,11 +2623,10 @@ contract SingleAssetCoverPoolTest is Test {
         vm.stopPrank();
     }
 
-    function test_BoosterCommittedNotEscrowedOnOpen() public {
+    function test_BoosterEscrowedOnOpen() public {
         uint256 cid = _openWithBooster(bob, lp1, 50e18, 3);
-        // Not escrowed: boosters stay in the claimant's wallet, only recorded.
-        assertEq(booster.balanceOf(bob, 1), 3);
-        assertEq(booster.balanceOf(address(defi), 1), 0);
+        assertEq(booster.balanceOf(bob, 1), 0);
+        assertEq(booster.balanceOf(address(defi), 1), 3);
         assertEq(defi.getClaimBoosterAmount(cid), 3);
     }
 
@@ -2484,53 +2641,38 @@ contract SingleAssetCoverPoolTest is Test {
         vm.warp(block.timestamp + 4 days + 1);
         _finalize(cid, amounts, 0);
 
-        assertEq(booster.balanceOf(bob, 1), 0); // burned from the claimant
+        assertEq(booster.balanceOf(bob, 1), 0); // claimant receives no refund
+        assertEq(booster.balanceOf(address(defi), 1), 0); // burned from escrow
         assertEq(booster.totalSupply(1), 0); // real burn reduced supply
         assertEq(defi.getClaimBoosterAmount(cid), 3); // preserve committed-and-burned amount on-chain
     }
 
-    function test_FinalizeRejectsBoosterAmountUsedAboveCommitted() public {
+    function test_FinalizeRejectsBoostedScoreInconsistentWithEscrowedBoosters() public {
         _stake(alice, 100e6);
         uint256 cid = _openWithBooster(bob, lp1, 50e18, 3);
         vm.warp(block.timestamp + 5 days + 1);
         uint256[] memory amounts = _amounts(40e6);
-        _settle(1, _leafSpent(1, cid, bob, amounts, 100, 4, 104, 50e18));
+        _settle(1, _leafSpent(1, cid, bob, amounts, 100, 102, 50e18));
         vm.warp(block.timestamp + 4 days + 1);
 
         vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.BoosterAmountUsedExceedsCommitted.selector, 4, 3));
-        defi.finalizeClaim(amounts, 100, 4, 104, 50e18, new bytes32[](0));
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.InvalidBoostedScore.selector, 102, 103));
+        defi.finalizeClaim(amounts, 100, 102, 50e18, new bytes32[](0));
     }
 
-    function test_FinalizeRejectsBoostedScoreInconsistentWithBoosterAmountUsed() public {
-        _stake(alice, 100e6);
-        uint256 cid = _openWithBooster(bob, lp1, 50e18, 3);
-        vm.warp(block.timestamp + 5 days + 1);
-        uint256[] memory amounts = _amounts(40e6);
-        _settle(1, _leafSpent(1, cid, bob, amounts, 100, 2, 103, 50e18));
-        vm.warp(block.timestamp + 4 days + 1);
-
-        vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.InvalidBoostedScore.selector, 103, 102));
-        defi.finalizeClaim(amounts, 100, 2, 103, 50e18, new bytes32[](0));
-    }
-
-    function test_FinalizeRevertsIfBoostersMissing() public {
-        _stake(alice, 100e6);
-        uint256 cid = _openWithBooster(bob, lp1, 50e18, 3);
-
-        // Bob moves his committed boosters away before finalize; the burn — and
-        // thus the whole finalize — reverts. Keeping them is his responsibility.
-        vm.prank(bob);
-        booster.safeTransferFrom(bob, carol, 1, 3, "");
-
-        vm.warp(block.timestamp + 5 days + 1);
-        uint256[] memory amounts = _amounts(40e6);
-        _settle(1, _leaf(1, cid, bob, amounts));
-        vm.warp(block.timestamp + 4 days + 1);
-        vm.prank(bob);
+    function test_JoinRevertsWithoutBoosterApproval() public {
+        lp1.mint(bob, 50e18);
+        booster.mint(bob, defi.BOOSTER_ID(), 3);
+        vm.prank(admin);
+        defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
+        vm.startPrank(bob);
+        lp1.approve(address(defi), 50e18);
         vm.expectRevert();
-        defi.finalizeClaim(amounts, 0, 0, 0, 50e18, new bytes32[](0));
+        defi.joinClaim(IERC20(address(lp1)), 50e18, 0, 3, 0, "");
+        vm.stopPrank();
+
+        assertEq(booster.balanceOf(bob, 1), 3);
+        assertEq(booster.balanceOf(address(defi), 1), 0);
     }
 
     /// @dev Finalization commits both raw and boosted scores in the leaf, but emits and records
@@ -2551,14 +2693,14 @@ contract SingleAssetCoverPoolTest is Test {
 
         vm.warp(block.timestamp + 5 days + 1);
         uint256[] memory amounts = _amounts(40e6);
-        _settle(1, _leafSpent(1, cid, bob, amounts, 500, 3, 515, 50e18));
+        _settle(1, _leafSpent(1, cid, bob, amounts, 500, 515, 50e18));
         vm.warp(block.timestamp + 4 days + 1);
 
         assertEq(registry.scoreSpent(bob), 0);
         vm.expectEmit(true, true, false, true, address(defi));
         emit DefiInsurance.ScoreSpent(bob, 500, 1);
         vm.prank(bob);
-        defi.finalizeClaim(amounts, 500, 3, 515, 50e18, new bytes32[](0));
+        defi.finalizeClaim(amounts, 500, 515, 50e18, new bytes32[](0));
         assertEq(registry.scoreSpent(bob), 500);
     }
 
@@ -2568,21 +2710,22 @@ contract SingleAssetCoverPoolTest is Test {
         registry.recordScoreSpent(bob, 100);
     }
 
-    function test_BoosterUntouchedOnCancel() public {
+    function test_BoosterReturnedOnCancel() public {
         _openWithBooster(bob, lp1, 50e18, 3);
         vm.prank(bob);
         defi.cancelClaim();
-        // Never escrowed, so nothing to return — bob simply kept them throughout.
         assertEq(booster.balanceOf(bob, 1), 3);
+        assertEq(booster.balanceOf(address(defi), 1), 0);
     }
 
-    function test_BoosterUntouchedOnWithdraw() public {
+    function test_BoosterReturnedOnWithdraw() public {
         uint256 cid = _openWithBooster(bob, lp1, 50e18, 3);
         // Void: no root through the dispute period.
         vm.warp(block.timestamp + 5 days + 4 days + 1);
         vm.prank(bob);
         defi.withdrawNonFinalizedClaim(cid);
         assertEq(booster.balanceOf(bob, 1), 3);
+        assertEq(booster.balanceOf(address(defi), 1), 0);
     }
 
     function test_SetBoosterNFTBlockedDuringIncident() public {
@@ -2930,11 +3073,255 @@ contract SingleAssetCoverPoolTest is Test {
         assertFalse(registry.payoutIncidentActive());
         _stake(alice, 100e6); // pool usable again
     }
+
+    function test_LastClaimStaysFrozenThroughRefund() public {
+        // finalizing the FINAL unresolved claim must keep the incident active
+        // (pool frozen) through the over-escrow refund, so a callback in the insured
+        // token can't re-enter redeem and exit at the pre-loss share price.
+        RefundFreezeProbeToken tok = new RefundFreezeProbeToken(registry);
+        tok.setDefi(address(defi));
+        vm.prank(admin);
+        defi.addInsuredToken(IERC20(address(tok)), 8000, MIN_CLAIM, FEED, address(0), "");
+
+        _stake(alice, 100e6); // pool capital to pay from
+
+        uint128 escrow = 100e18;
+        tok.mint(bob, escrow);
+        vm.prank(bob);
+        tok.approve(address(defi), escrow);
+        vm.prank(admin);
+        defi.openClaimIncident(IERC20(address(tok)), uint64(block.number - 1));
+        vm.prank(bob);
+        uint256 claimId = defi.joinClaim(IERC20(address(tok)), escrow, 0, 0, 0, "");
+
+        vm.warp(block.timestamp + 5 days + 1);
+        uint256[] memory amounts = _amounts(20e6);
+        uint256 eligible = 60e18; // < escrow → 40e18 refund fires the probe
+        _settle(1, _leafSpent(1, claimId, bob, amounts, 0, 0, eligible));
+        vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1);
+
+        vm.prank(bob);
+        defi.finalizeClaim(amounts, 0, 0, eligible, new bytes32[](0));
+
+        assertTrue(tok.probed(), "refund fired the probe");
+        assertTrue(tok.frozenDuringRefund(), "incident still frozen during the last claim's refund");
+        assertEq(defi.activeIncidentId(), 0, "incident retired only after finalize completes");
+    }
+
+    function test_SubDurationRewardRejectedInsteadOfStranding() public {
+        _stake(alice, 100e6);
+
+        // a distribution too small to stream (total/duration floors to zero)
+        // is rejected outright — nothing enters rewardReserve to strand forever.
+        vm.startPrank(admin);
+        usd8.mint(admin, 1);
+        usd8.approve(address(pool), 1);
+        vm.expectRevert(abi.encodeWithSelector(SingleAssetCoverPool.RewardRateZero.selector, 1, pool.rewardsDuration()));
+        pool.receiveProfitDistribution(1);
+        vm.stopPrank();
+        assertEq(pool.rewardReserve(), 0, "nothing reserved");
+    }
+
+    /// @dev Beta mode: admin corrects a bad TEE root in ONE call (no separate
+    ///      dispute, no timelock); the corrected root runs its own fresh DISPUTE
+    ///      window, then finalizes and pays the corrected amount.
+    function test_AdminCorrectSettlementInBeta() public {
+        assertTrue(registry.betaMode(), "launches in beta");
+        _stake(alice, 100e6); // underwrite so payouts have capital
+        uint256 claimId = _registerClaim(bob, lp1, 50e18);
+        vm.warp(block.timestamp + 5 days + 1);
+        _settle(1, _leaf(1, claimId, bob, _amounts(50e6))); // bad root (overpays)
+
+        // Admin fixes it directly, in beta — one call. Precompute leaf/pp (their
+        // external reads would otherwise consume the prank).
+        uint256[] memory good = _amounts(20e6);
+        bytes32 corrRoot = _leaf(1, claimId, bob, good);
+        uint256[] memory pp = _pp();
+        vm.prank(admin);
+        defi.adminCorrectSettlement(corrRoot, pp);
+
+        // Fresh DISPUTE window on the corrected root, then pay the corrected amount.
+        vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1);
+        _finalize(claimId, good, 0);
+        assertEq(usdc.balanceOf(bob), 20e6, "paid the admin-corrected amount");
+    }
+
+    /// @dev Once the timelock ends beta, the admin shortcut is gone — one-way.
+    function test_AdminCorrectSettlementRejectedAfterBeta() public {
+        vm.prank(admin); // admin == timelock in this harness
+        registry.endBetaMode();
+        assertFalse(registry.betaMode());
+
+        uint256 claimId = _registerClaim(bob, lp1, 50e18);
+        vm.warp(block.timestamp + 5 days + 1);
+        _settle(1, _leaf(1, claimId, bob, _amounts(0)));
+
+        bytes32 corrRoot = _leaf(1, claimId, bob, _amounts(0));
+        uint256[] memory pp = _pp();
+        vm.prank(admin);
+        vm.expectRevert(SharedBase.NotBetaMode.selector);
+        defi.adminCorrectSettlement(corrRoot, pp);
+    }
+
+    function test_EndBetaModeRejectedDuringActiveIncident() public {
+        _registerClaim(bob, lp1, 50e18);
+
+        vm.expectRevert(Registry.Frozen.selector);
+        vm.prank(admin); // admin == timelock in this harness
+        registry.endBetaMode();
+    }
+
+    /// @dev Full claim/settle/beta-correct/finalize state machine in phase order.
+    function test_PhaseOrderStateMachine() public {
+        uint256 claimId = _registerClaim(bob, lp1, 50e18);
+        uint256[] memory amounts = _amounts(0);
+        bytes32 root = _leaf(1, claimId, bob, amounts);
+        uint256[] memory pp = _pp();
+
+        // CLAIM phase: settle and finalize are both out of phase.
+        bytes memory sig = _teeSign(1, root, pp); // before expectRevert: helper reads incidents
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.OutsideSettlementPhase.selector, uint256(1)));
+        defi.settleIncident(root, pp, sig);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
+        defi.finalizeClaim(amounts, 0, 0, 50e18, new bytes32[](0));
+
+        // Window closes: join and cancel are now out of phase.
+        (, uint64 wEnd,,,,,,,,) = defi.incidents(1);
+        vm.warp(wEnd + 1);
+        lp1.mint(carol, 10e18);
+        vm.startPrank(carol);
+        lp1.approve(address(defi), 10e18);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.ClaimWindowClosed.selector, lp1, wEnd));
+        defi.joinClaim(IERC20(address(lp1)), 10e18, 0, 0, 0, "");
+        vm.stopPrank();
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.ClaimWindowClosed.selector, lp1, wEnd));
+        defi.cancelClaim();
+
+        // SETTLE phase: root lands; finalize still gated by the DISPUTE period.
+        _settle(1, root);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
+        defi.finalizeClaim(amounts, 0, 0, 50e18, new bytes32[](0));
+
+        // A beta correction restarts a fresh dispute clock, so finalize is gated again.
+        vm.prank(admin);
+        defi.adminCorrectSettlement(root, pp);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
+        defi.finalizeClaim(amounts, 0, 0, 50e18, new bytes32[](0));
+
+        // Once the corrected root's dispute period passes, finalization retires it.
+        vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1);
+        _finalize(claimId, amounts, 0);
+        assertEq(defi.activeIncidentId(), 0);
+    }
+
+    /// @dev Requested shares are escrowed, remain loss-exposed until their exit epoch, then
+    ///      become a fixed claim while both standard ERC-4626 exit doors stay disabled.
+    function test_ExitClaimHandlesLossWhileStandardDoorsStayDisabled() public {
+        uint256 shares = _stake(alice, 100e6);
+        vm.prank(alice);
+        pool.requestRedeem(shares / 2);
+
+        assertEq(pool.maxWithdraw(alice), 0);
+        assertEq(pool.maxRedeem(alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(SingleAssetCoverPool.WithdrawNotSupported.selector);
+        pool.withdraw(1e6, alice, alice);
+        vm.prank(alice);
+        vm.expectRevert(SingleAssetCoverPool.RedeemNotSupported.selector);
+        pool.redeem(1, alice, alice);
+
+        // Only the non-requested half remains in Alice's wallet and transferable.
+        vm.prank(alice);
+        pool.transfer(bob, shares - shares / 2);
+        vm.prank(address(defi));
+        pool.payClaim(carol, 30e6);
+
+        uint256 expectedAssets = pool.previewRedeem(shares / 2);
+        (, uint64 exitEpoch) = pool.exitRequests(alice);
+        vm.warp(exitEpoch);
+        pool.settleMaturedExitEpochs(type(uint256).max);
+        vm.prank(alice);
+        uint256 got = pool.completeRedeem(alice);
+        assertEq(got, expectedAssets);
+        assertEq(usdc.balanceOf(alice), expectedAssets);
+    }
+
+    function test_RewardsDurationBounded() public {
+        // 0 and anything past the 1-year cap are rejected; the cap itself is ok.
+        uint64 maxDur = pool.MAX_REWARDS_DURATION(); // read before prank/expectRevert
+        vm.startPrank(admin);
+        vm.expectRevert(SingleAssetCoverPool.InvalidRewardsDuration.selector);
+        pool.setRewardsDuration(0);
+        vm.expectRevert(SingleAssetCoverPool.InvalidRewardsDuration.selector);
+        pool.setRewardsDuration(maxDur + 1);
+        pool.setRewardsDuration(maxDur); // exactly the cap is fine
+        vm.stopPrank();
+        assertEq(pool.rewardsDuration(), maxDur);
+    }
+
+    function test_RequestedSharesAreEscrowedDuringCooldown() public {
+        uint256 shares = _stake(alice, 100e6);
+        vm.prank(alice);
+        pool.requestRedeem(shares / 2);
+
+        assertEq(pool.balanceOf(address(pool)), shares / 2);
+        assertEq(pool.balanceOf(alice), shares / 2);
+        vm.prank(alice);
+        pool.transfer(bob, shares / 2);
+        assertEq(pool.balanceOf(alice), 0);
+    }
+
+    function test_MaturedExitReceiptNeverExpires() public {
+        uint256 shares = _stake(alice, 100e6);
+        vm.prank(alice);
+        pool.requestRedeem(shares);
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(alice);
+        assertEq(pool.completeRedeem(alice), 100e6);
+    }
+
+    function test_FirstStakerAfterLongEmptyGapEarnsDeferredRewardsOverRemainingDuration() public {
+        vm.prank(admin);
+        pool.setRewardsDuration(30 days);
+        _stake(alice, 100e6);
+        _notify(70e18);
+
+        uint256 shares = pool.balanceOf(alice);
+        vm.prank(alice);
+        pool.requestRedeem(shares);
+        (, uint64 exitEpoch) = pool.exitRequests(alice);
+        vm.warp(exitEpoch);
+        vm.prank(alice);
+        pool.completeRedeem(alice);
+        assertEq(pool.totalSupply(), 0);
+
+        vm.warp(block.timestamp + 60 days);
+        _stake(carol, 1); // first new stake after stale finish
+        vm.prank(carol);
+        assertEq(pool.claimReward(), 0, "nothing to harvest instantly");
+
+        // Requesting stopped the only earning balance immediately, so the complete
+        // 30-day stream resumes for the next active staker.
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(carol);
+        uint256 streamed = pool.claimReward();
+        assertApproxEqAbs(streamed, 70e18, 1e6, "deferred rewards stream over full duration");
+    }
 }
 
 /// @dev A v2 implementation with a version() bump, to prove a beacon upgrade
 ///      re-points the proxy at new code while preserving storage.
 contract SingleAssetCoverPoolV2 is SingleAssetCoverPool {
+    function version() external pure returns (uint256) {
+        return 2;
+    }
+}
+
+contract DefiInsuranceV2 is DefiInsurance {
     function version() external pure returns (uint256) {
         return 2;
     }

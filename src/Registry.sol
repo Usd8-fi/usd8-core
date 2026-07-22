@@ -18,6 +18,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 ///         lazy, time-based lifecycle lives entirely in the product.
 interface IDefiInsurance {
     function activeIncidentId() external view returns (uint256);
+    function isInsuredToken(IERC20 token) external view returns (bool);
 }
 
 /// @notice Minimal view of a cover pool — its stake asset. {addPool}/{removePool}
@@ -142,8 +143,10 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         true at {initialize}, the timelock flips it off permanently via
     ///         {endBetaMode}, and there is deliberately no re-enable — so the
     ///         centralization can be removed before real volume but never secretly
-    ///         restored. It never relaxes the master powers (upgrades, role
-    ///         changes, strategy approval), which stay timelock-only always.
+    ///         restored. It also gates every UUPS upgrade: ending beta permanently
+    ///         disables Registry, USD8, Treasury, and DefiInsurance upgrades. The
+    ///         pool beacon is separate Ownable infrastructure; governance must
+    ///         renounce its ownership separately if pool upgrades should also end.
     bool public betaMode;
 
     /// @notice Governance-approved commitment to the exact Nitro PCR0/PCR1/PCR2
@@ -162,6 +165,20 @@ contract Registry is Initializable, UUPSUpgradeable {
     /// @notice Canonical USD8/USD composite price oracle.
     address public usd8PriceOracle;
 
+    /// @notice Chainlink-style USD feed used to value each registered pool asset
+    ///         during settlement. Historical reads are pinned to the incident.
+    mapping(IERC20 asset => address feed) public assetUsdFeed;
+
+    /// @notice Maximum accepted oracle answer age at the pinned settlement block.
+    ///         Global by design; governance admits only feeds whose heartbeat fits.
+    uint64 public maxOracleStaleness;
+
+    /// @notice Timelock-approved `(call target, token approval spender)` pairs
+    ///         that strategies may use for reward-token swaps. The addresses are
+    ///         separate because aggregators such as 0x can execute through one
+    ///         contract while pulling tokens through another.
+    mapping(address target => mapping(address spender => bool allowed)) public approvedSwapRoute;
+
     // ─────────────────────────── Errors / events ───────────────────────────
 
     error UnauthorizedTimelock(address caller);
@@ -171,10 +188,15 @@ contract Registry is Initializable, UUPSUpgradeable {
     error Frozen();
     error PoolExists(IERC20 asset);
     error PoolNotFound(IERC20 asset);
+    error TokenConflict(IERC20 token);
     error InvalidMaxCoverPoolPayoutBps(uint256 bps);
     error UnauthorizedModule(address caller);
     error CandidateIncidentActive(address module, uint256 incidentId);
     error InvalidTeePcrHash();
+    error NonIncreasingScoredRateBlock(IERC20 token, uint64 previousBlock, uint64 newBlock);
+    error InvalidOracleStaleness();
+    error InvalidAssetUsdFeed(address feed);
+    error UpgradesPermanentlyDisabled();
 
     event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
     event MaxCoverPoolPayoutBpsSet(uint256 oldBps, uint256 newBps);
@@ -192,6 +214,9 @@ contract Registry is Initializable, UUPSUpgradeable {
     event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
     event SavingsVaultSet(address indexed oldSavingsVault, address indexed newSavingsVault);
     event Usd8PriceOracleSet(address indexed oldOracle, address indexed newOracle);
+    event AssetUsdFeedSet(IERC20 indexed asset, address indexed oldFeed, address indexed newFeed);
+    event MaxOracleStalenessSet(uint64 oldStaleness, uint64 newStaleness);
+    event SwapRouteSet(address indexed target, address indexed spender, bool allowed);
 
     modifier onlyTimelock() {
         _requireTimelock(msg.sender);
@@ -229,20 +254,24 @@ contract Registry is Initializable, UUPSUpgradeable {
         emit AdminSet(_admin, true);
         maxCoverPoolPayoutBps = 5000; // 50% default; timelock-tunable
         emit MaxCoverPoolPayoutBpsSet(0, 5000);
+        maxOracleStaleness = 36 hours;
+        emit MaxOracleStalenessSet(0, 36 hours);
         betaMode = true; // launch in beta; timelock ends it via {endBetaMode}
     }
 
     /// @notice Permanently leave beta: admin shortcuts gated by
     ///         {SharedBase.onlyBetaMode} stop working and those operations
-    ///         become timelock-only. Timelock only, ONE-WAY (no re-enable).
-    function endBetaMode() external onlyTimelock {
+    ///         become timelock-only and every UUPS upgrade path is permanently
+    ///         disabled. Timelock only, ONE-WAY, and blocked during an incident.
+    function endBetaMode() external onlyTimelock notFrozen {
         betaMode = false;
         emit BetaModeEnded();
     }
 
-    /// @dev Only the timelock can upgrade the Registry — the same authority that
-    ///      gates USD8/Treasury upgrades. No admin upgrade path.
-    function _authorizeUpgrade(address) internal override onlyTimelock {}
+    /// @dev Only the timelock can upgrade the Registry, and only during beta.
+    function _authorizeUpgrade(address) internal view override onlyTimelock {
+        if (!betaMode) revert UpgradesPermanentlyDisabled();
+    }
 
     // ─────────────────────────── Governance (timelock) ───────────────────────────
 
@@ -259,6 +288,15 @@ contract Registry is Initializable, UUPSUpgradeable {
         if (account == address(0)) revert ZeroAddress();
         isAdmin[account] = allowed;
         emit AdminSet(account, allowed);
+    }
+
+    /// @notice Approve or revoke an aggregator execution-target / allowance-
+    ///         spender pair used by strategies. Timelock only; admins may execute
+    ///         swaps but cannot widen the contracts that receive calls or approvals.
+    function setSwapRoute(address target, address spender, bool allowed) external onlyTimelock {
+        if (target == address(0) || spender == address(0)) revert ZeroAddress();
+        approvedSwapRoute[target][spender] = allowed;
+        emit SwapRouteSet(target, spender, allowed);
     }
 
     /// @notice Set the exact enclave-code PCR commitment accepted by settlement.
@@ -301,18 +339,53 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     // ─────────────────────────── Topology (timelock; frozen-gated) ───────────────────────────
 
-    /// @notice Register a cover pool. Timelock only; blocked while frozen (the pool
-    ///         set must be stable for an incident's settlement). The asset is read
-    ///         from the pool itself ({SingleAssetCoverPool.asset}) so it can't be
-    ///         mismatched to the wrong pool.
-    function addPool(address pool) external onlyTimelock notFrozen {
-        if (pool == address(0)) revert ZeroAddress();
+    /// @notice Set the canonical USD feed for a pool asset. Timelock only and
+    ///         frozen during incidents so the open-block value is authoritative.
+    function setAssetUsdFeed(IERC20 asset, address newFeed) external onlyTimelock notFrozen {
+        if (address(asset) == address(0) || newFeed == address(0)) revert ZeroAddress();
+        _validateAssetUsdFeed(newFeed);
+        emit AssetUsdFeedSet(asset, assetUsdFeed[asset], newFeed);
+        assetUsdFeed[asset] = newFeed;
+    }
+
+    /// @notice Set the global maximum oracle age accepted by settlement. Timelock
+    ///         only and frozen during incidents; zero would make every feed unusable.
+    function setMaxOracleStaleness(uint64 newStaleness) external onlyTimelock notFrozen {
+        if (newStaleness == 0) revert InvalidOracleStaleness();
+        emit MaxOracleStalenessSet(maxOracleStaleness, newStaleness);
+        maxOracleStaleness = newStaleness;
+    }
+
+    /// @notice Register a cover pool and its canonical USD feed atomically. Timelock
+    ///         only; blocked while frozen. The asset is read from the pool itself.
+    function addPool(address pool, address usdFeed) external onlyTimelock notFrozen {
+        if (pool == address(0) || usdFeed == address(0)) revert ZeroAddress();
+        _validateAssetUsdFeed(usdFeed);
         IERC20 asset = ICoverPool(pool).asset();
         if (address(asset) == address(0)) revert ZeroAddress();
         if (coverPool[asset] != address(0)) revert PoolExists(asset);
+        if (defiInsurance != address(0) && IDefiInsurance(defiInsurance).isInsuredToken(asset)) {
+            revert TokenConflict(asset);
+        }
         coverPool[asset] = pool;
+        address oldFeed = assetUsdFeed[asset];
+        assetUsdFeed[asset] = usdFeed;
         coverPoolAssets.push(asset);
+        emit AssetUsdFeedSet(asset, oldFeed, usdFeed);
         emit PoolAdded(asset, pool);
+    }
+
+    function _validateAssetUsdFeed(address feed) internal view {
+        if (feed.code.length == 0) revert InvalidAssetUsdFeed(feed);
+        (bool decimalsOk, bytes memory decimalsData) = feed.staticcall(abi.encodeWithSignature("decimals()"));
+        if (!decimalsOk || decimalsData.length != 32 || abi.decode(decimalsData, (uint256)) > 77) {
+            revert InvalidAssetUsdFeed(feed);
+        }
+        (bool roundOk, bytes memory roundData) = feed.staticcall(abi.encodeWithSignature("latestRoundData()"));
+        if (!roundOk || roundData.length < 160) revert InvalidAssetUsdFeed(feed);
+        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) =
+            abi.decode(roundData, (uint80, int256, uint256, uint256, uint80));
+        if (answer <= 0 || updatedAt == 0 || answeredInRound < roundId) revert InvalidAssetUsdFeed(feed);
     }
 
     /// @notice Deregister a cover pool by its address (asset read from the pool).
@@ -322,6 +395,8 @@ contract Registry is Initializable, UUPSUpgradeable {
         IERC20 asset = ICoverPool(pool).asset();
         if (coverPool[asset] != pool) revert PoolNotFound(asset);
         coverPool[asset] = address(0);
+        address oldFeed = assetUsdFeed[asset];
+        delete assetUsdFeed[asset];
         uint256 n = coverPoolAssets.length;
         for (uint256 i = 0; i < n; i++) {
             if (coverPoolAssets[i] == asset) {
@@ -330,6 +405,7 @@ contract Registry is Initializable, UUPSUpgradeable {
                 break;
             }
         }
+        emit AssetUsdFeedSet(asset, oldFeed, address(0));
         emit PoolRemoved(asset);
     }
 
@@ -360,8 +436,8 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     /// @notice Set a token's insurance-score `rate` (score per whole token per block,
     ///         1e18-scaled), effective from THIS block onward. Timelock only; frozen
-    ///         while an incident is active. APPEND-ONLY: each call adds a segment to
-    ///         the token's rate timeline at {block.number}, so a rate change never
+    ///         while an incident is active. APPEND-ONLY: each call adds a segment at a
+    ///         block strictly after that token's latest point, so a rate change never
     ///         rewrites already-accrued score — the settler integrates each historical
     ///         segment at its own rate. The FIRST call for a token starts its scoring
     ///         (and registers it in {scoredTokenList} permanently); a call with
@@ -375,9 +451,17 @@ contract Registry is Initializable, UUPSUpgradeable {
     function setScoredToken(IERC20 token, uint128 rate) external onlyTimelock notFrozen {
         if (address(token) == address(0)) revert ZeroAddress();
         RatePoint[] storage pts = scoredRates[token];
-        if (pts.length == 0) scoredTokenList.push(token); // first appearance → enumerable set
-        pts.push(RatePoint({fromBlock: uint64(block.number), rate: rate}));
-        emit ScoredTokenSet(token, rate, uint64(block.number));
+        uint64 fromBlock = uint64(block.number);
+        if (pts.length != 0) {
+            uint64 previousBlock = pts[pts.length - 1].fromBlock;
+            if (fromBlock <= previousBlock) {
+                revert NonIncreasingScoredRateBlock(token, previousBlock, fromBlock);
+            }
+        } else {
+            scoredTokenList.push(token); // first appearance → enumerable set
+        }
+        pts.push(RatePoint({fromBlock: fromBlock, rate: rate}));
+        emit ScoredTokenSet(token, rate, fromBlock);
     }
 
     /// @notice Set the canonical booster NFT collection. Timelock only; frozen-gated.

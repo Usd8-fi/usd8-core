@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {VaultV2} from "vault-v2/src/VaultV2.sol";
 import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {USD8SavingsAdapter} from "../../src/adapters/USD8SavingsAdapter.sol";
 
@@ -129,9 +130,10 @@ contract USD8SavingsAdapterTest is Test {
     }
 
     function test_AdapterRejectsAllocationAboveSignedRange() public {
-        asset.mint(address(adapter), uint256(type(int256).max) + 1);
+        uint256 oversizedAllocation = uint256(type(int256).max) + 1;
+        asset.mint(address(adapter), oversizedAllocation);
         vm.prank(address(vault));
-        vm.expectRevert(USD8SavingsAdapter.AllocationTooLarge.selector);
+        vm.expectRevert(abi.encodeWithSelector(SafeCast.SafeCastOverflowedUintToInt.selector, oversizedAllocation));
         adapter.allocate("", 0, bytes4(0), address(this));
     }
 

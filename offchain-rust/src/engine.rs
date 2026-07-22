@@ -1,12 +1,12 @@
 use crate::chain::{
     BlockAnchor, ChainError, Incident, SettlementAnchors, assert_anchors_unchanged,
-    assert_contract_code_at, booster_nft_at, chain_id, decimals_at, earned_score_of,
-    finalized_settlement_anchors, incident_at, incident_config_at, incident_tee_pcr_hash_at,
-    max_cover_pool_payout_bps_at, min_balance_over, min_erc1155_balance_over, pool_state_at,
+    assert_contract_code_at, chain_id, decimals_at, defi_insurance_at, derive_bootstrap_config_at,
+    earned_score_of, finalized_settlement_anchors, incident_at, incident_config_at,
+    incident_tee_pcr_hash_at, max_cover_pool_payout_bps_at, min_balance_over, pool_state_at,
     pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
 };
 use crate::checkpoint::{CheckpointError, CheckpointScoreSource};
-use crate::config::{BootstrapConfig, ConfigError};
+use crate::config::{BootstrapConfig, ConfigError, LOG_RESULT_CAP, MAX_LOG_RANGE};
 use crate::rpc::{LogMetrics, Rpc, RpcMetrics};
 use crate::typed_data::{SettlementDigestInput, TypedDataError, settlement_digest};
 use crate::{
@@ -141,7 +141,6 @@ impl SettlementRun {
                     "grossEarnedScore": row.gross_earned_score.to_string(),
                     "earnedScore": row.earned_score.to_string(),
                     "scoreSpent": row.score_spent.to_string(),
-                    "boosterAmountUsed": row.booster_amount_used.to_string(),
                     "boostedScore": row.boosted_score.to_string(),
                     "payoutUsd": row.payout_usd.to_string(),
                     "amounts": row.amounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -192,6 +191,21 @@ impl SettlementRun {
             "schemaVersion": 1,
             "configVersion": config.version,
             "configHash": self.config_hash,
+            "bootstrapConfig": {
+                "version": config.version,
+                "chainId": config.chain_id.to_string(),
+                "registry": config.registry.to_string(),
+                "defiInsurance": config.defi_insurance.to_string(),
+                "boosterId": config.booster_id.to_string(),
+                "boosterBoostBps": config.booster_boost_bps.to_string(),
+                "assetUsdFeed": config.asset_usd_feed.iter().map(|(asset, feed)| {
+                    vec![asset.to_string(), feed.to_string()]
+                }).collect::<Vec<_>>(),
+                "maxOracleStaleness": config.max_oracle_staleness.to_string(),
+                "maxLogRange": crate::config::MAX_LOG_RANGE.to_string(),
+                "logResultCap": crate::config::LOG_RESULT_CAP.to_string(),
+                "anchorBlock": self.anchors.open.number.to_string(),
+            },
             "teePcrHash": self.tee_pcr_hash,
             "claimSetHash": self.output.claim_set_hash,
             "settlementInputHash": self.output.settlement_input_hash,
@@ -259,6 +273,36 @@ fn assert_incident_anchors(
         )));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn settlement_config_from_registry<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    incident_id: &BigUint,
+) -> Result<BootstrapConfig, EngineError> {
+    let actual_chain = chain_id(rpc).await?;
+    if actual_chain != crate::config::CHAIN_ID {
+        return Err(EngineError::Invariant(format!(
+            "wrong chain: RPC reports {actual_chain}, expected {}",
+            crate::config::CHAIN_ID
+        )));
+    }
+    let defi_insurance = defi_insurance_at(rpc, registry, None).await?;
+    if defi_insurance.is_zero() {
+        return Err(EngineError::Invariant(
+            "Registry defiInsurance is zero".to_owned(),
+        ));
+    }
+    let incident = incident_at(rpc, defi_insurance, incident_id.clone(), None).await?;
+    if incident.insured_token.is_zero() {
+        return Err(EngineError::Invariant(format!(
+            "incident {incident_id} does not exist"
+        )));
+    }
+    derive_bootstrap_config_at(rpc, registry, defi_insurance, incident.open_block)
+        .await
+        .map_err(EngineError::from)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -338,8 +382,8 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         &incident_id,
         provisional.open_block,
         anchors.window_end.number,
-        config.max_log_range,
-        config.log_result_cap as usize,
+        MAX_LOG_RANGE,
+        LOG_RESULT_CAP,
     )
     .await?;
     let window_incident = incident_at(
@@ -414,7 +458,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         .zip(topology.pool_addrs.iter().copied())
         .enumerate()
     {
-        let feed = config.asset_feed(&asset.to_string())?;
+        let feed = config.asset_feed(asset)?;
         assert_code(
             rpc.as_ref(),
             pool,
@@ -444,17 +488,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             asset_decimals: u32::from(state.asset_decimals),
         });
     }
-    let booster_collection =
-        booster_nft_at(rpc.as_ref(), config.registry, provisional.open_block).await?;
-    if !booster_collection.is_zero() {
-        assert_code(
-            rpc.as_ref(),
-            booster_collection,
-            "booster ERC1155",
-            provisional.open_block,
-        )
-        .await?;
-    }
+
     let max_payout_bps =
         max_cover_pool_payout_bps_at(rpc.as_ref(), config.registry, provisional.open_block).await?;
     if max_payout_bps > BigUint::from(10_000u16) {
@@ -485,8 +519,8 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
                 path,
                 config.chain_id,
                 &integrity_key,
-                config.max_log_range,
-                config.log_result_cap as usize,
+                MAX_LOG_RANGE,
+                LOG_RESULT_CAP,
             )
             .await?;
             (Some(source), Some(integrity_key))
@@ -529,8 +563,8 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             event.user,
             hold_from,
             provisional.reference_block,
-            config.max_log_range,
-            config.log_result_cap as usize,
+            MAX_LOG_RANGE,
+            LOG_RESULT_CAP,
         )
         .await?;
         log_metrics = merge_metrics(log_metrics, eligibility_metrics);
@@ -542,8 +576,8 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
                 &incident_config,
                 event.user,
                 provisional.reference_block,
-                config.max_log_range,
-                config.log_result_cap as usize,
+                MAX_LOG_RANGE,
+                LOG_RESULT_CAP,
             )
             .await?;
             log_metrics = merge_metrics(log_metrics, score_metrics);
@@ -556,24 +590,6 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             provisional.open_block,
         )
         .await?;
-        let booster_held =
-            if event.booster_amount == BigUint::from(0u8) || booster_collection.is_zero() {
-                BigUint::from(0u8)
-            } else {
-                let (held, booster_metrics) = min_erc1155_balance_over(
-                    rpc.as_ref(),
-                    booster_collection,
-                    event.user,
-                    &BigUint::from(config.booster_id),
-                    event.block_number,
-                    anchors.window_end.number,
-                    config.max_log_range,
-                    config.log_result_cap as usize,
-                )
-                .await?;
-                log_metrics = merge_metrics(log_metrics, booster_metrics);
-                held
-            };
         claims.push(ClaimInput {
             claim_id: event.claim_id.clone(),
             user: event.user,
@@ -583,7 +599,6 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             spent_score,
             score_to_spend: event.score_to_spend.clone(),
             booster_amount: event.booster_amount.clone(),
-            booster_held,
         });
     }
 

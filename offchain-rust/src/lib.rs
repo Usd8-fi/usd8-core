@@ -134,7 +134,6 @@ pub struct ClaimInput {
     pub spent_score: BigUint,
     pub score_to_spend: BigUint,
     pub booster_amount: BigUint,
-    pub booster_held: BigUint,
 }
 
 #[derive(Clone, Debug)]
@@ -159,7 +158,6 @@ pub struct SettledRow {
     pub gross_earned_score: BigUint,
     pub earned_score: BigUint,
     pub score_spent: BigUint,
-    pub booster_amount_used: BigUint,
     pub boosted_score: BigUint,
     pub payout_usd: BigUint,
     pub amounts: Vec<BigUint>,
@@ -171,7 +169,6 @@ pub struct MerkleRow {
     pub user: Address,
     pub amounts: Vec<BigUint>,
     pub score_spent: BigUint,
-    pub booster_amount_used: BigUint,
     pub boosted_score: BigUint,
     pub eligible_amount: BigUint,
 }
@@ -356,13 +353,12 @@ fn standard_leaf_hash(incident_id: &BigUint, row: &MerkleRow) -> Result<Hash, Ke
         .len()
         .checked_mul(32)
         .ok_or(KernelError::Uint256Overflow)?;
-    let mut encoded = Vec::with_capacity(256 + amount_bytes);
+    let mut encoded = Vec::with_capacity(224 + amount_bytes);
     encoded.extend_from_slice(&uint256_word(incident_id)?);
     encoded.extend_from_slice(&uint256_word(&row.claim_id)?);
     encoded.extend_from_slice(&row.user.abi_word());
-    encoded.extend_from_slice(&usize_word(256));
+    encoded.extend_from_slice(&usize_word(224));
     encoded.extend_from_slice(&uint256_word(&row.score_spent)?);
-    encoded.extend_from_slice(&uint256_word(&row.booster_amount_used)?);
     encoded.extend_from_slice(&uint256_word(&row.boosted_score)?);
     encoded.extend_from_slice(&uint256_word(&row.eligible_amount)?);
     encoded.extend_from_slice(&usize_word(row.amounts.len()));
@@ -498,7 +494,7 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
         } else {
             BigUint::zero()
         };
-        let boost = claim.booster_amount.clone().min(claim.booster_held.clone());
+        let boost = claim.booster_amount.clone();
         let score_spent = claim.score_to_spend.clone().min(unspent.clone());
         let boosted_score = (&score_spent * (&bps + &boost * &boost_bps)) / &bps;
         rows.push(SettledRow {
@@ -510,7 +506,6 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
             gross_earned_score: claim.gross_earned_score.clone(),
             earned_score: unspent,
             score_spent,
-            booster_amount_used: boost,
             boosted_score,
             payout_usd: BigUint::zero(),
             amounts: Vec::new(),
@@ -619,7 +614,6 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
                 user: row.user,
                 amounts: row.amounts.clone(),
                 score_spent: row.score_spent.clone(),
-                booster_amount_used: row.booster_amount_used.clone(),
                 boosted_score: row.boosted_score.clone(),
                 eligible_amount: row.eligible_amount.clone(),
             })

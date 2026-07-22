@@ -415,6 +415,110 @@ where
     })
 }
 
+pub async fn defi_insurance_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    block_number: Option<u64>,
+) -> Result<Address, ChainError> {
+    Ok(from_alloy(
+        contract_call(
+            rpc,
+            registry,
+            &IRegistry::defiInsuranceCall {},
+            block_number,
+        )
+        .await?,
+    ))
+}
+
+pub async fn derive_bootstrap_config_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    expected_defi_insurance: Address,
+    block_number: u64,
+) -> Result<BootstrapConfig, ChainError> {
+    let defi_insurance = defi_insurance_at(rpc, registry, Some(block_number)).await?;
+    if defi_insurance != expected_defi_insurance {
+        return Err(ChainError::InvalidConfiguration(format!(
+            "Registry defiInsurance changed at block {block_number}: expected {expected_defi_insurance}, got {defi_insurance}"
+        )));
+    }
+    let reverse_registry = from_alloy(
+        contract_call(
+            rpc,
+            defi_insurance,
+            &IDefiInsurance::registryCall {},
+            Some(block_number),
+        )
+        .await?,
+    );
+    if reverse_registry != registry {
+        return Err(ChainError::InvalidConfiguration(format!(
+            "DefiInsurance registry mismatch: expected {registry}, got {reverse_registry}"
+        )));
+    }
+    let booster_id = u256_to_u64(
+        contract_call(
+            rpc,
+            defi_insurance,
+            &IDefiInsurance::BOOSTER_IDCall {},
+            Some(block_number),
+        )
+        .await?,
+        "BOOSTER_ID",
+    )?;
+    let booster_boost_bps = u256_to_u64(
+        contract_call(
+            rpc,
+            defi_insurance,
+            &IDefiInsurance::BOOSTER_BOOST_BPSCall {},
+            Some(block_number),
+        )
+        .await?,
+        "BOOSTER_BOOST_BPS",
+    )?;
+    let assets = contract_call(
+        rpc,
+        registry,
+        &IRegistry::coverPoolsCall {},
+        Some(block_number),
+    )
+    .await?
+    .assets;
+    let mut feeds = BTreeMap::new();
+    for asset in assets {
+        let asset = from_alloy(asset);
+        let feed = from_alloy(
+            contract_call(
+                rpc,
+                registry,
+                &IRegistry::assetUsdFeedCall {
+                    asset: to_alloy(asset),
+                },
+                Some(block_number),
+            )
+            .await?,
+        );
+        feeds.insert(asset, feed);
+    }
+    let max_oracle_staleness = contract_call(
+        rpc,
+        registry,
+        &IRegistry::maxOracleStalenessCall {},
+        Some(block_number),
+    )
+    .await?;
+    BootstrapConfig::derived(
+        registry,
+        defi_insurance,
+        booster_id,
+        booster_boost_bps,
+        feeds,
+        max_oracle_staleness,
+    )
+    .map_err(|error| ChainError::InvalidConfiguration(error.to_string()))
+}
+
 pub async fn incident_at<R: Rpc + ?Sized>(
     rpc: &R,
     defi_insurance: Address,
@@ -839,7 +943,7 @@ pub async fn pool_state_at<R: Rpc + ?Sized>(
         .await?,
     );
     let feed = config
-        .asset_feed(&asset.to_string())
+        .asset_feed(asset)
         .map_err(|_| ChainError::InvalidPoolTopology(format!("missing USD feed for {asset}")))?;
     Ok(PoolState {
         asset,

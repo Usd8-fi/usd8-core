@@ -6,7 +6,7 @@ from pathlib import Path
 BENCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCH))
 
-from collect_real_history import NoRedirectHandler, RpcClient  # noqa: E402
+from collect_real_history import NoRedirectHandler, RpcClient, is_transient_rpc_error  # noqa: E402
 from real_history import (  # noqa: E402
     RpcError,
     TokenHistory,
@@ -42,6 +42,10 @@ class RpcCredentialBoundaryTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint):
                 with self.assertRaisesRegex(ValueError, "refusing to send DRPC_KEY"):
                     RpcClient(endpoint, "test-key")
+
+    def test_provider_routing_error_is_retried(self) -> None:
+        self.assertTrue(is_transient_rpc_error(200, 12))
+        self.assertFalse(is_transient_rpc_error(200, -32602))
 
 
 class RealHistoryMathTests(unittest.TestCase):

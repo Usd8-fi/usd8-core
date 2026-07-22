@@ -7,8 +7,8 @@
 // the SAME payload, abi.encode'd by Foundry:
 //
 //   (uint256 incidentId, uint256[] claimIds, address[] users,
-//    uint256[][] amounts, uint256[] scoreSpents, uint256[] boosterAmountsUsed,
-//    uint256[] boostedScores, uint256[] eligibles)
+//    uint256[][] amounts, uint256[] scoreSpents, uint256[] boostedScores,
+//    uint256[] eligibles)
 //
 // where amounts[i] aligns to the registered pool list. Output is abi-encoded
 // hex so Foundry can decode it with abi.decode. Commands:
@@ -46,7 +46,7 @@ function emit(type: string, value: unknown): void {
 }
 
 if (cmd === "root" || cmd === "proof") {
-  const [incidentId, ids, users, amounts, spents, boosterAmountsUsed, boosteds, eligibles] = decodeAbiParameters(
+  const [incidentId, ids, users, amounts, spents, boosteds, eligibles] = decodeAbiParameters(
     [
       { type: "uint256" },
       { type: "uint256[]" },
@@ -55,16 +55,14 @@ if (cmd === "root" || cmd === "proof") {
       { type: "uint256[]" },
       { type: "uint256[]" },
       { type: "uint256[]" },
-      { type: "uint256[]" },
     ],
     hex
-  ) as [bigint, bigint[], `0x${string}`[], bigint[][], bigint[], bigint[], bigint[], bigint[]];
+  ) as [bigint, bigint[], `0x${string}`[], bigint[][], bigint[], bigint[], bigint[]];
   const rows = ids.map((id, i) => ({
     claimId: id,
     user: users[i],
     amounts: [...amounts[i]],
     scoreSpent: spents[i],
-    boosterAmountUsed: boosterAmountsUsed[i],
     boostedScore: boosteds[i],
     eligibleAmount: eligibles[i],
   }));

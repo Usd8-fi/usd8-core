@@ -8,13 +8,13 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+use usd8_settlement::Address;
 use usd8_settlement::artifact::{verify_run, write_atomic_json};
-use usd8_settlement::config::BootstrapConfig;
-use usd8_settlement::engine::{ScoreMode, build_settlement};
+use usd8_settlement::engine::{ScoreMode, build_settlement, settlement_config_from_registry};
 use usd8_settlement::rpc::HttpRpc;
 use usd8_settlement::{allocate, parse_json, serialize_output};
 
-const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement verify  <incidentId> --config <file> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_CONFIG, ETH_RPC_URL, DRPC_KEY, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
+const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --registry <address> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --registry <address> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement verify  <incidentId> --registry <address> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_REGISTRY, ETH_RPC_URL, DRPC_KEY, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
 
 #[derive(Debug)]
 enum CliError {
@@ -109,7 +109,7 @@ fn parse_incident(value: &str) -> Result<BigUint, String> {
 
 #[derive(Default)]
 struct ProductionArgs {
-    config: Option<PathBuf>,
+    registry: Option<String>,
     rpc_url: Option<String>,
     checkpoint: Option<PathBuf>,
     output: Option<PathBuf>,
@@ -139,9 +139,9 @@ fn parse_production_args(args: &[String]) -> Result<ProductionArgs, String> {
     let mut index = 0usize;
     while index < args.len() {
         match args[index].as_str() {
-            "--config" => {
-                let value = PathBuf::from(option_value(args, &mut index, "--config")?);
-                set_once(&mut parsed.config, value, "--config")?;
+            "--registry" => {
+                let value = option_value(args, &mut index, "--registry")?;
+                set_once(&mut parsed.registry, value, "--registry")?;
             }
             "--rpc-url" => {
                 let value = option_value(args, &mut index, "--rpc-url")?;
@@ -286,11 +286,9 @@ fn aliases(left: &[PathBuf], right: &[PathBuf]) -> bool {
 }
 
 fn validate_production_paths(
-    config: &Path,
     checkpoint: Option<&Path>,
     output: Option<&Path>,
 ) -> Result<(), String> {
-    let config_ids = path_identities(config)?;
     let checkpoint_ids = checkpoint.map(path_identities).transpose()?;
     let lock_ids = checkpoint
         .map(lock_path)
@@ -299,24 +297,6 @@ fn validate_production_paths(
         .transpose()?;
     let output_ids = output.map(path_identities).transpose()?;
 
-    if checkpoint_ids
-        .as_deref()
-        .is_some_and(|ids| aliases(&config_ids, ids))
-    {
-        return Err("checkpoint path collides with config path".to_owned());
-    }
-    if lock_ids
-        .as_deref()
-        .is_some_and(|ids| aliases(&config_ids, ids))
-    {
-        return Err("checkpoint lock path collides with config path".to_owned());
-    }
-    if output_ids
-        .as_deref()
-        .is_some_and(|ids| aliases(&config_ids, ids))
-    {
-        return Err("output path collides with config path".to_owned());
-    }
     if output_ids.as_deref().is_some_and(|output_ids| {
         checkpoint_ids
             .as_deref()
@@ -349,18 +329,19 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
     let incident_text = args.first().ok_or_else(|| usage("missing incidentId"))?;
     let incident_id = parse_incident(incident_text).map_err(usage)?;
     let options = parse_production_args(&args[1..]).map_err(usage)?;
-    let config_path = options
-        .config
-        .or_else(|| environment_path("USD8_CONFIG"))
-        .ok_or_else(|| usage("missing --config or USD8_CONFIG"))?;
-    let config_json = fs::read_to_string(&config_path).map_err(|error| {
-        fatal(format!(
-            "failed to read config {}: {error}",
-            config_path.display()
-        ))
-    })?;
-    let config =
-        BootstrapConfig::from_json(&config_json).map_err(|error| fatal(error.to_string()))?;
+    let registry_text = options
+        .registry
+        .or_else(|| {
+            env::var("USD8_REGISTRY")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| usage("missing --registry or USD8_REGISTRY"))?;
+    let registry = Address::from_str(&registry_text)
+        .map_err(|_| usage(format!("invalid Registry address: {registry_text}")))?;
+    if registry.is_zero() {
+        return Err(usage("Registry address is zero"));
+    }
     let output_path = options.output.clone();
     let checkpoint_path = if options.raw_score {
         None
@@ -370,12 +351,7 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
             .clone()
             .or_else(|| environment_path("SCORE_CHECKPOINT_PATH"))
     };
-    validate_production_paths(
-        &config_path,
-        checkpoint_path.as_deref(),
-        output_path.as_deref(),
-    )
-    .map_err(usage)?;
+    validate_production_paths(checkpoint_path.as_deref(), output_path.as_deref()).map_err(usage)?;
     let rpc_url = options
         .rpc_url
         .or_else(|| {
@@ -394,6 +370,11 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
             .ok()
             .filter(|value| !value.is_empty())
     };
+    if mode == "attested-compute" && drpc_key.is_none() {
+        return Err(fatal(
+            "attested-compute requires DRPC_KEY for the approved dRPC endpoint",
+        ));
+    }
     let rpc = Arc::new(
         HttpRpc::new(
             &rpc_url,
@@ -417,6 +398,9 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
     } else {
         ScoreMode::Raw
     };
+    let config = settlement_config_from_registry(rpc.as_ref(), registry, &incident_id)
+        .await
+        .map_err(|error| fatal(error.to_string()))?;
     let run = build_settlement(rpc, &config, incident_id, score_mode)
         .await
         .map_err(|error| fatal(error.to_string()))?;
@@ -568,27 +552,12 @@ mod tests {
             NEXT_PATH.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(directory.join("sub")).unwrap();
-        let config = directory.join("config.json");
         let checkpoint = directory.join("score.json");
-        fs::write(&config, b"{}").unwrap();
 
-        assert!(validate_production_paths(&config, Some(&config), None).is_err());
-        assert!(validate_production_paths(&config, None, Some(&config)).is_err());
+        assert!(validate_production_paths(Some(&checkpoint), Some(&checkpoint)).is_err());
         assert!(
-            validate_production_paths(
-                &config,
-                Some(&checkpoint),
-                Some(&directory.join("score.json.lock")),
-            )
-            .is_err()
-        );
-        assert!(
-            validate_production_paths(
-                &config,
-                None,
-                Some(&directory.join("sub").join("..").join("config.json")),
-            )
-            .is_err()
+            validate_production_paths(Some(&checkpoint), Some(&directory.join("score.json.lock")),)
+                .is_err()
         );
         fs::remove_dir_all(directory).unwrap();
     }
