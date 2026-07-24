@@ -32,6 +32,12 @@ sol! {
             uint64 holdingMarginBlocks,
             uint64 sampleStepBlocks
         );
+        function nextIncidentId() external view returns (uint256);
+        function isTeeSigner(address signer) external view returns (bool);
+        function MAX_REFERENCE_BLOCK_AGE() external view returns (uint64);
+        function SUBMIT_DEADLINE() external view returns (uint64);
+        function DISPUTE_PERIOD() external view returns (uint64);
+        function FINALIZE_WINDOW() external view returns (uint64);
         function registry() external view returns (address);
         function BOOSTER_ID() external view returns (uint256);
         function BOOSTER_BOOST_BPS() external view returns (uint256);
@@ -63,6 +69,7 @@ sol! {
         function defiInsurance() external view returns (address);
         function assetUsdFeed(address asset) external view returns (address);
         function maxOracleStaleness() external view returns (uint64);
+        function teePcrHash() external view returns (bytes32);
     }
 
     interface ISingleAssetCoverPool {

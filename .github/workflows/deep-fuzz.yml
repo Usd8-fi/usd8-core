@@ -1,0 +1,111 @@
+name: Deep fuzz
+
+permissions: {}
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  foundry-deep:
+    name: Foundry deep campaign
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.5.1
+
+      - name: Run stateless deep fuzzing
+        env:
+          FOUNDRY_PROFILE: deep
+        run: forge test --match-test "testFuzz_.*" -vvv
+
+      - name: Run stateful deep invariants
+        env:
+          FOUNDRY_PROFILE: deep
+        run: forge test --match-contract ".*InvariantTest" -vvv
+
+      - name: Upload minimized Foundry failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: foundry-deep-failures
+          path: |
+            cache/fuzz
+            cache/invariant
+          if-no-files-found: ignore
+          retention-days: 30
+
+  echidna:
+    name: Echidna ${{ matrix.campaign }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - campaign: treasury
+            contract: TreasuryInvariantTest
+            source: test/invariant/TreasuryInvariant.t.sol
+          - campaign: cover-pool
+            contract: SingleAssetCoverPoolInvariantTest
+            source: test/Invariants.t.sol
+          - campaign: insurance-claims
+            contract: InsuranceClaimInvariantTest
+            source: test/invariant/InsuranceClaimInvariant.t.sol
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.5.1
+
+      - name: Build Foundry artifacts for Echidna
+        run: forge build "${{ matrix.source }}" --build-info
+
+      - name: Prepare artifact directory
+        run: mkdir -p "artifacts/echidna/${{ matrix.campaign }}"
+
+      - name: Restore prior Echidna corpus
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: artifacts/echidna/${{ matrix.campaign }}/corpus
+          key: echidna-${{ matrix.campaign }}-${{ github.run_id }}
+          restore-keys: |
+            echidna-${{ matrix.campaign }}-
+
+      - name: Run coverage-guided Echidna campaign
+        uses: crytic/echidna-action@f7e374e42bf7131f7307a92f5549ed6b2fd17c9d # v2.0.2
+        with:
+          files: .
+          contract: ${{ matrix.contract }}
+          config: echidna.yaml
+          crytic-args: --ignore-compile
+          corpus-dir: artifacts/echidna/${{ matrix.campaign }}/corpus
+          output-file: artifacts/echidna/${{ matrix.campaign }}/echidna.log
+          echidna-version: 2.3.2
+
+      - name: Upload Echidna corpus and coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: echidna-${{ matrix.campaign }}
+          path: artifacts/echidna
+          if-no-files-found: warn
+          retention-days: 30

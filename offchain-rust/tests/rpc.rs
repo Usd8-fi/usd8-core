@@ -90,6 +90,24 @@ fn drpc_key_is_restricted_to_exact_trusted_https_endpoint() {
             .to_string()
             .contains("retry policy")
     );
+    assert!(
+        HttpRpc::new_with_https_proxy(
+            "https://lb.drpc.org/ogrpc?network=ethereum",
+            Some("test-key"),
+            1_000,
+            "http://127.0.0.1:8080",
+        )
+        .is_ok()
+    );
+    assert!(
+        HttpRpc::new_with_https_proxy(
+            "https://lb.drpc.org/ogrpc?network=ethereum",
+            Some("test-key"),
+            1_000,
+            "not a proxy URL",
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

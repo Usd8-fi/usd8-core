@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {Registry} from "../../src/Registry.sol";
@@ -40,7 +41,11 @@ contract USD8SavingsBootstrapTest is Test {
         usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
         registry.setUsd8(address(usd8));
         treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
+            address(
+                new ERC1967Proxy(
+                    address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry, IERC20(USDC_ADDR)))
+                )
+            )
         );
         registry.setTreasury(address(treasury));
         vaultFactory = new VaultV2Factory();

@@ -1,0 +1,115 @@
+[package]
+name = "usd8-tee-job-api"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.1"
+publish = false
+license = "BUSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+sepolia = ["usd8-settlement/sepolia"]
+lambda = [
+  "dep:aws-config",
+  "dep:aws-sdk-ec2",
+  "dep:aws-sdk-s3",
+  "dep:aws-types",
+  "dep:base64",
+  "dep:lambda_http",
+]
+worker = [
+  "dep:aws-config",
+  "dep:aws-credential-types",
+  "dep:aws-nitro-enclaves-nsm-api",
+  "dep:aws-sdk-kms",
+  "dep:aws-smithy-http-client",
+  "dep:aws-types",
+  "dep:base64",
+  "dep:libc",
+  "dep:rand_core",
+  "dep:rsa",
+  "dep:serde_bytes",
+  "dep:tokio-vsock",
+  "dep:usd8-settlement",
+  "dep:zeroize",
+]
+parent = [
+  "dep:aws-config",
+  "dep:aws-credential-types",
+  "dep:aws-types",
+  "dep:base64",
+  "dep:libc",
+  "dep:reqwest",
+  "dep:tokio-vsock",
+]
+janitor = [
+  "dep:aws-config",
+  "dep:aws-sdk-ec2",
+  "dep:aws-types",
+  "dep:lambda_runtime",
+]
+
+[[bin]]
+name = "usd8-tee-job-lambda"
+path = "src/bin/lambda.rs"
+required-features = ["lambda"]
+
+[[bin]]
+name = "usd8-tee-enclave"
+path = "src/bin/enclave.rs"
+required-features = ["worker"]
+
+[[bin]]
+name = "usd8-tee-parent"
+path = "src/bin/parent.rs"
+required-features = ["parent"]
+
+[[bin]]
+name = "usd8-tee-janitor"
+path = "src/bin/janitor.rs"
+required-features = ["janitor"]
+
+[dependencies]
+async-trait = "=0.1.89"
+aws-config = { version = "=1.10.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-credential-types = { version = "=1.3.0", optional = true }
+aws-sdk-ec2 = { version = "=1.241.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-sdk-kms = { version = "=1.113.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-sdk-s3 = { version = "=1.139.0", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio"], optional = true }
+aws-smithy-http-client = { version = "=1.2.0", features = ["rustls-aws-lc"], optional = true }
+aws-types = { version = "=1.5.0", optional = true }
+base64 = { version = "=0.22.1", optional = true }
+hex = "=0.4.3"
+hmac = "=0.12.1"
+k256 = { version = "=0.13.4", features = ["ecdsa"] }
+lambda_http = { version = "=1.3.0", optional = true }
+lambda_runtime = { version = "=1.3.0", optional = true }
+libc = { version = "=0.2.189", optional = true }
+rand_core = { version = "=0.6.4", features = ["getrandom"], optional = true }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"], optional = true }
+rsa = { version = "=0.9.10", features = ["sha2"], optional = true }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+serde_bytes = { version = "=0.11.19", optional = true }
+sha2 = "=0.10.9"
+sha3 = "=0.10.8"
+thiserror = "=2.0.18"
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
+tokio-vsock = { version = "=0.7.2", optional = true }
+usd8-settlement = { path = "..", optional = true }
+zeroize = { version = "=1.9.0", features = ["derive"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aws-nitro-enclaves-nsm-api = { version = "=0.5.2", optional = true }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "rt-multi-thread"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

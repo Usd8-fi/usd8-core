@@ -32,6 +32,8 @@ import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {USD8SavingsAdapter} from "../src/adapters/USD8SavingsAdapter.sol";
 
 contract TreasuryTest is Test {
+    bytes32 internal constant TREASURY_STORAGE = 0x0d48627c939e6496875931395c567691a7923a2c61d5f538a81c0feb79245c00;
+
     Registry registry;
     USD8 usd8;
     Treasury treasuryImpl;
@@ -67,8 +69,7 @@ contract TreasuryTest is Test {
     event ETHSwept(address indexed to, uint256 amount);
 
     function setUp() public {
-        // Etch a controllable mock at the hardcoded USDC mainnet address so
-        // the constant in Treasury resolves to a token we can mint with.
+        // Etch a controllable mock at the configured mainnet USDC address.
         MockERC20 template = new MockERC20("USD Coin", "USDC", 6);
         vm.etch(USDC_ADDR, address(template).code);
         usdc = MockERC20(USDC_ADDR);
@@ -83,8 +84,13 @@ contract TreasuryTest is Test {
         vm.prank(timelock);
         registry.setUsd8(address(usd8));
         treasuryImpl = new Treasury();
-        treasury =
-            Treasury(address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (registry)))));
+        treasury = Treasury(
+            address(
+                new ERC1967Proxy(
+                    address(treasuryImpl), abi.encodeCall(Treasury.initialize, (registry, IERC20(USDC_ADDR)))
+                )
+            )
+        );
         vm.prank(timelock);
         registry.setTreasury(address(treasury));
 
@@ -135,19 +141,24 @@ contract TreasuryTest is Test {
 
     function test_ImplementationDisabled() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        treasuryImpl.initialize(registry);
+        treasuryImpl.initialize(registry, IERC20(USDC_ADDR));
     }
 
     function test_InitializeOnlyOnce() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        treasury.initialize(registry);
+        treasury.initialize(registry, IERC20(USDC_ADDR));
     }
 
     function test_InitializeAcceptsTrustedNonContractUsd8() public {
         vm.prank(timelock);
         registry.setUsd8(alice);
-        Treasury candidate =
-            Treasury(address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (registry)))));
+        Treasury candidate = Treasury(
+            address(
+                new ERC1967Proxy(
+                    address(treasuryImpl), abi.encodeCall(Treasury.initialize, (registry, IERC20(USDC_ADDR)))
+                )
+            )
+        );
 
         assertEq(address(candidate.usd8()), alice);
     }
@@ -160,7 +171,11 @@ contract TreasuryTest is Test {
         otherRegistry.setUsd8(address(usd8));
 
         Treasury candidate = Treasury(
-            address(new ERC1967Proxy(address(treasuryImpl), abi.encodeCall(Treasury.initialize, (otherRegistry))))
+            address(
+                new ERC1967Proxy(
+                    address(treasuryImpl), abi.encodeCall(Treasury.initialize, (otherRegistry, IERC20(USDC_ADDR)))
+                )
+            )
         );
 
         assertEq(address(candidate.registry()), address(otherRegistry));
@@ -302,10 +317,13 @@ contract TreasuryTest is Test {
     }
 
     function _newTreasury() internal returns (Treasury) {
-        return
-            Treasury(
-                address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
-            );
+        return Treasury(
+            address(
+                new ERC1967Proxy(
+                    address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry, IERC20(USDC_ADDR)))
+                )
+            )
+        );
     }
 
     /// @dev Treasury rotation is a timelock trust assumption. USD8 transfers
@@ -375,6 +393,7 @@ contract TreasuryTest is Test {
         assertEq(TreasuryV2(address(treasury)).version(), 2);
         assertEq(address(treasury.usd8()), address(usd8));
         assertEq(address(treasury.registry()), address(registry));
+        assertEq(address(treasury.USDC()), USDC_ADDR);
         assertEq(treasury.strategiesLength(), 1);
         assertEq(address(treasury.strategies(0)), address(strat));
         assertEq(usdc.balanceOf(address(treasury)), 60e6);
@@ -398,6 +417,42 @@ contract TreasuryTest is Test {
         vm.stopPrank();
         assertEq(usd8.totalSupply(), 100e18);
         assertEq(treasury.getReserveBalance(), 100e6);
+    }
+
+    function test_UpgradeMigratesLegacyConstantReserveAtomically() public {
+        MockStrategy strat = new MockStrategy(usdc);
+        vm.startPrank(timelock);
+        treasury.addStrategy(strat, 0);
+        treasury.setProfitReceiver(recipient, 7, Treasury.RevenueDistributionMode.DirectTransfer);
+        vm.stopPrank();
+
+        // Legacy V1 consumed initializer version 1 but had no ERC-7201 reserve slot:
+        // its mainnet USDC getter was a compile-time constant.
+        vm.store(address(treasury), TREASURY_STORAGE, bytes32(0));
+        Treasury replacement = new Treasury();
+
+        vm.prank(timelock);
+        treasury.upgradeToAndCall(
+            address(replacement), abi.encodeWithSignature("migrateReserveAsset(address)", USDC_ADDR)
+        );
+
+        assertEq(address(treasury.USDC()), USDC_ADDR);
+        assertEq(treasury.strategiesLength(), 1);
+        assertEq(address(treasury.strategies(0)), address(strat));
+        assertEq(treasury.profitReceiversLength(), 1);
+        (address receiver, uint256 weight,) = treasury.profitReceivers(0);
+        assertEq(receiver, recipient);
+        assertEq(weight, 7);
+    }
+
+    function test_FreshProxyCannotRemigrateReserveAsset() public {
+        vm.prank(timelock);
+        (bool success, bytes memory returndata) =
+            address(treasury).call(abi.encodeWithSignature("migrateReserveAsset(address)", USDC_ADDR));
+
+        assertFalse(success);
+        assertEq(bytes4(returndata), bytes4(keccak256("ReserveAssetAlreadyConfigured(address)")));
+        assertEq(address(treasury.USDC()), USDC_ADDR);
     }
 
     // -- Revenue harvesting & routing -------------------------------------
@@ -461,6 +516,12 @@ contract TreasuryTest is Test {
         assertEq(w2, 5);
         assertEq(uint256(m2), uint256(Treasury.RevenueDistributionMode.ReceiveProfitDistribution));
         vm.stopPrank();
+    }
+
+    function test_SetProfitReceiverRejectsTreasuryItself() public {
+        vm.expectRevert(abi.encodeWithSelector(Treasury.InvalidProfitReceiver.selector, address(treasury)));
+        vm.prank(admin);
+        treasury.setProfitReceiver(address(treasury), 1, Treasury.RevenueDistributionMode.DirectTransfer);
     }
 
     function test_HarvestAndDistributeSplitsProRata() public {

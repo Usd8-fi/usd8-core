@@ -83,7 +83,7 @@ impl Rpc for EngineRpc {
     async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.calls.lock().unwrap().push(method.to_owned());
         match method {
-            "eth_chainId" => Ok(json!("0x1")),
+            "eth_chainId" => Ok(json!(format!("0x{:x}", usd8_settlement::config::CHAIN_ID))),
             "eth_getCode" => Ok(json!("0x01")),
             "eth_getBlockByNumber" => {
                 if params[0] == "finalized" {
@@ -435,6 +435,10 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     verify_run(&run, &config).unwrap();
 
     let artifact = run.artifact(&config, true);
+    let compact = run.artifact(&config, false);
+    assert!(compact["rows"][0].get("proof").is_none());
+    assert_eq!(compact["root"], artifact["root"]);
+    assert_eq!(compact["digest"], artifact["digest"]);
     let path = artifact_path();
     write_atomic_json(&path, &artifact).unwrap();
     let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -459,6 +463,43 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     assert_eq!(persisted["rows"][0]["amounts"][0], "80");
     assert!(persisted["rows"][0]["proof"].is_array());
     fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn ephemeral_bulk_matches_raw_full_engine_and_records_safe_provenance() {
+    let (raw_rpc, config) = fixture();
+    let (bulk_rpc, _) = fixture();
+    let raw = build_settlement(
+        Arc::new(raw_rpc),
+        &config,
+        BigUint::from(7u8),
+        ScoreMode::Raw,
+    )
+    .await
+    .unwrap();
+    let bulk = build_settlement(
+        Arc::new(bulk_rpc),
+        &config,
+        BigUint::from(7u8),
+        ScoreMode::Bulk,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(bulk.output.rows, raw.output.rows);
+    assert_eq!(
+        bulk.output.settlement_input_hash,
+        raw.output.settlement_input_hash
+    );
+    assert_eq!(bulk.output.root, raw.output.root);
+    assert_eq!(bulk.output.pool_payouts, raw.output.pool_payouts);
+    assert_eq!(bulk.digest, raw.digest);
+    let artifact = bulk.artifact(&config, false);
+    let source = &artifact["scoreSource"];
+    assert_eq!(source["kind"], "ephemeral-bulk-rpc");
+    assert_eq!(source["trackedAccounts"], 1);
+    assert!(source.get("path").is_none());
+    assert!(source.get("authentication").is_none());
 }
 
 #[tokio::test]

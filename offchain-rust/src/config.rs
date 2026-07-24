@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const CONFIG_VERSION: &str = "5.0.0";
+#[cfg(not(feature = "sepolia"))]
 pub const CHAIN_ID: u64 = 1;
+#[cfg(feature = "sepolia")]
+pub const CHAIN_ID: u64 = 11_155_111;
 pub const MAX_LOG_RANGE: u64 = 1_000;
 pub const LOG_RESULT_CAP: usize = 1_000;
 pub const MAX_LOG_RESULT_CAP: u64 = LOG_RESULT_CAP as u64;

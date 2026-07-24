@@ -1,0 +1,8 @@
+FROM amazonlinux@sha256:0c74e9fbba754003cfa179fd5cc65be7790d7248443276948704b8a858b298e5
+ARG EXPECTED_SIGNER
+RUN test -n "$EXPECTED_SIGNER"
+COPY usd8-tee-enclave /opt/usd8/
+RUN chmod 0555 /opt/usd8/usd8-tee-enclave
+ENV USD8_EXPECTED_SIGNER="$EXPECTED_SIGNER"
+USER 0
+ENTRYPOINT ["/opt/usd8/usd8-tee-enclave"]

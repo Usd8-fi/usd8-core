@@ -54,10 +54,15 @@ contract USD8Test is Test {
     }
 
     function _deployBoundTreasury() internal returns (Treasury) {
-        return
-            Treasury(
-                address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
-            );
+        MockERC20 reserveAsset = new MockERC20("Configured USDC", "cUSDC", 6);
+        return Treasury(
+            address(
+                new ERC1967Proxy(
+                    address(new Treasury()),
+                    abi.encodeCall(Treasury.initialize, (registry, IERC20(address(reserveAsset))))
+                )
+            )
+        );
     }
 
     function _unauthorizedTimelock(address account) internal pure returns (bytes memory) {
@@ -266,6 +271,15 @@ contract USD8Test is Test {
         usd8.sweepToken(IERC20(address(stray)), alice);
         assertEq(stray.balanceOf(alice), 5e18);
         assertEq(stray.balanceOf(address(usd8)), 0);
+    }
+
+    function test_SweepTokenRejectsSelfRecipient() public {
+        MockERC20 stray = new MockERC20("Stray", "STR", 18);
+        stray.mint(address(usd8), 5e18);
+
+        vm.expectRevert(abi.encodeWithSelector(SharedBase.InvalidSweepRecipient.selector, address(usd8)));
+        vm.prank(timelock);
+        usd8.sweepToken(IERC20(address(stray)), address(usd8));
     }
 
     // ─────────────────── UUPS upgrade path ───────────────────

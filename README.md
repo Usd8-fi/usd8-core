@@ -22,6 +22,7 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
   - [Eligibility](#eligibility)
   - [Insured token valuation](#insured-token-valuation)
   - [Payout allocation](#payout-allocation)
+    - [Why geometric weighting](#why-geometric-weighting)
 - [Governance and trust assumptions](#governance-and-trust-assumptions)
   - [Beta mode and permanent disablement of upgradeability](#beta-mode-and-permanent-disablement-of-upgradeability)
   - [Repository layout](#repository-layout)
@@ -258,7 +259,11 @@ P_i = min(C_i, lambda * W_i)
 sum(P_i) <= B
 ```
 
-Only `R_i` is recorded as spent in the Registry. `S_i` is committed in the Merkle leaf and used only for payout allocation. `C_i` is the claim's absolute coverage cap. The square root gives covered need and boosted score equal multiplicative influence with diminishing returns. Zero covered need or zero boosted score produces zero weight.
+Only `R_i` is recorded as spent in the Registry. `S_i` is committed in the Merkle leaf and used only for payout allocation. `C_i` is the claim's absolute coverage cap.
+
+### Why geometric weighting
+
+`W_i = sqrt(C_i * S_i)` gives covered need and boosted score equal multiplicative influence. Increasing either value raises a claim's absolute weight, but with diminishing returns: larger claims generally receive more dollars while smaller claims may receive a higher percentage of their covered loss when pool capital is scarce. This limits concentration by large claims or accumulated score and keeps proportional claim splitting neutral—splitting both cap and score proportionally does not increase their combined weight. A zero cap or zero score produces zero weight.
 
 A deterministic capped water-filling calculation selects `lambda`. Claims that reach their cap are removed first; the remaining budget is redistributed by weight. Integer dust remains in the pools. Each payout is then split across the snapshotted cover pools in proportion to their USD value while respecting each pool's incident cap.
 
@@ -372,7 +377,13 @@ npm ci --include=dev
 npm run build
 ```
 
-## Mainnet deployment order
+## Deployment order
+
+The scripts select Ethereum mainnet (`1`) or Sepolia (`11155111`) from
+`block.chainid`. Mainnet addresses are committed in
+[`script/config/DeploymentConfig.sol`](script/config/DeploymentConfig.sol).
+Sepolia fixes only canonical test USDC and requires explicit test-dependency
+addresses; see [`script/README.md`](script/README.md).
 
 ```bash
 # Keep the Etherscan key in the ignored local .env or shell environment.
@@ -383,7 +394,7 @@ export AAVE_STRATEGY_REVIEWED=true
 
 # 1. Deploy and verify the standalone governance timelock.
 forge script script/01_DeployTimelock.s.sol:DeployTimelockScript \
-  --rpc-url "$ETH_RPC_URL" --broadcast --verify \
+  --rpc-url "$RPC_URL" --broadcast --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 
 # Copy the verified address printed by step 1.
@@ -394,7 +405,7 @@ TIMELOCK_ADDRESS=0x...
 # The broadcaster must hold at least 10 USDC before running this command.
 forge script script/02_DeployUSD8System.s.sol:DeployUSD8SystemScript \
   --sig "run(address)" "$TIMELOCK_ADDRESS" \
-  --rpc-url "$ETH_RPC_URL" --broadcast --verify \
+  --rpc-url "$RPC_URL" --broadcast --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 ```
 
@@ -409,6 +420,18 @@ If broadcast succeeds but verification is interrupted, rerun the corresponding c
 ```bash
 # Solidity
 forge test
+
+# Fast local invariant smoke tests
+forge test --match-contract ".*InvariantTest" --summary
+
+# Deep Foundry campaign (10,000 stateless cases; 1,000 x 1,000 stateful calls)
+FOUNDRY_PROFILE=deep forge test --match-test "testFuzz_.*" -vvv
+FOUNDRY_PROFILE=deep forge test --match-contract ".*InvariantTest" -vvv
+
+# Coverage-guided Echidna campaigns (Echidna 2.3.2 + Foundry 1.5.1)
+echidna . --contract TreasuryInvariantTest --config echidna.yaml
+echidna . --contract SingleAssetCoverPoolInvariantTest --config echidna.yaml
+echidna . --contract InsuranceClaimInvariantTest --config echidna.yaml
 
 # Rust production runtime
 cd offchain-rust

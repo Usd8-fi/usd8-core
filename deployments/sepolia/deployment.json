@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "network": "sepolia",
+  "chainId": 11155111,
+  "environment": "public-staging",
+  "deployer": "0xB2E999D531D45a9115dA7706adFc651999f3c1F1",
+  "completedAt": "2026-07-22T18:03:48Z",
+  "completedAtBlock": 11328318,
+  "completedAtBlockHash": "0x30538541a2fd0e7dcab6ce0f34f92a81b7e9e19085cadcaeb2cb4cc38f4ee9c5",
+  "transactions": {
+    "dependencies": "0xd8a190103fdb275fb95a0632fae2cc3349d26dda401551cf8b01e44cca01c744",
+    "timelock": "0x8181586cb92df4089f84656adca31ea546a9a9966ef2f038d3fea028145aa6b9",
+    "systemFirst": "0xad5a22048149afe5ae4bbe06bd3fedaa340ed5b86d2c6b934bb3b7b1190be28e",
+    "systemFinal": "0x3282512ec6d7bfae294f486b8f5239d8e53253dbe7734700732d95eef645c4ad"
+  },
+  "contracts": {
+    "timelock": "0x8d10C99dDE0E91Dba85896ce65Daa861B972b330",
+    "registryImplementation": "0x64eD1200269F80719c319D580576DDc58E54b0Ec",
+    "registry": "0x3Fa82eC1842f72c36580D84E03377b10B5E2F590",
+    "usd8Implementation": "0x508af51cEf48797BE1482937384dcDeEfe8Bad34",
+    "usd8": "0x12C7b483C164C648b4F7b72Af4b93250bED623CE",
+    "treasuryImplementation": "0x4fCEA728e17828E1AB5a424272469b5D9c89B9Ce",
+    "treasury": "0x5B5e52b7E603cA71C7dc37134924855cc45864c1",
+    "coverPoolImplementation": "0xC5341Ba9b601eF83D5c05C2fD06Bb27Ac51cb066",
+    "coverPoolBeacon": "0x02051110D30CD5087a3cE0f03F2d419d0415640E",
+    "coverPool": "0xd54ce4989Bf30A1d28864f0892e8211e4A28AF30",
+    "aaveStrategy": "0x9c8a4d149Af4AFEcAb45E82dB5265975dd12040a",
+    "morphoStrategy": "0xCdb5Aa1f50F3b19C12FC1d50E482e93FBaBc39eC",
+    "savingsBootstrap": "0x74d50cCb1a473CC1503Da26b0e8c3d2ea4Bd6184",
+    "savingsVault": "0x64E64eAdD9817e5F97266D34FF057ba4777c395B",
+    "savingsAdapter": "0xfe00128D3376d23cB803552F83112622192A0224",
+    "defiInsuranceImplementation": "0x41966d3e53118aF180DFC4C94822d24Aa9aC6b2e",
+    "defiInsurance": "0x250CeBDD9d6997fFD45C60D6E713f42e44E383ec",
+    "usd8PriceOracle": "0xc316AC5A8fa0D6961c2BCd26EA2d9F9e657626f5",
+    "booster": "0xC0012770848FCD350AB11906e93ba9fdfDA19f4c"
+  },
+  "dependencies": {
+    "usdc": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+    "coverAsset": "0x0539fcd774c5351da3C1d8Efd64d4511F46662df",
+    "coverAssetUsdOracle": "0x6AE3bb0897F0b15e175BA96BA0aaA55CCB719a05",
+    "aaveUsdcVault": "0xe54b2Fe33Fe4Fe60910ac91861e7AEF26de9f2D7",
+    "morphoUsdcVault": "0xF5564291F859f47fd813492d8c9852619F328973",
+    "gho": "0x1Cf0C611608A4d2E2d92FF65f8fE994eB5E250C0",
+    "aaveSgho": "0xe872eC93fe8728ea522d1024dc8A41028C43338F",
+    "ghoUsdOracle": "0x25b66809E99bACE57f7A89c4509DeA64C1ea4B11",
+    "usds": "0x08E4Aa1657290B50aB7cb13b1E7f155580a0Be0a",
+    "skySusds": "0x6313e1f725F6ce1410c6b5312b854c4737cCeA9C",
+    "usdsUsdOracle": "0x6b27162f197a03103f3C5b840bbA3f09597ac08A",
+    "usdcUsdOracle": "0x7390eb8E43951DBd2EBB1767982CC91449A459b2"
+  },
+  "verification": {
+    "status": "passed",
+    "command": "forge script script/testnet/VerifySepolia.s.sol:VerifySepolia --rpc-url https://ethereum-sepolia-rpc.publicnode.com"
+  },
+  "notes": [
+    "This is a public staging deployment, not a production deployment.",
+    "The non-USDC protocol dependencies are explicit Sepolia staging mocks."
+  ]
+}

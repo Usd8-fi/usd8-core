@@ -9,11 +9,13 @@ use thiserror::Error;
 
 pub mod abi;
 pub mod artifact;
+pub mod attested_runtime;
 pub mod chain;
 pub mod checkpoint;
 pub mod config;
 pub mod engine;
 pub mod ffi;
+pub mod incident_open;
 mod json;
 pub mod rpc;
 pub mod tee;

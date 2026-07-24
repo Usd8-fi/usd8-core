@@ -8,7 +8,7 @@ use hmac::{Hmac, Mac};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -54,6 +54,16 @@ pub struct CheckpointMetadata {
     pub as_of_block_hash: String,
     pub indexed_transfers: usize,
     pub indexed_tokens: usize,
+    pub log_metrics: LogMetrics,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BulkMetadata {
+    pub as_of_block: u64,
+    pub as_of_block_hash: String,
+    pub indexed_transfers: usize,
+    pub indexed_tokens: usize,
+    pub tracked_accounts: usize,
     pub log_metrics: LogMetrics,
 }
 
@@ -671,8 +681,9 @@ fn apply_transfer_delta(
     block: u64,
     value: &BigUint,
     inflow: bool,
+    tracked_accounts: Option<&BTreeSet<Address>>,
 ) -> Result<(), CheckpointError> {
-    if address.is_zero() {
+    if address.is_zero() || tracked_accounts.is_some_and(|tracked| !tracked.contains(&address)) {
         return Ok(());
     }
     let account = token.accounts.entry(address).or_default();
@@ -696,6 +707,7 @@ async fn advance_token<R: Rpc + ?Sized>(
     target_block: u64,
     max_range: u64,
     result_cap: usize,
+    tracked_accounts: Option<&BTreeSet<Address>>,
 ) -> Result<(usize, LogMetrics), CheckpointError> {
     if target_block < token.cursor_block {
         return Err(CheckpointError::Invalid(format!(
@@ -706,38 +718,54 @@ async fn advance_token<R: Rpc + ?Sized>(
     if target_block == token.cursor_block {
         return Ok((0, LogMetrics::default()));
     }
+    if max_range == 0 {
+        return Err(CheckpointError::Invalid(
+            "score replay max range must be nonzero".to_owned(),
+        ));
+    }
     let rates = scored.rates.clone();
-    let (transfers, metrics) = erc20_transfers(
-        rpc,
-        scored.token,
-        token.cursor_block + 1,
-        target_block,
-        max_range,
-        result_cap,
-    )
-    .await?;
-    for transfer in &transfers {
-        apply_transfer_delta(
-            token,
-            &rates,
-            transfer.from,
-            transfer.block_number,
-            &transfer.value,
-            false,
-        )?;
-        apply_transfer_delta(
-            token,
-            &rates,
-            transfer.to,
-            transfer.block_number,
-            &transfer.value,
-            true,
-        )?;
+    let mut indexed_transfers = 0usize;
+    let mut metrics = LogMetrics::default();
+    let mut slice_from = token.cursor_block + 1;
+    while slice_from <= target_block {
+        let slice_to = slice_from.saturating_add(max_range - 1).min(target_block);
+        let (transfers, slice_metrics) = erc20_transfers(
+            rpc,
+            scored.token,
+            slice_from,
+            slice_to,
+            max_range,
+            result_cap,
+        )
+        .await?;
+        indexed_transfers = indexed_transfers.saturating_add(transfers.len());
+        metrics = merge_metrics(metrics, slice_metrics);
+        for transfer in &transfers {
+            apply_transfer_delta(
+                token,
+                &rates,
+                transfer.from,
+                transfer.block_number,
+                &transfer.value,
+                false,
+                tracked_accounts,
+            )?;
+            apply_transfer_delta(
+                token,
+                &rates,
+                transfer.to,
+                transfer.block_number,
+                &transfer.value,
+                true,
+                tracked_accounts,
+            )?;
+        }
+        slice_from = slice_to.saturating_add(1);
     }
     token.cursor_block = target_block;
     token.cursor_block_hash = block_by_number(rpc, target_block).await?.hash;
     token.rates = rates;
-    Ok((transfers.len(), metrics))
+    Ok((indexed_transfers, metrics))
 }
 
 pub struct CheckpointScoreSource<R: Rpc + ?Sized> {
@@ -832,6 +860,7 @@ impl<R: Rpc + ?Sized> CheckpointScoreSource<R> {
                 as_of_block,
                 max_range,
                 result_cap,
+                None,
             )
             .await?;
             indexed_transfers = indexed_transfers.saturating_add(count);
@@ -882,6 +911,147 @@ impl<R: Rpc + ?Sized> CheckpointScoreSource<R> {
                     scored.token, account.balance, self.as_of_block
                 )));
             }
+            numerator +=
+                projected_numerator(&account, self.as_of_block, &scored.rates, scored.decimals)?;
+        }
+        Ok(numerator / BigUint::from(WAD))
+    }
+}
+
+/// Fresh claimant-filtered replay. This type deliberately has no path, key, lock, or commit API.
+pub struct BulkScoreSource<R: Rpc + ?Sized> {
+    config: IncidentConfig,
+    as_of_block: u64,
+    state: CheckpointState,
+    tracked_accounts: BTreeSet<Address>,
+    _rpc: Arc<R>,
+    pub metadata: BulkMetadata,
+}
+
+impl<R: Rpc + ?Sized> BulkScoreSource<R> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open(
+        rpc: Arc<R>,
+        config: &IncidentConfig,
+        as_of_block: u64,
+        tracked_accounts: BTreeSet<Address>,
+        expected_chain_id: u64,
+        max_range: u64,
+        result_cap: usize,
+    ) -> Result<Self, CheckpointError> {
+        if tracked_accounts.iter().any(Address::is_zero) {
+            return Err(CheckpointError::Invalid(
+                "bulk score claimant set contains the zero address".to_owned(),
+            ));
+        }
+        let actual_chain_id = chain_id(rpc.as_ref()).await?;
+        if actual_chain_id != expected_chain_id {
+            return Err(CheckpointError::Invalid(format!(
+                "RPC chain {actual_chain_id} does not match expected chain {expected_chain_id}"
+            )));
+        }
+        let mut state = CheckpointState {
+            chain_id: expected_chain_id,
+            tokens: BTreeMap::new(),
+        };
+        let mut indexed_transfers = 0usize;
+        let mut log_metrics = LogMetrics::default();
+        let mut indexed_tokens = BTreeSet::new();
+        for scored in config
+            .scored_tokens
+            .iter()
+            .filter(|scored| contributes_at(scored, as_of_block))
+        {
+            assert_rates(&scored.rates)?;
+            if !indexed_tokens.insert(scored.token) {
+                let stored = state.tokens.get(&scored.token).ok_or_else(|| {
+                    CheckpointError::Invalid(format!("bulk token {} disappeared", scored.token))
+                })?;
+                if stored.decimals != scored.decimals || stored.rates != scored.rates {
+                    return Err(CheckpointError::Invalid(format!(
+                        "conflicting duplicate scored-token configuration for {}",
+                        scored.token
+                    )));
+                }
+                continue;
+            }
+            state.tokens.insert(
+                scored.token,
+                TokenState {
+                    decimals: scored.decimals,
+                    cursor_block: 0,
+                    cursor_block_hash: ZERO_HASH.to_owned(),
+                    rates: scored.rates.clone(),
+                    accounts: BTreeMap::new(),
+                },
+            );
+            let token = state.tokens.get_mut(&scored.token).ok_or_else(|| {
+                CheckpointError::Invalid(format!("bulk token {} disappeared", scored.token))
+            })?;
+            let (count, metrics) = advance_token(
+                rpc.as_ref(),
+                scored,
+                token,
+                as_of_block,
+                max_range,
+                result_cap,
+                Some(&tracked_accounts),
+            )
+            .await?;
+            indexed_transfers = indexed_transfers.saturating_add(count);
+            log_metrics = merge_metrics(log_metrics, metrics);
+        }
+        for token_address in &indexed_tokens {
+            let token = state.tokens.get(token_address).ok_or_else(|| {
+                CheckpointError::Invalid(format!("missing token {token_address}"))
+            })?;
+            for user in &tracked_accounts {
+                let indexed = token
+                    .accounts
+                    .get(user)
+                    .map_or_else(|| BigUint::from(0u8), |account| account.balance.clone());
+                let actual =
+                    balance_of_at(rpc.as_ref(), *token_address, *user, as_of_block).await?;
+                if actual != indexed {
+                    return Err(CheckpointError::Invalid(format!(
+                        "unsupported token balance semantics for {token_address}: indexed balance {indexed}, balanceOf({user}) at block {as_of_block} is {actual}"
+                    )));
+                }
+            }
+        }
+        let as_of_block_hash = block_by_number(rpc.as_ref(), as_of_block).await?.hash;
+        Ok(Self {
+            config: config.clone(),
+            as_of_block,
+            state,
+            metadata: BulkMetadata {
+                as_of_block,
+                as_of_block_hash,
+                indexed_transfers,
+                indexed_tokens: indexed_tokens.len(),
+                tracked_accounts: tracked_accounts.len(),
+                log_metrics,
+            },
+            tracked_accounts,
+            _rpc: rpc,
+        })
+    }
+
+    pub async fn gross_score_of(&self, user: Address) -> Result<BigUint, CheckpointError> {
+        if !self.tracked_accounts.contains(&user) {
+            return Err(CheckpointError::Invalid(format!(
+                "bulk score requested for untracked claimant {user}"
+            )));
+        }
+        let mut numerator = BigUint::from(0u8);
+        for scored in &self.config.scored_tokens {
+            if !contributes_at(scored, self.as_of_block) {
+                continue;
+            }
+            let token = self.state.tokens.get(&scored.token).ok_or_else(|| {
+                CheckpointError::Invalid(format!("missing token {}", scored.token))
+            })?;
+            let account = token.accounts.get(&user).cloned().unwrap_or_default();
             numerator +=
                 projected_numerator(&account, self.as_of_block, &scored.rates, scored.decimals)?;
         }

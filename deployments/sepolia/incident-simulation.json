@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "network": "sepolia",
+  "chainId": 11155111,
+  "purpose": "TEE incident-open staging exercise",
+  "insuredToken": {
+    "name": "Sepolia Mock Savings GHO",
+    "symbol": "msGHO",
+    "address": "0xe872eC93fe8728ea522d1024dc8A41028C43338F",
+    "defiInsurance": "0x250CeBDD9d6997fFD45C60D6E713f42e44E383ec",
+    "maxCoverageBps": 8000
+  },
+  "oracle": {
+    "description": "mGHO / USD",
+    "address": "0x25b66809E99bACE57f7A89c4509DeA64C1ea4B11",
+    "decimals": 8
+  },
+  "teeSignerAuthorization": {
+    "address": "0xEa29C49787Df66003Af40e3409A1E1766Bfda193",
+    "authorized": true,
+    "transactionHash": "0x1b0cef0db9c77f166ae00673f209f5834eedaf3e3fbe51c55370704334779dde",
+    "blockNumber": 11336131
+  },
+  "teePcrAuthorization": {
+    "hash": "0x490d329f1b02e08e0961ae1e0752bd345b02b3094b8c80423b1f4803f4788207",
+    "transactionHash": "0x50b4f53f5a7a5f0c6214802626a6fe0fb42d3c5d727edd3c9c60526315dd6a10",
+    "blockNumber": 11336161
+  },
+  "preDropReference": {
+    "blockNumber": 11335495,
+    "blockHash": "0x83cf75c00072464d73adc437f101157b5a39dd0e99db7370839c11716e55d66e",
+    "blockTimestamp": 1784832096,
+    "blockTimestampUtc": "2026-07-23T18:41:36Z",
+    "oracleRoundId": 1,
+    "oracleAnswer": 100000000
+  },
+  "drop": {
+    "basisPoints": 2500,
+    "oracleAnswer": 75000000,
+    "oracleRoundId": 2,
+    "transactionHash": "0xd4419547660c3003657bbce20c372f20628c4fa543396f6ec797eca402ad81b6",
+    "blockNumber": 11335593,
+    "blockHash": "0x13c747a89f6e42e7e3e02dbd256a753fa18694a1edf38980756c5da833f14ce6",
+    "blockTimestamp": 1784833308,
+    "blockTimestampUtc": "2026-07-23T19:01:48Z"
+  },
+  "claimantPreparation": {
+    "account": "0xB2E999D531D45a9115dA7706adFc651999f3c1F1",
+    "insuredTokenBalance": "10000000000000000000",
+    "insuredTokenDepositTransaction": "0xf4e41790b59adb01a9135cb037487b9246d5dc83aa18b5489872038aea9b6d63",
+    "insuredTokenDepositBlock": 11335688,
+    "coverPoolAssets": "10000000000000000000",
+    "coverPoolFundingTransaction": "0x0d11371073941cfd9ee5af37095861d5f95cb94872a1ca46cc9dd03ea4d29015",
+    "coverPoolFundingBlock": 11335708,
+    "settlementParams": {
+      "twapLookbackBlocks": 300,
+      "holdingMarginBlocks": 1,
+      "sampleStepBlocks": 300,
+      "holdingMarginUpdateTransaction": "0xbad794e24b4589a76893c0de14bb00e717ce67cf732f92fe3bcf922548577da0",
+      "holdingMarginUpdateBlock": 11335727,
+      "twapLookbackUpdateTransaction": "0x630793c073ae60f367b644557dfa77f060f929e6c855c7c3fc4e095b1b28384e",
+      "twapLookbackUpdateBlock": 11335803
+    }
+  },
+  "futureOpenRequest": {
+    "route": "POST /jobs/open",
+    "insuredToken": "0xe872eC93fe8728ea522d1024dc8A41028C43338F",
+    "referenceBlockSelection": {
+      "minimumBlockForPositiveHistoricalHolding": 11335689,
+      "candidateReferenceBlock": 11335728,
+      "requireFinalized": true,
+      "requirePastBlock": true,
+      "maxAgeAtOpen": 43200,
+      "note": "Select a finalized block at or after 11335689 when submitting the request. Do not reuse the pre-drop block because the claimant held zero msGHO then."
+    }
+  },
+  "verified": {
+    "dualRpc": true,
+    "activeIncidentId": 0,
+    "note": "The oracle drop is staged; it does not itself open an incident."
+  }
+}

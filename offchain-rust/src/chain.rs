@@ -169,6 +169,10 @@ pub async fn finalized_block<R: Rpc + ?Sized>(rpc: &R) -> Result<BlockAnchor, Ch
     block(rpc, "finalized", None).await
 }
 
+pub async fn latest_block<R: Rpc + ?Sized>(rpc: &R) -> Result<BlockAnchor, ChainError> {
+    block(rpc, "latest", None).await
+}
+
 pub async fn chain_id<R: Rpc + ?Sized>(rpc: &R) -> Result<u64, ChainError> {
     let value = rpc.request("eth_chainId", json!([])).await?;
     quantity(&value, "chainId")

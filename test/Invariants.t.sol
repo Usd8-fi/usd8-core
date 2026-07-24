@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {Test, StdInvariant} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
@@ -15,6 +16,16 @@ import {VaultV2} from "vault-v2/src/VaultV2.sol";
 import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
+
+contract InvariantFeed {
+    function decimals() external pure returns (uint8) {
+        return 8;
+    }
+
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        return (1, 1e8, block.timestamp, block.timestamp, 1);
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════════
 //  SingleAssetCoverPool stateful handler — bounded actors
@@ -30,6 +41,28 @@ contract PoolHandler is Test {
     // ghost accounting
     uint256 public ghostDistributed; // total USD8 ever streamed in
     uint256 public ghostWithdrawn; // total USD8 ever paid out as yield
+    uint256 public ghostDonatedAssets; // underlying sent directly, outside ERC-4626 accounting
+    uint256 public ghostDonatedRewards; // direct USD8 surplus above committed rewards
+    uint256 public ghostDepositedAssets; // underlying accepted through ERC-4626 deposits
+    uint256 public ghostExitPayouts; // underlying paid from settled exit reserves
+    uint256 public ghostClaimPayouts; // underlying paid through the insurance hook
+    uint256 public ghostRemainingIncidentBudget;
+    uint256 public activeIncidentId;
+    uint256 public ghostIncidentCount;
+    uint64[] internal ghostKnownEpochs;
+    mapping(uint64 epoch => bool known) public ghostEpochKnown;
+    mapping(uint64 epoch => bool settled) public ghostEpochSettled;
+    mapping(uint64 epoch => uint256 shares) public ghostEpochTotalShares;
+    mapping(uint64 epoch => uint256 assets) public ghostEpochTotalAssets;
+    mapping(uint64 epoch => uint256 shares) public ghostEpochRemainingShares;
+    mapping(uint64 epoch => uint256 assets) public ghostEpochRemainingAssets;
+
+    uint256 public successfulExitRequests;
+    uint256 public successfulSameEpochRequests;
+    uint256 public successfulEpochSettlements;
+    uint256 public successfulExitCompletions;
+    uint256 public successfulFinalEpochClaimants;
+    uint256 public successfulRequestsDuringIncident;
 
     constructor(SingleAssetCoverPool _pool, USD8 _usd8, MockERC20 _asset, address _admin) {
         pool = _pool;
@@ -45,66 +78,218 @@ contract PoolHandler is Test {
     }
 
     function stake(uint256 actorSeed, uint256 amount) external {
+        if (activeIncidentId != 0) return;
         address who = _actor(actorSeed);
         amount = bound(amount, 1, 1e24);
         asset.mint(who, amount);
         vm.startPrank(who);
         asset.approve(address(pool), amount);
-        try pool.deposit(amount, who) {} catch {}
+        pool.deposit(amount, who);
         vm.stopPrank();
+        ghostDepositedAssets += amount;
     }
 
     function requestUnstake(uint256 actorSeed, uint256 shares) external {
+        if (ghostKnownEpochs.length >= 16) return;
         address who = _actor(actorSeed);
+        (uint256 existingShares,) = pool.exitRequests(who);
+        if (existingShares != 0) return;
         uint256 bal = pool.balanceOf(who);
         if (bal == 0) return;
         shares = bound(shares, 1, bal);
         vm.prank(who);
-        try pool.requestRedeem(shares) {} catch {}
+        pool.requestRedeem(shares);
+        (, uint64 exitEpoch) = pool.exitRequests(who);
+        if (!ghostEpochKnown[exitEpoch]) {
+            ghostEpochKnown[exitEpoch] = true;
+            ghostKnownEpochs.push(exitEpoch);
+        } else if (ghostEpochTotalShares[exitEpoch] != 0) {
+            successfulSameEpochRequests++;
+        }
+        ghostEpochTotalShares[exitEpoch] += shares;
+        successfulExitRequests++;
+        if (activeIncidentId != 0) successfulRequestsDuringIncident++;
+        _syncSettledEpochs();
     }
 
     function completeUnstake(uint256 actorSeed) external {
         address who = _actor(actorSeed);
         (uint256 shares, uint64 exitEpoch) = pool.exitRequests(who);
         if (shares == 0 || block.timestamp < exitEpoch) return;
-        // completeRedeem does not pay yield; capture any USD8
-        // delta defensively (expected 0) so the reward-conservation ghost holds.
-        uint256 before = usd8.balanceOf(who);
+        (,,,, bool settled) = pool.exitEpochs(exitEpoch);
+        if (!settled && activeIncidentId != 0) return;
+        if (!settled) {
+            pool.settleMaturedExitEpochs(16);
+            _syncSettledEpochs();
+        }
+        uint256 expectedAssets;
+        uint256 remainingShares = ghostEpochRemainingShares[exitEpoch];
+        if (shares == remainingShares) {
+            expectedAssets = ghostEpochRemainingAssets[exitEpoch];
+        } else {
+            expectedAssets = Math.mulDiv(ghostEpochTotalAssets[exitEpoch], shares, ghostEpochTotalShares[exitEpoch]);
+        }
+        // completeRedeem does not pay yield; capture any USD8 delta
+        // defensively (expected 0) so the reward-conservation ghost holds.
+        uint256 rewardBefore = usd8.balanceOf(who);
+        uint256 assetBefore = asset.balanceOf(who);
         vm.prank(who);
-        try pool.completeRedeem(who) {
-            ghostWithdrawn += usd8.balanceOf(who) - before;
-        } catch {}
+        pool.completeRedeem(who);
+        ghostWithdrawn += usd8.balanceOf(who) - rewardBefore;
+        uint256 received = asset.balanceOf(who) - assetBefore;
+        assertEq(received, expectedAssets, "exit receipt rounding drift");
+        ghostExitPayouts += received;
+        ghostEpochRemainingShares[exitEpoch] = remainingShares - shares;
+        ghostEpochRemainingAssets[exitEpoch] -= received;
+        successfulExitCompletions++;
+        if (ghostEpochRemainingShares[exitEpoch] == 0) successfulFinalEpochClaimants++;
     }
 
     function withdrawYield(uint256 actorSeed) external {
         address who = _actor(actorSeed);
         vm.prank(who);
-        try pool.claimReward() returns (uint256 got) {
-            ghostWithdrawn += got;
-        } catch {}
+        uint256 got = pool.claimReward();
+        ghostWithdrawn += got;
     }
 
     function distribute(uint256 amount) external {
-        amount = bound(amount, 1, 1e22);
+        if (pool.totalSupply() == pool.balanceOf(address(pool))) return;
+        amount = bound(amount, pool.rewardsDuration(), 1e22);
         vm.startPrank(admin);
         usd8.mint(admin, amount);
         usd8.approve(address(pool), amount);
-        try pool.receiveProfitDistribution(amount) {
-            ghostDistributed += amount;
-        } catch {
-            usd8.approve(address(pool), 0);
-        }
+        pool.receiveProfitDistribution(amount);
+        ghostDistributed += amount;
         vm.stopPrank();
+    }
+
+    function transferShares(uint256 fromSeed, uint256 toSeed, uint256 shares) external {
+        address from = _actor(fromSeed);
+        address to = _actor(toSeed);
+        uint256 balance = pool.balanceOf(from);
+        if (balance == 0) return;
+        shares = bound(shares, 1, balance);
+        vm.prank(from);
+        assertTrue(pool.transfer(to, shares), "share transfer failed");
+    }
+
+    function donateRewards(uint256 amount) external {
+        amount = bound(amount, 1, 1e24);
+        vm.prank(admin);
+        usd8.mint(address(this), amount);
+        assertTrue(usd8.transfer(address(pool), amount), "reward donation transfer failed");
+        ghostDonatedRewards += amount;
+    }
+
+    function sweepDonatedRewards() external {
+        if (ghostDonatedRewards == 0) return;
+        uint256 receiverBefore = usd8.balanceOf(actors[0]);
+        uint256 reserveBefore = pool.rewardReserve();
+        uint256 swept = ghostDonatedRewards;
+        vm.prank(admin);
+        pool.sweepToken(IERC20(address(usd8)), actors[0]);
+        ghostDonatedRewards = 0;
+        assertEq(usd8.balanceOf(actors[0]), receiverBefore + swept, "wrong reward surplus swept");
+        assertEq(pool.rewardReserve(), reserveBefore, "sweep touched reward reserve");
+    }
+
+    function donateAssets(uint256 amount) external {
+        amount = bound(amount, 1, 1e24);
+        asset.mint(address(pool), amount);
+        ghostDonatedAssets += amount;
+    }
+
+    function settleMatured(uint256 maxEpochs) external {
+        if (activeIncidentId != 0) return;
+        maxEpochs = bound(maxEpochs, 1, 8);
+        pool.settleMaturedExitEpochs(maxEpochs);
+        _syncSettledEpochs();
+    }
+
+    function setIncidentActive(bool active) external {
+        if (active) {
+            if (activeIncidentId != 0 || ghostIncidentCount == 3) return;
+            ghostIncidentCount += 1;
+            activeIncidentId = ghostIncidentCount;
+            ghostRemainingIncidentBudget = pool.maxPayoutPerIncident();
+        } else {
+            activeIncidentId = 0;
+        }
+    }
+
+    function frozenOperationsRemainAtomic(uint256 actorSeed, uint256 amount) external {
+        if (activeIncidentId == 0) return;
+        address actor = _actor(actorSeed);
+        amount = bound(amount, 1, 1e24);
+        uint256 assetsBefore = pool.totalAssets();
+        uint256 supplyBefore = pool.totalSupply();
+        uint256 reserveBefore = pool.withdrawalReserve();
+
+        asset.mint(actor, amount);
+        vm.startPrank(actor);
+        asset.approve(address(pool), amount);
+        vm.expectRevert(SingleAssetCoverPool.PoolFrozen.selector);
+        pool.deposit(amount, actor);
+        vm.stopPrank();
+
+        vm.expectRevert(SingleAssetCoverPool.PoolFrozen.selector);
+        pool.settleMaturedExitEpochs(1);
+
+        assertEq(pool.totalAssets(), assetsBefore, "frozen operation changed assets");
+        assertEq(pool.totalSupply(), supplyBefore, "frozen operation changed supply");
+        assertEq(pool.withdrawalReserve(), reserveBefore, "frozen operation changed reserve");
+    }
+
+    function payClaim(uint256 actorSeed, uint256 amount) external {
+        if (activeIncidentId == 0) return;
+        uint256 available = pool.totalAssets();
+        if (available == 0) return;
+        uint256 budget = ghostRemainingIncidentBudget;
+        if (budget == 0) return;
+        uint256 limit = available < budget ? available : budget;
+        amount = bound(amount, 1, limit);
+        address recipient = _actor(actorSeed);
+        uint256 balanceBefore = asset.balanceOf(recipient);
+        pool.payClaim(recipient, amount);
+        ghostClaimPayouts += amount;
+        ghostRemainingIncidentBudget = budget - amount;
+        assertEq(asset.balanceOf(recipient), balanceBefore + amount, "claim payout delta");
     }
 
     function warp(uint256 secs) external {
         secs = bound(secs, 1, 10 days);
         vm.warp(block.timestamp + secs);
     }
+
+    function knownEpochsLength() external view returns (uint256) {
+        return ghostKnownEpochs.length;
+    }
+
+    function knownEpoch(uint256 i) external view returns (uint64) {
+        return ghostKnownEpochs[i];
+    }
+
+    function _syncSettledEpochs() internal {
+        for (uint256 i = 0; i < ghostKnownEpochs.length; i++) {
+            uint64 epochId = ghostKnownEpochs[i];
+            if (ghostEpochSettled[epochId]) continue;
+            (uint256 totalShares, uint256 totalAssets, uint256 remainingShares, uint256 remainingAssets, bool settled) =
+                pool.exitEpochs(epochId);
+            if (!settled) continue;
+            assertEq(totalShares, ghostEpochTotalShares[epochId], "settled epoch share debt drift");
+            assertEq(remainingShares, totalShares, "fresh epoch remaining shares");
+            assertEq(remainingAssets, totalAssets, "fresh epoch remaining assets");
+            ghostEpochSettled[epochId] = true;
+            ghostEpochTotalAssets[epochId] = totalAssets;
+            ghostEpochRemainingShares[epochId] = remainingShares;
+            ghostEpochRemainingAssets[epochId] = remainingAssets;
+            successfulEpochSettlements++;
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  SingleAssetCoverPool invariants (properties 1 & 2)
+//  SingleAssetCoverPool stateful invariants
 // ════════════════════════════════════════════════════════════════════════
 contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
     SingleAssetCoverPool pool;
@@ -115,14 +300,7 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
     Registry registry;
 
     function setUp() public {
-        address feed = address(0xfeed);
-        vm.etch(feed, hex"00");
-        vm.mockCall(feed, abi.encodeWithSignature("decimals()"), abi.encode(uint8(8)));
-        vm.mockCall(
-            feed,
-            abi.encodeWithSignature("latestRoundData()"),
-            abi.encode(uint80(1), int256(1e8), uint256(1), uint256(1), uint80(1))
-        );
+        address feed = address(new InvariantFeed());
         registry = Registry(
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
         );
@@ -148,30 +326,128 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
         vm.stopPrank();
 
         handler = new PoolHandler(pool, usd8, asset, admin);
+        vm.prank(admin);
+        registry.setDefiInsurance(address(handler));
 
         // grant handler USD8 mint rights via admin prank inside handler (USD8 treasury == admin)
         // USD8 mint is gated to treasury; admin was set as treasury at init.
-        bytes4[] memory sel = new bytes4[](6);
+        bytes4[] memory sel = new bytes4[](14);
         sel[0] = PoolHandler.stake.selector;
         sel[1] = PoolHandler.requestUnstake.selector;
         sel[2] = PoolHandler.completeUnstake.selector;
         sel[3] = PoolHandler.withdrawYield.selector;
         sel[4] = PoolHandler.distribute.selector;
         sel[5] = PoolHandler.warp.selector;
+        sel[6] = PoolHandler.transferShares.selector;
+        sel[7] = PoolHandler.donateAssets.selector;
+        sel[8] = PoolHandler.settleMatured.selector;
+        sel[9] = PoolHandler.payClaim.selector;
+        sel[10] = PoolHandler.setIncidentActive.selector;
+        sel[11] = PoolHandler.frozenOperationsRemainAtomic.selector;
+        sel[12] = PoolHandler.donateRewards.selector;
+        sel[13] = PoolHandler.sweepDonatedRewards.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
 
-    // Property 1: never over-pay; rewardReserve never underflows (would revert -> caught).
+    function test_ProductiveAsyncExitBranchesAreReachable() public {
+        handler.stake(0, 100e18);
+        handler.stake(1, 101e18);
+        handler.requestUnstake(0, type(uint256).max);
+        handler.requestUnstake(1, type(uint256).max);
+        handler.setIncidentActive(true);
+        handler.payClaim(0, 1e18);
+        handler.warp(10 days);
+        handler.setIncidentActive(false);
+        handler.settleMatured(8);
+        handler.completeUnstake(0);
+        handler.completeUnstake(1);
+
+        assertGt(handler.successfulExitRequests(), 1);
+        assertGt(handler.successfulSameEpochRequests(), 0);
+        assertGt(handler.successfulEpochSettlements(), 0);
+        assertGt(handler.successfulExitCompletions(), 1);
+        assertGt(handler.successfulFinalEpochClaimants(), 0);
+    }
+
+    // Never over-pay; rewardReserve equals unclaimed distribution.
     function invariant_rewardConservation() public view {
         assertLe(handler.ghostWithdrawn(), handler.ghostDistributed(), "over-paid yield");
-        // rewardReserve must still cover all unwithdrawn-but-distributed rewards.
-        assertGe(handler.ghostDistributed() - handler.ghostWithdrawn(), 0);
-        // rewardReserve == distributed - withdrawn (no leak/underflow).
         assertEq(pool.rewardReserve(), handler.ghostDistributed() - handler.ghostWithdrawn(), "reserve mismatch");
     }
 
-    // Property 2: share accounting. sum(user shares) == totalShares; totalAssets <= balance.
+    // Donations remain outside internal ERC-4626 principal accounting.
+    function invariant_assetAccountingIsExact() public view {
+        assertEq(
+            asset.balanceOf(address(pool)),
+            pool.totalAssets() + pool.withdrawalReserve() + handler.ghostDonatedAssets(),
+            "asset accounting mismatch"
+        );
+    }
+
+    function invariant_activeAndReservedAssetsMatchLifecycleGhosts() public view {
+        assertEq(
+            pool.totalAssets() + pool.withdrawalReserve(),
+            handler.ghostDepositedAssets() - handler.ghostExitPayouts() - handler.ghostClaimPayouts(),
+            "lifecycle asset accounting mismatch"
+        );
+    }
+
+    function invariant_registryFreezeMatchesHandlerIncident() public view {
+        assertEq(registry.payoutIncidentActive(), handler.activeIncidentId() != 0, "freeze state mismatch");
+    }
+
+    function invariant_rewardReserveIsFullyBacked() public view {
+        assertEq(
+            usd8.balanceOf(address(pool)),
+            pool.rewardReserve() + handler.ghostDonatedRewards(),
+            "reward balance mismatch"
+        );
+    }
+
+    function invariant_knownUserRewardsFitReserve() public view {
+        assertLe(
+            pool.earned(address(0xA11)) + pool.earned(address(0xB0B)), pool.rewardReserve(), "earned exceeds reserve"
+        );
+    }
+
+    function invariant_rewardLiabilitiesAndRemainingStreamFitReserve() public view {
+        uint256 remainingStream;
+        if (block.timestamp < pool.periodFinish()) {
+            remainingStream = pool.rewardRate() * (pool.periodFinish() - block.timestamp);
+        }
+        assertLe(
+            pool.earned(address(0xA11)) + pool.earned(address(0xB0B)) + remainingStream,
+            pool.rewardReserve(),
+            "reward liabilities exceed reserve"
+        );
+    }
+
+    function invariant_exitEpochDebtMatchesWithdrawalReserve() public view {
+        uint256 remainingAssetDebt;
+        for (uint256 i = 0; i < handler.knownEpochsLength(); i++) {
+            uint64 epochId = handler.knownEpoch(i);
+            (uint256 totalShares, uint256 totalAssets, uint256 remainingShares, uint256 remainingAssets, bool settled) =
+                pool.exitEpochs(epochId);
+            assertEq(totalShares, handler.ghostEpochTotalShares(epochId), "epoch total-share drift");
+            assertEq(settled, handler.ghostEpochSettled(epochId), "epoch settlement drift");
+            if (settled) {
+                assertEq(totalAssets, handler.ghostEpochTotalAssets(epochId), "epoch total-asset drift");
+                assertEq(remainingShares, handler.ghostEpochRemainingShares(epochId), "epoch remaining-share drift");
+                assertEq(remainingAssets, handler.ghostEpochRemainingAssets(epochId), "epoch remaining-asset drift");
+                assertLe(remainingShares, totalShares, "epoch share debt exceeds total");
+                assertLe(remainingAssets, totalAssets, "epoch asset debt exceeds total");
+                if (remainingShares == 0) assertEq(remainingAssets, 0, "asset dust after final claimant");
+                remainingAssetDebt += remainingAssets;
+            } else {
+                assertEq(totalAssets, 0, "unsettled epoch has assets");
+                assertEq(remainingShares, 0, "unsettled epoch has remaining shares");
+                assertEq(remainingAssets, 0, "unsettled epoch has remaining assets");
+            }
+        }
+        assertEq(pool.withdrawalReserve(), remainingAssetDebt, "withdrawal reserve debt drift");
+    }
+
     function invariant_shareAccounting() public view {
         uint256 sumShares =
             pool.balanceOf(address(0xA11)) + pool.balanceOf(address(0xB0B)) + pool.balanceOf(address(pool));
@@ -318,7 +594,11 @@ contract StatelessFuzzTest is Test {
         usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
         registry.setUsd8(address(usd8));
         treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
+            address(
+                new ERC1967Proxy(
+                    address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry, IERC20(USDC_ADDR)))
+                )
+            )
         );
         registry.setTreasury(address(treasury));
     }

@@ -2,12 +2,15 @@
 # Unmaintained, not vulnerable. `derivative` is only in Alloy's optional ark-ff
 # lock graph and is absent from `cargo tree --target all`. `paste` and
 # `proc-macro-error2` are compile-time dependencies of latest alloy 1.6.0.
-# `serde_cbor` is a Linux-only dependency of AWS's NSM API 0.4.0; NSM API 0.5.x
-# removes it but requires Rust 1.92, above this package's pinned 1.91.1 toolchain.
-# Upgrade the NSM API with the pinned Rust toolchain; remove Alloy exceptions
-# when Alloy removes the corresponding dependencies.
+# `serde_cbor` is a Linux-only dependency of AWS's NSM API 0.5.2.
+# RUSTSEC-2023-0071 has no fixed release. The enclave's RSA key is freshly
+# generated for each KMS recipient request and performs exactly one OAEP decrypt,
+# so the repeated adaptive timing oracle required by Marvin is unavailable.
+# Upgrade NSM and remove Alloy exceptions when their pinned APIs permit it;
+# remove the RSA exception when upstream publishes a fixed stable release.
 ignore = [
   "RUSTSEC-2021-0127",
+  "RUSTSEC-2023-0071",
   "RUSTSEC-2024-0388",
   "RUSTSEC-2024-0436",
   "RUSTSEC-2026-0173",

@@ -1,0 +1,116 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BakeReviewedAmi",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateImage",
+        "ec2:CreateSnapshot",
+        "ec2:CreateTags",
+        "ec2:DescribeImages",
+        "ec2:DescribeSnapshots"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LaunchEphemeralBuilder",
+      "Effect": "Allow",
+      "Action": ["ec2:RunInstances", "ec2:CreateTags"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "USD8-TEE-Build",
+          "ec2:InstanceType": ["c6i.xlarge", "c6i.2xlarge"]
+        }
+      }
+    },
+    {
+      "Sid": "RemoveEphemeralBuilders",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:eu-central-1:919437049909:instance/*",
+      "Condition": {"StringEquals": {"ec2:ResourceTag/Project": "USD8-TEE-Build"}}
+    },
+    {
+      "Sid": "RemoveObsoleteReviewedImages",
+      "Effect": "Allow",
+      "Action": ["ec2:DeregisterImage", "ec2:DeleteSnapshot"],
+      "Resource": [
+        "arn:aws:ec2:eu-central-1::image/*",
+        "arn:aws:ec2:eu-central-1:919437049909:snapshot/*"
+      ],
+      "Condition": {"StringEquals": {"ec2:ResourceTag/Project": "USD8-TEE"}}
+    },
+    {
+      "Sid": "CreateJobBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutBucketEncryption",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketPolicy",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutObject",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/*"
+      ]
+    },
+    {
+      "Sid": "ConfigureRuntimeRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy",
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::919437049909:role/USD8TeeInstanceRole",
+        "arn:aws:iam::919437049909:role/USD8TeeLambdaRole",
+        "arn:aws:iam::919437049909:role/USD8TeeJanitorRole"
+      ]
+    },
+    {
+      "Sid": "ConfigureRuntimeInstanceProfile",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:AddRoleToInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::919437049909:instance-profile/USD8TeeInstanceProfile"
+    },
+    {
+      "Sid": "DeployFixedLambdas",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:GetPolicy",
+        "lambda:InvokeFunction",
+        "lambda:InvokeFunctionUrl",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:PutFunctionConcurrency",
+        "lambda:AddPermission",
+        "lambda:CreateFunctionUrlConfig",
+        "lambda:GetFunctionUrlConfig"
+      ],
+      "Resource": [
+        "arn:aws:lambda:eu-central-1:919437049909:function:usd8-tee-job-api",
+        "arn:aws:lambda:eu-central-1:919437049909:function:usd8-tee-janitor"
+      ]
+    },
+    {
+      "Sid": "ScheduleJanitor",
+      "Effect": "Allow",
+      "Action": ["events:PutRule", "events:PutTargets", "events:DescribeRule"],
+      "Resource": "arn:aws:events:eu-central-1:919437049909:rule/usd8-tee-janitor"
+    }
+  ]
+}

@@ -10,3 +10,25 @@ remappings = [
     "forge-std/=lib/forge-std/src/",
     "vault-v2/=lib/vault-v2/",
 ]
+
+# Long-running campaign used by the scheduled deep-fuzz workflow. Keep the
+# default profile fast enough for local development and pull requests.
+[profile.deep.fuzz]
+runs = 10000
+show_edge_coverage = true
+
+[profile.deep.invariant]
+runs = 1000
+depth = 1000
+fail_on_revert = true
+show_metrics = true
+
+# Kontrol consumes this compiler metadata and requires Cancun for TLOAD/TSTORE.
+[profile.kontrol]
+test = "test/kontrol"
+out = "out-kontrol"
+cache_path = "cache/kontrol"
+dynamic_test_linking = false
+solc_version = "0.8.28"
+evm_version = "cancun"
+extra_output = ["storageLayout", "abi", "evm.methodIdentifiers", "evm.deployedBytecode.object", "devdoc"]

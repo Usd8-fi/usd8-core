@@ -8,6 +8,10 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 import {Registry} from "../Registry.sol";
 import {SharedBase} from "../SharedBase.sol";
 
+interface ITreasuryReserveAsset {
+    function USDC() external view returns (IERC20);
+}
+
 /// @title StrategyBase
 /// @notice Shared authorization and aggregator-swap boundary for Treasury
 ///         strategies. Each strategy defines one deployment token. Swaps may
@@ -21,8 +25,8 @@ abstract contract StrategyBase is SharedBase, ReentrancyGuardTransient {
     using Address for address;
     using SafeERC20 for IERC20;
 
-    /// @notice Mainnet USDC, the sole Treasury accounting asset.
-    IERC20 public constant USDC = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);
+    /// @notice Chain-specific USDC reserve asset.
+    IERC20 public immutable USDC;
 
     /// @notice Treasury that owns this strategy and receives all USDC swap output.
     address public immutable treasury;
@@ -43,8 +47,13 @@ abstract contract StrategyBase is SharedBase, ReentrancyGuardTransient {
     );
 
     constructor(address treasury_, Registry registry_, IERC20 strategyToken_) {
-        if (treasury_ == address(0) || address(strategyToken_) == address(0)) revert ZeroAddress();
+        if (treasury_ == address(0) || address(strategyToken_) == address(0)) {
+            revert ZeroAddress();
+        }
+        IERC20 usdc_ = ITreasuryReserveAsset(treasury_).USDC();
+        if (address(usdc_) == address(0)) revert ZeroAddress();
         treasury = treasury_;
+        USDC = usdc_;
         strategyToken = strategyToken_;
         _setRegistry(registry_);
     }

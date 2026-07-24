@@ -1,0 +1,79 @@
+# Long-running coverage-guided campaign. CI overrides testLimit/timeout for
+# smoke runs; the scheduled workflow uses these values.
+projectName: "USD8 deep fuzz"
+testMode: "foundry"
+testLimit: 1000000
+seqLen: 200
+shrinkLimit: 5000
+coverage: true
+allContracts: true
+# Foundry's targetSelector is not enforced by Echidna 2.3.2. Allowlist only
+# handler transitions so direct mock/protocol calls cannot bypass ghost state.
+filterBlacklist: false
+filterFunctions:
+  - "TreasuryHandler.mint(uint256,uint256)"
+  - "TreasuryHandler.redeem(uint256,uint256)"
+  - "TreasuryHandler.transfer(uint256,uint256,uint256)"
+  - "TreasuryHandler.donateReserve(uint256)"
+  - "TreasuryHandler.allocateToStrategy(uint256,uint256)"
+  - "TreasuryHandler.withdrawFromStrategy(uint256,uint256)"
+  - "TreasuryHandler.addStrategyYield(uint256,uint256)"
+  - "TreasuryHandler.realizeStrategyLoss(uint256,uint256)"
+  - "TreasuryHandler.setStrategyWithdrawFailure(uint256,bool)"
+  - "TreasuryHandler.harvest()"
+  - "TreasuryHandler.setPaused(bool)"
+  - "TreasuryHandler.redeemWithTooHighMinOut(uint256,uint256)"
+  - "TreasuryHandler.illiquidRedemptionIsAtomic(uint256,uint256)"
+  - "TreasuryHandler.pausedOperationsRemainAtomic(uint256,uint256)"
+  - "TreasuryHandler.donateUsd8Revenue(uint256,uint256)"
+  - "PoolHandler.stake(uint256,uint256)"
+  - "PoolHandler.requestUnstake(uint256,uint256)"
+  - "PoolHandler.completeUnstake(uint256)"
+  - "PoolHandler.withdrawYield(uint256)"
+  - "PoolHandler.distribute(uint256)"
+  - "PoolHandler.warp(uint256)"
+  - "PoolHandler.transferShares(uint256,uint256,uint256)"
+  - "PoolHandler.donateAssets(uint256)"
+  - "PoolHandler.settleMatured(uint256)"
+  - "PoolHandler.payClaim(uint256,uint256)"
+  - "PoolHandler.setIncidentActive(bool)"
+  - "PoolHandler.frozenOperationsRemainAtomic(uint256,uint256)"
+  - "PoolHandler.donateRewards(uint256)"
+  - "PoolHandler.sweepDonatedRewards()"
+  - "InsuranceClaimHandler.join(uint256,uint128,uint256)"
+  - "InsuranceClaimHandler.cancel(uint256)"
+  - "InsuranceClaimHandler.warp(uint256)"
+  - "InsuranceClaimHandler.withdrawExpired(uint256)"
+  - "TreasuryInvariantTest.invariant_supplyEqualsAuthorizedMintsMinusBurns()"
+  - "TreasuryInvariantTest.invariant_reserveEqualsIdlePlusStrategyAssets()"
+  - "TreasuryInvariantTest.invariant_allUsd8IsAccountedFor()"
+  - "TreasuryInvariantTest.invariant_registryKeepsCanonicalTreasury()"
+  - "TreasuryInvariantTest.invariant_reserveMatchesIndependentGhostAccounting()"
+  - "TreasuryInvariantTest.invariant_harvestedRevenueReachedReceiver()"
+  - "TreasuryInvariantTest.invariant_noRevenueIsStrandedInTreasury()"
+  - "SingleAssetCoverPoolInvariantTest.invariant_rewardConservation()"
+  - "SingleAssetCoverPoolInvariantTest.invariant_shareAccounting()"
+  - "SingleAssetCoverPoolInvariantTest.invariant_assetAccountingIsExact()"
+  - "SingleAssetCoverPoolInvariantTest.invariant_activeAndReservedAssetsMatchLifecycleGhosts()"
+  - "SingleAssetCoverPoolInvariantTest.invariant_rewardReserveIsFullyBacked()"
+  - "SingleAssetCoverPoolInvariantTest.invariant_knownUserRewardsFitReserve()"
+  - "SingleAssetCoverPoolInvariantTest.invariant_registryFreezeMatchesHandlerIncident()"
+  - "InsuranceClaimInvariantTest.invariant_unresolvedMatchesLiveClaims()"
+  - "InsuranceClaimInvariantTest.invariant_escrowAccountingMatchesLiveClaims()"
+  - "InsuranceClaimInvariantTest.invariant_activeClaimIndexIsConsistent()"
+  - "InsuranceClaimInvariantTest.invariant_claimSetCommitmentMatchesReplay()"
+  - "InsuranceClaimInvariantTest.invariant_claimIdsAreGapless()"
+  - "InsuranceClaimInvariantTest.invariant_expiredVoidUnfreezesPools()"
+  - "InsuranceClaimInvariantTest.invariant_activeIncidentMatchesIndependentPhaseModel()"
+stopOnFail: true
+workers: 4
+format: "text"
+timeout: 3600
+corpusDir: "artifacts/echidna/corpus"
+coverageDir: "artifacts/echidna/coverage"
+coverageFormats: ["txt", "lcov"]
+coverageExcludes:
+  - "lib/**/*"
+  - "script/**/*"
+cryticArgs:
+  - "--foundry-compile-all"

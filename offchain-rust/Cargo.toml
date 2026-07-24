@@ -2,13 +2,17 @@
 name = "usd8-settlement"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91.1"
+rust-version = "1.92"
 publish = false
 license = "BUSL-1.1"
 
 [lib]
 name = "usd8_settlement"
 path = "src/lib.rs"
+
+[features]
+default = []
+sepolia = []
 
 [[bin]]
 name = "usd8-settlement"
@@ -30,10 +34,10 @@ serde_json = "=1.0.150"
 sha3 = "=0.11.0"
 sha2 = "=0.10.9"
 thiserror = "=2.0.18"
-tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "net", "io-util"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "net", "io-util"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-aws-nitro-enclaves-nsm-api = "=0.4.0"
+aws-nitro-enclaves-nsm-api = "=0.5.2"
 
 [profile.release]
 lto = "thin"

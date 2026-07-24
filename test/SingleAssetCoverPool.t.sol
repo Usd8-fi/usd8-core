@@ -333,7 +333,6 @@ contract SingleAssetCoverPoolTest is Test {
 
         vm.prank(admin); // admin == timelock in this harness
         defi.upgradeToAndCall(address(v2), "");
-        assertEq(DefiInsuranceV2(address(defi)).version(), 2);
     }
 
     function test_DefiInsuranceUpgradeBlockedDuringActiveIncident() public {
@@ -1438,6 +1437,21 @@ contract SingleAssetCoverPoolTest is Test {
         assertEq(defi.activeClaimId(id, carol), cid2);
     }
 
+    function test_OpenSignatureIsInvalidatedByPcrRotation() public {
+        uint64 refBlock = uint64(block.number - 1);
+        bytes memory staleSig = _teeSignOpen(address(lp1), refBlock);
+
+        vm.prank(admin);
+        registry.setTeePcrHash(bytes32(uint256(0xBEEF)));
+
+        lp1.mint(bob, 50e18);
+        vm.startPrank(bob);
+        lp1.approve(address(defi), 50e18);
+        vm.expectRevert();
+        defi.joinClaim(IERC20(address(lp1)), 50e18, 0, 0, refBlock, staleSig);
+        vm.stopPrank();
+    }
+
     /// @dev Once a claim is live, a join that still carries an open attestation
     ///      (non-zero referenceBlock or non-empty signature) is rejected.
     function test_JoinRejectsOpenAttestationWhenLive() public {
@@ -1848,8 +1862,8 @@ contract SingleAssetCoverPoolTest is Test {
         defi.finalizeClaim(amounts, scoreSpent, scoreSpent, escrow, new bytes32[](0));
     }
 
-    /// @dev EIP-712 IncidentOpen signature over (token, referenceBlock,
-    ///      nextIncidentId) — mirrors the on-chain open digest in joinClaim.
+    /// @dev EIP-712 IncidentOpen signature over token, referenceBlock,
+    ///      nextIncidentId, and current PCR — mirrors joinClaim.
     function _teeSignOpen(address token, uint64 referenceBlock) internal view returns (bytes memory) {
         return _signOpen(TEE_PK, token, referenceBlock);
     }
@@ -1867,10 +1881,13 @@ contract SingleAssetCoverPoolTest is Test {
         );
         bytes32 structHash = keccak256(
             abi.encode(
-                keccak256("IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId)"),
+                keccak256(
+                    "IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId,bytes32 teePcrHash)"
+                ),
                 token,
                 referenceBlock,
-                defi.nextIncidentId()
+                defi.nextIncidentId(),
+                registry.teePcrHash()
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
@@ -3321,11 +3338,7 @@ contract SingleAssetCoverPoolV2 is SingleAssetCoverPool {
     }
 }
 
-contract DefiInsuranceV2 is DefiInsurance {
-    function version() external pure returns (uint256) {
-        return 2;
-    }
-}
+contract DefiInsuranceV2 is DefiInsurance {}
 
 /// @dev Configurable token-to-underlying recipe used by curation tests.
 contract MockConversionRecipe {

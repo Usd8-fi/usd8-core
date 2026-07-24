@@ -10,6 +10,7 @@
 pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -69,8 +70,24 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     // ─────────────────────────── State ───────────────────────────
 
-    /// @notice Mainnet USDC token. Fixed at compile time.
-    IERC20 public constant USDC = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);
+    /// @custom:storage-location erc7201:usd8.storage.Treasury
+    struct TreasuryStorage {
+        IERC20 usdc;
+    }
+
+    /// @dev keccak256(abi.encode(uint256(keccak256("usd8.storage.Treasury")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant TREASURY_STORAGE = 0x0d48627c939e6496875931395c567691a7923a2c61d5f538a81c0feb79245c00;
+
+    function _treasuryStorage() private pure returns (TreasuryStorage storage $) {
+        assembly {
+            $.slot := TREASURY_STORAGE
+        }
+    }
+
+    /// @notice Chain-specific USDC reserve asset, fixed for the proxy's lifetime.
+    function USDC() public view returns (IERC20) {
+        return _treasuryStorage().usdc;
+    }
 
     /// @notice Decimal-scale factor between USDC (6) and USD8 (18): 1e12.
     uint256 public constant USDC_TO_USD8_SCALE = 1e12;
@@ -154,6 +171,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     /// @notice Thrown by {removeProfitReceiver} when the address isn't registered.
     error ProfitReceiverNotFound(address receiver);
 
+    /// @notice The Treasury cannot distribute revenue to itself.
+    error InvalidProfitReceiver(address receiver);
+
     /// @notice Thrown by {harvestAndDistribute} when there is revenue to
     ///         distribute but no registered receiver has a positive weight.
     error NoEligibleProfitReceivers();
@@ -161,6 +181,10 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     /// @notice Thrown when a hook-based receiver does not pull exactly the
     ///         approved revenue amount.
     error RevenueDeliveryMismatch(uint256 expected, uint256 actual);
+
+    error InvalidReserveAsset(address candidate);
+    error InvalidReserveDecimals(uint8 actual);
+    error ReserveAssetAlreadyConfigured(address current);
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -200,6 +224,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     /// @notice Emitted when {harvestAndDistribute} mints surplus into this Treasury.
     ///         amount is in USD8 base units (18 decimals).
     event RevenueHarvested(uint256 amount);
+    event ReserveAssetMigrated(address indexed reserveAsset);
 
     // ─────────────────────────── Constructor ─────────────────────
 
@@ -210,9 +235,28 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     /// @notice Initialize the Treasury proxy. Callable once.
     /// @param _registry Shared access, pause, and canonical-topology registry.
-    function initialize(Registry _registry) external initializer {
-        if (address(_registry) == address(0)) revert ZeroAddress();
+    /// @param usdc_ Chain-specific six-decimal reserve asset, fixed after initialization.
+    function initialize(Registry _registry, IERC20 usdc_) external initializer {
+        if (address(_registry) == address(0) || address(usdc_) == address(0)) revert ZeroAddress();
         _setRegistry(_registry);
+        _setReserveAsset(usdc_);
+    }
+
+    /// @notice Populate the reserve slot when upgrading a V1 proxy whose USDC
+    ///         address was a compile-time constant. Call atomically via upgradeToAndCall.
+    function migrateReserveAsset(IERC20 usdc_) external reinitializer(2) onlyTimelock {
+        IERC20 current = _treasuryStorage().usdc;
+        if (address(current) != address(0)) revert ReserveAssetAlreadyConfigured(address(current));
+        _setReserveAsset(usdc_);
+        emit ReserveAssetMigrated(address(usdc_));
+    }
+
+    function _setReserveAsset(IERC20 usdc_) private {
+        if (address(usdc_) == address(0)) revert ZeroAddress();
+        if (address(usdc_).code.length == 0) revert InvalidReserveAsset(address(usdc_));
+        uint8 reserveDecimals = IERC20Metadata(address(usdc_)).decimals();
+        if (reserveDecimals != 6) revert InvalidReserveDecimals(reserveDecimals);
+        _treasuryStorage().usdc = usdc_;
     }
 
     /// @notice Canonical USD8 token resolved from the shared Registry.
@@ -270,7 +314,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     function mintUSD8(uint256 usdcAmount) external nonReentrant whenNotPaused reserveSupplyStatusCheck {
         if (usdcAmount == 0) revert ZeroAmount();
 
-        USDC.safeTransferFrom(msg.sender, address(this), usdcAmount);
+        USDC().safeTransferFrom(msg.sender, address(this), usdcAmount);
         uint256 usd8Amount = usdcAmount * USDC_TO_USD8_SCALE;
         usd8().mint(msg.sender, usd8Amount);
 
@@ -311,7 +355,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
         usd8().burn(msg.sender, usd8Amount);
         _ensureIdleUsdc(usdcAmount);
-        USDC.safeTransfer(msg.sender, usdcAmount);
+        USDC().safeTransfer(msg.sender, usdcAmount);
 
         emit Redeemed(msg.sender, usd8Amount, usdcAmount);
     }
@@ -377,7 +421,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     function depositToStrategy(IStrategy s, uint256 amount) external nonReentrant onlyAdminOrTimelock whenNotPaused {
         if (amount == 0) revert ZeroAmount();
         _findApprovedStrategy(s);
-        USDC.safeTransfer(address(s), amount); // push USDC to strategies to avoid granting approvals.
+        USDC().safeTransfer(address(s), amount); // push USDC to strategies to avoid granting approvals.
         s.deploy(amount);
         emit DepositedToStrategy(s, amount);
     }
@@ -392,9 +436,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     function withdrawFromStrategy(IStrategy s, uint256 amount) external nonReentrant onlyAdminOrTimelock whenNotPaused {
         _findApprovedStrategy(s);
         if (amount == 0) revert ZeroAmount();
-        uint256 balanceBefore = USDC.balanceOf(address(this));
+        uint256 balanceBefore = USDC().balanceOf(address(this));
         s.withdraw(amount);
-        uint256 received = USDC.balanceOf(address(this)) - balanceBefore;
+        uint256 received = USDC().balanceOf(address(this)) - balanceBefore;
         emit WithdrawnFromStrategy(s, received);
     }
 
@@ -503,6 +547,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
         onlyAdminOrTimelock
     {
         if (receiver == address(0)) revert ZeroAddress();
+        if (receiver == address(this)) revert InvalidProfitReceiver(receiver);
         uint256 n = profitReceivers.length;
         for (uint256 i = 0; i < n; i++) {
             if (profitReceivers[i].receiver == receiver) {
@@ -540,7 +585,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///      which are protected (cap 0). Their normal exits are redeem/strategy
     ///      flows (USDC) and {harvestAndDistribute} (USD8).
     function _sweepable(address token) internal view override returns (uint256) {
-        if (token == address(USDC) || token == address(usd8())) return 0;
+        if (token == address(USDC()) || token == address(usd8())) return 0;
         return IERC20(token).balanceOf(address(this));
     }
 
@@ -553,7 +598,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///         just the collateral portion. Returned amount is in USDC base
     ///         units (6 decimals).
     function getReserveBalance() public view returns (uint256) {
-        uint256 total = USDC.balanceOf(address(this));
+        uint256 total = USDC().balanceOf(address(this));
         uint256 n = strategies.length;
         for (uint256 i = 0; i < n; i++) {
             // INTENTIONAL: no try/catch. If a strategy can't report totalAssets the
@@ -590,7 +635,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     function _ensureIdleUsdc(uint256 amount) internal {
         uint256 n = strategies.length;
         for (uint256 i = 0; i < n; i++) {
-            uint256 idle = USDC.balanceOf(address(this));
+            uint256 idle = USDC().balanceOf(address(this));
             if (idle >= amount) return;
             uint256 needed = amount - idle;
             IStrategy s = strategies[i];
@@ -604,7 +649,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
         // Walk exhausted: fail with a clear error rather than letting the
         // caller's transfer revert with a generic insufficient-balance error.
-        uint256 finalIdle = USDC.balanceOf(address(this));
+        uint256 finalIdle = USDC().balanceOf(address(this));
         if (finalIdle < amount) revert InsufficientLiquidity(amount, finalIdle);
     }
 

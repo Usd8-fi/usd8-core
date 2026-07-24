@@ -77,6 +77,14 @@ contract MockSwapRouter {
     }
 }
 
+contract MockTreasuryReserveAsset {
+    IERC20 public immutable USDC;
+
+    constructor(IERC20 usdc_) {
+        USDC = usdc_;
+    }
+}
+
 contract MockUsdtStrategy is StrategyBase {
     constructor(address treasury_, Registry registry_, IERC20 strategyToken_)
         StrategyBase(treasury_, registry_, strategyToken_)
@@ -100,6 +108,8 @@ contract ERC4626StrategyTest is Test {
         MockERC20 template = new MockERC20("USDC", "USDC", 6);
         vm.etch(MAINNET_USDC, address(template).code);
         usdc = MockERC20(MAINNET_USDC);
+        MockTreasuryReserveAsset treasuryTemplate = new MockTreasuryReserveAsset(IERC20(MAINNET_USDC));
+        vm.etch(TREASURY, address(treasuryTemplate).code);
 
         Registry implementation = new Registry();
         registry = Registry(

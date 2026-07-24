@@ -6,12 +6,14 @@ import {TimelockController} from "@openzeppelin/contracts/governance/TimelockCon
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {DeployTimelockScript} from "../script/01_DeployTimelock.s.sol";
 import {DeployUSD8SystemScript} from "../script/02_DeployUSD8System.s.sol";
+import {DeploymentConfig} from "../script/config/DeploymentConfig.sol";
 import {Registry} from "../src/Registry.sol";
 import {USD8} from "../src/USD8.sol";
 import {Treasury} from "../src/Treasury.sol";
 import {DefiInsurance} from "../src/DefiInsurance.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
 
 contract DeployTimelockScriptHarness is DeployTimelockScript {
     function deployForTest(address proposer) external returns (TimelockController) {
@@ -29,13 +31,59 @@ contract TrustedTreasuryBinding {
     }
 }
 
+contract ConfiguredDependencyMock {
+    uint8 public decimals = 6;
+    address public asset = address(this);
+    uint256 public conversion = 1e18;
+    int256 public answer = 1e8;
+
+    function setDecimals(uint8 value) external {
+        decimals = value;
+    }
+
+    function setAsset(address value) external {
+        asset = value;
+    }
+
+    function setConversion(uint256 value) external {
+        conversion = value;
+    }
+
+    function setAnswer(int256 value) external {
+        answer = value;
+    }
+
+    function convertToAssets(uint256) external view returns (uint256) {
+        return conversion;
+    }
+
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        return (1, answer, block.timestamp, block.timestamp, 1);
+    }
+
+    function vaultV2(address owner, address, bytes32) external pure returns (address) {
+        require(owner == address(1), "unstable probe owner");
+        return address(0);
+    }
+
+    function isVaultV2(address) external pure returns (bool) {
+        return false;
+    }
+}
+
+contract NoSemanticInterfaces {}
+
 contract DeployUSD8SystemScriptHarness is DeployUSD8SystemScript {
+    function validateConfiguredContractsForTest(Addresses memory addresses) external view {
+        _validateConfiguredContracts(addresses);
+    }
+
     function validateLaunchStrategyReviewForTest(bool reviewed) external pure {
         _validateLaunchStrategyReview(reviewed);
     }
 
-    function wstethUsdOracleForTest() external pure returns (address) {
-        return WSTETH_USD_ORACLE;
+    function wstethUsdOracleForTest() external view returns (address) {
+        return _deploymentConfig(1).coverAssetUsdOracle;
     }
 
     function validateForTest(address timelock, address proposer) external view {
@@ -46,12 +94,12 @@ contract DeployUSD8SystemScriptHarness is DeployUSD8SystemScript {
         _validateTreasuryBinding(usd8, registry, treasury);
     }
 
-    function insuredTokenConfigsForTest() external pure returns (InsuredTokenDeploymentConfig[2] memory) {
-        return _initialInsuredTokenConfigs();
+    function insuredTokenConfigsForTest() external view returns (InsuredTokenDeploymentConfig[2] memory) {
+        return _initialInsuredTokenConfigs(_deploymentConfig(1));
     }
 
     function addInitialInsuredTokensForTest(DefiInsurance defiInsurance) external {
-        _addInitialInsuredTokens(defiInsurance);
+        _addInitialInsuredTokens(defiInsurance, _deploymentConfig(1));
     }
 
     function coreProtocolInsuredTokenConfigForTest(address usd8, address usd8PriceOracle)
@@ -83,9 +131,115 @@ contract DeployUSD8SystemScriptHarness is DeployUSD8SystemScript {
 contract DeploymentScriptsTest is Test {
     address proposer = makeAddr("proposer");
 
+    function _deployConfiguredTreasury(Registry registry) internal returns (Treasury) {
+        MockERC20 reserveAsset = new MockERC20("Configured USDC", "cUSDC", 6);
+        return Treasury(
+            address(
+                new ERC1967Proxy(
+                    address(new Treasury()),
+                    abi.encodeCall(Treasury.initialize, (registry, IERC20(address(reserveAsset))))
+                )
+            )
+        );
+    }
+
+    function _validConfiguredAddresses()
+        internal
+        returns (DeploymentConfig.Addresses memory addresses, ConfiguredDependencyMock dependency)
+    {
+        dependency = new ConfiguredDependencyMock();
+        address configured = address(dependency);
+        addresses = DeploymentConfig.Addresses({
+            admin: proposer,
+            usdc: configured,
+            seedSink: address(0xdead),
+            morphoVaultV2Factory: configured,
+            booster: configured,
+            coverAsset: configured,
+            coverAssetUsdOracle: configured,
+            aaveUsdcVault: configured,
+            morphoUsdcVault: configured,
+            aaveSgho: configured,
+            ghoUsdOracle: configured,
+            skySusds: configured,
+            usdsUsdOracle: configured,
+            usdcUsdOracle: configured
+        });
+    }
+
+    function _semanticError(bytes32 field, address candidate) internal pure returns (bytes memory) {
+        return abi.encodeWithSignature("InvalidConfiguredDependency(bytes32,address)", field, candidate);
+    }
+
     function test_SystemDeploymentRunTakesTimelockParameter() public pure {
         bytes memory callData = abi.encodeCall(DeployUSD8SystemScript.run, (address(0x1234)));
         assertEq(bytes4(callData), bytes4(keccak256("run(address)")));
+    }
+
+    function test_SystemDeploymentRejectsConfiguredAddressWithoutCode() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        (DeploymentConfig.Addresses memory addresses,) = _validConfiguredAddresses();
+        address missingCode = makeAddr("missing cover asset");
+        addresses.coverAsset = missingCode;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployUSD8SystemScript.InvalidConfiguredContract.selector, bytes32("coverAsset"), missingCode
+            )
+        );
+        script.validateConfiguredContractsForTest(addresses);
+    }
+
+    function test_SystemDeploymentRejectsWrongReserveDecimalsBeforeBroadcast() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        (DeploymentConfig.Addresses memory addresses, ConfiguredDependencyMock dependency) = _validConfiguredAddresses();
+        dependency.setDecimals(18);
+
+        vm.expectRevert(_semanticError("usdc", address(dependency)));
+        script.validateConfiguredContractsForTest(addresses);
+    }
+
+    function test_SystemDeploymentRejectsWrongVaultUnderlyingBeforeBroadcast() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        (DeploymentConfig.Addresses memory addresses, ConfiguredDependencyMock dependency) = _validConfiguredAddresses();
+        dependency.setAsset(makeAddr("wrong vault asset"));
+
+        vm.expectRevert(_semanticError("aaveUsdcVault", address(dependency)));
+        script.validateConfiguredContractsForTest(addresses);
+    }
+
+    function test_SystemDeploymentRejectsZeroConversionBeforeBroadcast() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        (DeploymentConfig.Addresses memory addresses, ConfiguredDependencyMock dependency) = _validConfiguredAddresses();
+        dependency.setConversion(0);
+
+        vm.expectRevert(_semanticError("aaveSgho", address(dependency)));
+        script.validateConfiguredContractsForTest(addresses);
+    }
+
+    function test_SystemDeploymentRejectsNonPositiveOracleBeforeBroadcast() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        (DeploymentConfig.Addresses memory addresses, ConfiguredDependencyMock dependency) = _validConfiguredAddresses();
+        dependency.setAnswer(0);
+
+        vm.expectRevert(_semanticError("coverAssetUsdOracle", address(dependency)));
+        script.validateConfiguredContractsForTest(addresses);
+    }
+
+    function test_SystemDeploymentRejectsIncompatibleFactoryBeforeBroadcast() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        (DeploymentConfig.Addresses memory addresses,) = _validConfiguredAddresses();
+        addresses.morphoVaultV2Factory = address(new NoSemanticInterfaces());
+
+        vm.expectRevert(_semanticError("morphoVaultV2Factory", addresses.morphoVaultV2Factory));
+        script.validateConfiguredContractsForTest(addresses);
+    }
+
+    function test_SystemDeploymentPreflightUsesStableFactoryProbeOwner() public {
+        DeployUSD8SystemScriptHarness script = new DeployUSD8SystemScriptHarness();
+        (DeploymentConfig.Addresses memory addresses,) = _validConfiguredAddresses();
+
+        script.validateConfiguredContractsForTest(addresses);
     }
 
     function test_SystemDeploymentUsesCanonicalWstethUsdOracle() public {
@@ -143,9 +297,7 @@ contract DeploymentScriptsTest is Test {
         );
         USD8 usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
         registry.setUsd8(address(usd8));
-        Treasury treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
-        );
+        Treasury treasury = _deployConfiguredTreasury(registry);
 
         script.validateTreasuryBindingForTest(usd8, registry, treasury);
     }
@@ -179,9 +331,7 @@ contract DeploymentScriptsTest is Test {
         USD8 otherUsd8 =
             USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
         registry.setUsd8(address(otherUsd8));
-        Treasury treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
-        );
+        Treasury treasury = _deployConfiguredTreasury(registry);
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -281,19 +431,19 @@ contract DeploymentScriptsTest is Test {
         systemScript.validateForTest(address(timelock), proposer);
     }
 
-    function test_TimelockDeploymentRevertsOutsideEthereumMainnet() public {
+    function test_TimelockDeploymentRevertsOnUnsupportedChain() public {
         vm.chainId(31_337);
         DeployTimelockScript script = new DeployTimelockScript();
 
-        vm.expectRevert(abi.encodeWithSignature("WrongChainId(uint256,uint256)", uint256(31_337), uint256(1)));
+        vm.expectRevert(abi.encodeWithSelector(DeploymentConfig.UnsupportedChain.selector, uint256(31_337)));
         script.run();
     }
 
-    function test_SystemDeploymentRevertsOutsideEthereumMainnet() public {
+    function test_SystemDeploymentRevertsOnUnsupportedChain() public {
         vm.chainId(31_337);
         DeployUSD8SystemScript script = new DeployUSD8SystemScript();
 
-        vm.expectRevert(abi.encodeWithSignature("WrongChainId(uint256,uint256)", uint256(31_337), uint256(1)));
+        vm.expectRevert(abi.encodeWithSelector(DeploymentConfig.UnsupportedChain.selector, uint256(31_337)));
         script.run(address(0));
     }
 
@@ -397,9 +547,7 @@ contract DeploymentScriptsTest is Test {
             )
         );
         USD8 usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
-        Treasury treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry))))
-        );
+        Treasury treasury = _deployConfiguredTreasury(registry);
         DefiInsurance defiInsurance = DefiInsurance(
             address(
                 new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (registry)))

@@ -160,6 +160,45 @@ impl HttpRpc {
         retry_delay_ms: u64,
         response_byte_cap: usize,
     ) -> Result<Self, RpcError> {
+        let proxy_url = (std::env::var("USD8_ENCLAVE_PROXY").as_deref() == Ok("1"))
+            .then_some("http://127.0.0.1:8080");
+        Self::new_inner(
+            endpoint,
+            drpc_key,
+            timeout_ms,
+            retry_count,
+            retry_delay_ms,
+            response_byte_cap,
+            proxy_url,
+        )
+    }
+
+    pub fn new_with_https_proxy(
+        endpoint: &str,
+        drpc_key: Option<&str>,
+        timeout_ms: u64,
+        proxy_url: &str,
+    ) -> Result<Self, RpcError> {
+        Self::new_inner(
+            endpoint,
+            drpc_key,
+            timeout_ms,
+            5,
+            200,
+            DEFAULT_RPC_RESPONSE_BYTE_CAP,
+            Some(proxy_url),
+        )
+    }
+
+    fn new_inner(
+        endpoint: &str,
+        drpc_key: Option<&str>,
+        timeout_ms: u64,
+        retry_count: u32,
+        retry_delay_ms: u64,
+        response_byte_cap: usize,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, RpcError> {
         if timeout_ms == 0 || timeout_ms > MAX_RPC_TIMEOUT_MS {
             return Err(RpcError::InvalidTimeout {
                 maximum_ms: MAX_RPC_TIMEOUT_MS,
@@ -180,10 +219,18 @@ impl HttpRpc {
             value.set_sensitive(true);
             headers.insert(DRPC_HEADER, value);
         }
-        let client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .default_headers(headers)
             .redirect(Policy::none())
-            .timeout(Duration::from_millis(timeout_ms))
+            .timeout(Duration::from_millis(timeout_ms));
+        if let Some(proxy_url) = proxy_url {
+            let proxy = reqwest::Proxy::https(proxy_url).map_err(|error| RpcError::Transport {
+                method: "proxy initialization".to_owned(),
+                message: error.to_string(),
+            })?;
+            client_builder = client_builder.proxy(proxy);
+        }
+        let client = client_builder
             .build()
             .map_err(|error| RpcError::Transport {
                 method: "client initialization".to_owned(),

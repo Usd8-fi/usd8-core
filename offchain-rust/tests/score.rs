@@ -3,7 +3,7 @@ use alloy_sol_types::{SolCall, SolEvent};
 use async_trait::async_trait;
 use num_bigint::BigUint;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -15,7 +15,7 @@ use usd8_settlement::abi::IERC20;
 use usd8_settlement::chain::{
     IncidentConfig, RatePoint, ScoredToken, SettlementParams, earned_score_of,
 };
-use usd8_settlement::checkpoint::{CheckpointError, CheckpointScoreSource};
+use usd8_settlement::checkpoint::{BulkScoreSource, CheckpointError, CheckpointScoreSource};
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
 
 const TOKEN: &str = "0x0000000000000000000000000000000000001000";
@@ -240,6 +240,63 @@ async fn raw_score_matches_rate_segment_golden_vector() {
 }
 
 #[tokio::test]
+async fn ephemeral_bulk_matches_raw_for_multiple_users_and_tracks_only_claimants() {
+    let rpc = Arc::new(rpc());
+    let bulk = BulkScoreSource::open(
+        rpc.clone(),
+        &cfg(),
+        10,
+        BTreeSet::from([ka(ALICE), ka(BOB), ka(ALICE)]),
+        1,
+        3,
+        1_000,
+    )
+    .await
+    .unwrap();
+    for user in [ka(ALICE), ka(BOB)] {
+        let (raw, _) = earned_score_of(rpc.as_ref(), &cfg(), user, 10, 1_000, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(bulk.gross_score_of(user).await.unwrap(), raw);
+    }
+    assert_eq!(bulk.metadata.tracked_accounts, 2);
+    assert_eq!(bulk.metadata.indexed_tokens, 1);
+    assert_eq!(bulk.metadata.indexed_transfers, 3);
+    // Four bounded 3-block slices, independent of claimant and rate-segment counts.
+    assert_eq!(rpc.global_log_queries.load(Ordering::Relaxed), 4);
+}
+
+#[tokio::test]
+async fn ephemeral_bulk_reconciles_every_tracked_balance_and_ignores_untracked_accounts() {
+    let stranger = "0x000000000000000000000000000000000000cafe";
+    let logs = vec![
+        transfer(ZERO, stranger, 1_000, 1, 0),
+        transfer(ZERO, ALICE, 100, 1, 1),
+        transfer(stranger, ZERO, 1_000, 9, 2),
+    ];
+    let balances = [((ALICE.to_ascii_lowercase(), 10), U256::from(101))]
+        .into_iter()
+        .collect();
+    let error = BulkScoreSource::open(
+        Arc::new(score_rpc(logs, balances)),
+        &cfg(),
+        10,
+        BTreeSet::from([ka(ALICE)]),
+        1,
+        1_000,
+        1_000,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported token balance semantics")
+    );
+}
+
+#[tokio::test]
 async fn authenticated_checkpoint_matches_raw_and_advances_once_per_token() {
     let rpc = Arc::new(rpc());
     let path = checkpoint_path();
@@ -461,10 +518,22 @@ async fn checkpoint_matches_raw_for_more_than_18_decimals() {
     assert_eq!(raw, BigUint::from(13u8));
     let path = checkpoint_path();
     let checkpoint =
-        CheckpointScoreSource::open(rpc, &config, 10, &path, 1, &[4u8; 32], 1_000, 1_000)
+        CheckpointScoreSource::open(rpc.clone(), &config, 10, &path, 1, &[4u8; 32], 1_000, 1_000)
             .await
             .unwrap();
     assert_eq!(checkpoint.gross_score_of(ka(ALICE)).await.unwrap(), raw);
+    let bulk = BulkScoreSource::open(
+        rpc,
+        &config,
+        10,
+        BTreeSet::from([ka(ALICE)]),
+        1,
+        1_000,
+        1_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bulk.gross_score_of(ka(ALICE)).await.unwrap(), raw);
     let _ = fs::remove_file(path);
 }
 
@@ -484,9 +553,21 @@ async fn score_divides_once_after_summing_all_token_numerators() {
     assert_eq!(raw, BigUint::from(1u8));
     let path = checkpoint_path();
     let checkpoint =
-        CheckpointScoreSource::open(rpc, &config, 2, &path, 1, &[5u8; 32], 1_000, 1_000)
+        CheckpointScoreSource::open(rpc.clone(), &config, 2, &path, 1, &[5u8; 32], 1_000, 1_000)
             .await
             .unwrap();
     assert_eq!(checkpoint.gross_score_of(ka(ALICE)).await.unwrap(), raw);
+    let bulk = BulkScoreSource::open(
+        rpc,
+        &config,
+        2,
+        BTreeSet::from([ka(ALICE)]),
+        1,
+        1_000,
+        1_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bulk.gross_score_of(ka(ALICE)).await.unwrap(), raw);
     let _ = fs::remove_file(path);
 }

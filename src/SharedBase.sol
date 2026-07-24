@@ -62,6 +62,8 @@ abstract contract SharedBase {
     // ─────────────────────────── Errors / events ───────────────────────────
 
     error ZeroAddress();
+    /// @notice A sweep cannot send assets back to the contract being swept.
+    error InvalidSweepRecipient(address recipient);
     error EthTransferFailed();
     /// @notice Nothing sweepable for this token (address(0) = ETH).
     error NothingToSweep(address token);
@@ -118,13 +120,14 @@ abstract contract SharedBase {
 
     // ─────────────────────────── Sweep (admin or timelock) ───────────────────────────
 
-    /// @notice Sweep ALL force-sent ETH from this contract to `to`. Admin or
-    ///         timelock. No managed contract has a payable entrypoint, so any ETH
-    ///         balance here can only have arrived by force-send — always stray.
-    ///         Reverts if there is none.
+    /// @notice Sweep ALL stray ETH from this contract to `to`. Admin or timelock.
+    ///         Managed contracts have no ordinary payable business entrypoint;
+    ///         ETH may arrive by force-send or through payable UUPS upgrade
+    ///         initialization. Reverts if there is none.
     /// @param to  Recipient (non-zero).
     function sweepETH(address payable to) external onlyAdminOrTimelock {
         if (to == address(0)) revert ZeroAddress();
+        if (to == address(this)) revert InvalidSweepRecipient(to);
         uint256 amount = address(this).balance;
         if (amount == 0) revert NothingToSweep(address(0));
         (bool ok,) = to.call{value: amount}("");
@@ -144,6 +147,7 @@ abstract contract SharedBase {
     /// @param to     Recipient (non-zero).
     function sweepToken(IERC20 token, address to) external onlyAdminOrTimelock {
         if (to == address(0)) revert ZeroAddress();
+        if (to == address(this)) revert InvalidSweepRecipient(to);
         uint256 amount = _sweepable(address(token));
         if (amount == 0) revert NothingToSweep(address(token));
         token.safeTransfer(to, amount);

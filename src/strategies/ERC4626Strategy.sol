@@ -14,7 +14,7 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IStrategy} from "../interfaces/IStrategy.sol";
 import {Registry} from "../Registry.sol";
-import {StrategyBase} from "./StrategyBase.sol";
+import {ITreasuryReserveAsset, StrategyBase} from "./StrategyBase.sol";
 
 /// @title  ERC4626Strategy
 /// @notice {IStrategy} adapter that deploys USDC into any ERC-4626 vault whose
@@ -79,7 +79,9 @@ contract ERC4626Strategy is IStrategy, StrategyBase {
     /// @param _treasury The Treasury contract that owns this strategy.
     /// @param _registry Shared role and approved-swap-route registry.
     /// @param _vault    The ERC-4626 vault to deposit into. Must report asset() == USDC.
-    constructor(address _treasury, Registry _registry, IERC4626 _vault) StrategyBase(_treasury, _registry, USDC) {
+    constructor(address _treasury, Registry _registry, IERC4626 _vault)
+        StrategyBase(_treasury, _registry, ITreasuryReserveAsset(_treasury).USDC())
+    {
         if (address(_vault) == address(0)) revert ZeroAddress();
         address vaultAsset = _vault.asset();
         if (vaultAsset != address(USDC)) revert VaultAssetMismatch(address(USDC), vaultAsset);
@@ -89,7 +91,7 @@ contract ERC4626Strategy is IStrategy, StrategyBase {
     }
 
     /// @inheritdoc IStrategy
-    function underlying() external pure returns (address) {
+    function underlying() external view returns (address) {
         return address(USDC);
     }
 

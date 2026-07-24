@@ -11,10 +11,11 @@ use std::time::Instant;
 use usd8_settlement::Address;
 use usd8_settlement::artifact::{verify_run, write_atomic_json};
 use usd8_settlement::engine::{ScoreMode, build_settlement, settlement_config_from_registry};
+use usd8_settlement::incident_open::build_incident_open;
 use usd8_settlement::rpc::HttpRpc;
 use usd8_settlement::{allocate, parse_json, serialize_output};
 
-const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --registry <address> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --registry <address> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement verify  <incidentId> --registry <address> --rpc-url <url> [--checkpoint <file>] [--output <file>]\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_REGISTRY, ETH_RPC_URL, DRPC_KEY, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
+const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-open <insuredToken> <referenceBlock> --registry <address> --rpc-url <url> --expected-signer <address> [--output <file>]\n  usd8-settlement verify  <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement pcr-hash <PCR0> <PCR1> <PCR2>\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_REGISTRY, ETH_RPC_URL, DRPC_KEY, USD8_EXPECTED_SIGNER, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
 
 #[derive(Debug)]
 enum CliError {
@@ -116,8 +117,10 @@ struct ProductionArgs {
     timeout_ms: Option<u64>,
     drpc_key_env: Option<String>,
     checkpoint_key_env: Option<String>,
+    expected_signer: Option<String>,
     no_drpc_key: bool,
     raw_score: bool,
+    bulk_score: bool,
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), String> {
@@ -174,14 +177,24 @@ fn parse_production_args(args: &[String]) -> Result<ProductionArgs, String> {
                     "--checkpoint-key-env",
                 )?;
             }
+            "--expected-signer" => {
+                let value = option_value(args, &mut index, "--expected-signer")?;
+                set_once(&mut parsed.expected_signer, value, "--expected-signer")?;
+            }
             "--no-drpc-key" => parsed.no_drpc_key = true,
             "--raw-score" => parsed.raw_score = true,
+            "--bulk-score" => parsed.bulk_score = true,
             value => return Err(format!("unknown option: {value}")),
         }
         index += 1;
     }
-    if parsed.raw_score && parsed.checkpoint.is_some() {
-        return Err("--raw-score and --checkpoint are mutually exclusive".to_owned());
+    let explicit_modes = usize::from(parsed.raw_score)
+        + usize::from(parsed.bulk_score)
+        + usize::from(parsed.checkpoint.is_some());
+    if explicit_modes > 1 {
+        return Err(
+            "--raw-score, --bulk-score, and --checkpoint are mutually exclusive".to_owned(),
+        );
     }
     Ok(parsed)
 }
@@ -325,10 +338,177 @@ fn verification_exit_code(root_matches: bool) -> i32 {
     if root_matches { 0 } else { 1 }
 }
 
+fn parse_u64_decimal(value: &str, field: &str) -> Result<u64, CliError> {
+    if value.is_empty()
+        || value == "0"
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(usage(format!("invalid {field}: {value}")));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| usage(format!("invalid {field}: {value}")))
+}
+
+fn run_pcr_hash(args: &[String]) -> Result<i32, CliError> {
+    if args.len() != 3 {
+        return Err(usage("pcr-hash requires PCR0 PCR1 PCR2"));
+    }
+    let mut pcrs = Vec::with_capacity(3);
+    for value in args {
+        let value = value.strip_prefix("0x").unwrap_or(value);
+        let bytes = hex::decode(value).map_err(|_| usage("invalid PCR hex"))?;
+        if bytes.len() != usd8_settlement::tee::PCR_BYTE_LENGTH {
+            return Err(usage("each PCR must be 48 bytes"));
+        }
+        pcrs.push(bytes);
+    }
+    println!(
+        "{}",
+        usd8_settlement::tee::pcr0_2_hash(&pcrs[0], &pcrs[1], &pcrs[2])
+            .map_err(|error| fatal(error.to_string()))?
+    );
+    Ok(0)
+}
+
+async fn run_attested_open(args: &[String]) -> Result<i32, CliError> {
+    let token_text = args.first().ok_or_else(|| usage("missing insuredToken"))?;
+    let reference_text = args.get(1).ok_or_else(|| usage("missing referenceBlock"))?;
+    let insured_token = Address::from_str(token_text)
+        .map_err(|_| usage(format!("invalid insuredToken: {token_text}")))?;
+    if insured_token.is_zero() {
+        return Err(usage("insuredToken is zero"));
+    }
+    let reference_block = parse_u64_decimal(reference_text, "referenceBlock")?;
+    let options = parse_production_args(&args[2..]).map_err(usage)?;
+    if options.checkpoint.is_some()
+        || options.checkpoint_key_env.is_some()
+        || options.raw_score
+        || options.bulk_score
+    {
+        return Err(usage(
+            "checkpoint and score options are invalid for attested-open",
+        ));
+    }
+    validate_production_paths(None, options.output.as_deref()).map_err(usage)?;
+    let registry_text = options
+        .registry
+        .or_else(|| {
+            env::var("USD8_REGISTRY")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| usage("missing --registry or USD8_REGISTRY"))?;
+    let registry = Address::from_str(&registry_text)
+        .map_err(|_| usage(format!("invalid Registry address: {registry_text}")))?;
+    if registry.is_zero() {
+        return Err(usage("Registry address is zero"));
+    }
+    let signer_text = options
+        .expected_signer
+        .or_else(|| {
+            env::var("USD8_EXPECTED_SIGNER")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| usage("missing --expected-signer or USD8_EXPECTED_SIGNER"))?;
+    let expected_signer = Address::from_str(&signer_text)
+        .map_err(|_| usage(format!("invalid expected signer: {signer_text}")))?;
+    if expected_signer.is_zero() {
+        return Err(usage("expected signer is zero"));
+    }
+    let rpc_url = options
+        .rpc_url
+        .or_else(|| {
+            env::var("ETH_RPC_URL")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| usage("missing --rpc-url or ETH_RPC_URL"))?;
+    let drpc_key_name = options
+        .drpc_key_env
+        .unwrap_or_else(|| "DRPC_KEY".to_owned());
+    let drpc_key = if options.no_drpc_key {
+        None
+    } else {
+        env::var(&drpc_key_name)
+            .ok()
+            .filter(|value| !value.is_empty())
+    };
+    let Some(drpc_key) = drpc_key else {
+        return Err(fatal(
+            "attested-open requires DRPC_KEY for the approved dRPC endpoint",
+        ));
+    };
+    let rpc = HttpRpc::new(
+        &rpc_url,
+        Some(&drpc_key),
+        options.timeout_ms.unwrap_or(30_000),
+    )
+    .map_err(|error| fatal(error.to_string()))?;
+    let authorization = build_incident_open(
+        &rpc,
+        registry,
+        insured_token,
+        reference_block,
+        expected_signer,
+    )
+    .await
+    .map_err(|error| fatal(error.to_string()))?;
+    let digest_bytes = hex::decode(
+        authorization
+            .digest()
+            .strip_prefix("0x")
+            .ok_or_else(|| fatal("open digest is missing 0x prefix"))?,
+    )
+    .map_err(|error| fatal(format!("invalid open digest: {error}")))?;
+    let attestation = usd8_settlement::tee::fresh_nitro_attestation(&digest_bytes)
+        .map_err(|error| fatal(error.to_string()))?;
+    if !attestation
+        .pcr_hash
+        .eq_ignore_ascii_case(&authorization.tee_pcr_hash)
+    {
+        return Err(fatal(format!(
+            "local Nitro PCR hash {} does not match Registry commitment {}",
+            attestation.pcr_hash, authorization.tee_pcr_hash
+        )));
+    }
+    let mut artifact = serde_json::to_value(&authorization)
+        .map_err(|error| fatal(format!("open artifact JSON failed: {error}")))?;
+    let object = artifact
+        .as_object_mut()
+        .ok_or_else(|| fatal("open artifact is not a JSON object"))?;
+    object.insert(
+        "nitroAttestationDocument".to_owned(),
+        serde_json::json!(format!("0x{}", hex::encode(attestation.document))),
+    );
+    object.insert(
+        "measuredTeePcrHash".to_owned(),
+        serde_json::json!(attestation.pcr_hash),
+    );
+    object.insert(
+        "nitroAttestedDigest".to_owned(),
+        serde_json::json!(authorization.digest()),
+    );
+    if let Some(path) = options.output {
+        write_atomic_json(&path, &artifact).map_err(|error| fatal(error.to_string()))?;
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&artifact).map_err(|error| fatal(error.to_string()))?
+        );
+    }
+    Ok(0)
+}
+
 async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
     let incident_text = args.first().ok_or_else(|| usage("missing incidentId"))?;
     let incident_id = parse_incident(incident_text).map_err(usage)?;
     let options = parse_production_args(&args[1..]).map_err(usage)?;
+    if options.expected_signer.is_some() {
+        return Err(usage("--expected-signer is valid only for attested-open"));
+    }
     let registry_text = options
         .registry
         .or_else(|| {
@@ -343,7 +523,7 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
         return Err(usage("Registry address is zero"));
     }
     let output_path = options.output.clone();
-    let checkpoint_path = if options.raw_score {
+    let checkpoint_path = if options.raw_score || options.bulk_score {
         None
     } else {
         options
@@ -383,7 +563,9 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
         )
         .map_err(|error| fatal(error.to_string()))?,
     );
-    let score_mode = if let Some(path) = checkpoint_path {
+    let score_mode = if options.bulk_score {
+        ScoreMode::Bulk
+    } else if let Some(path) = checkpoint_path {
         let key_name = options
             .checkpoint_key_env
             .unwrap_or_else(|| "SCORE_CHECKPOINT_KEY".to_owned());
@@ -405,7 +587,7 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
         .await
         .map_err(|error| fatal(error.to_string()))?;
     verify_run(&run, &config).map_err(|error| fatal(error.to_string()))?;
-    let mut artifact = run.artifact(&config, mode != "verify");
+    let mut artifact = run.artifact(&config, mode == "compute");
     if mode == "attested-compute" {
         let digest_bytes = hex::decode(
             run.digest
@@ -468,6 +650,14 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
 async fn run() -> Result<i32, CliError> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
+        Some("pcr-hash") => {
+            args.remove(0);
+            run_pcr_hash(&args)
+        }
+        Some("attested-open") => {
+            args.remove(0);
+            run_attested_open(&args).await
+        }
         Some("compute") | Some("attested-compute") | Some("verify") => {
             let mode = args.remove(0);
             run_production(&mode, &args).await

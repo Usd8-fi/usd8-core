@@ -1,0 +1,249 @@
+[
+  {
+    "name": "abundant pool pays the covered-loss cap and uses committed boosters",
+    "derivation": [
+      "eligible = min(100 escrowed, 100 held) = 100 tokens; with 1:1 TWAP and $1 underlying, loss = $100",
+      "claim cap = 80% * $100 = $80; the $1000 pool is abundant, so payout = $80",
+      "earned score = 100 gross - 40 previously spent = 60; requested 1000 clamps to 60",
+      "boosted score = floor(60 * (10000 + 2 * 100) / 10000) = 61"
+    ],
+    "input": {
+      "incidentId": "101",
+      "coverageBps": "8000",
+      "insuredDecimals": 18,
+      "twapRatio": "1000000000000000000",
+      "underlyingUsd": "1000000000000000000",
+      "maxCoverPoolPayoutBps": "10000",
+      "pools": [
+        { "balance": "1000000000000000000000", "assetUsd": "1000000000000000000", "assetDecimals": 18 }
+      ],
+      "claims": [
+        {
+          "claimId": "1",
+          "user": "0x00000000000000000000000000000000000000a1",
+          "escrowAmount": "100000000000000000000",
+          "minHeld": "100000000000000000000",
+          "grossEarnedScore": "100",
+          "spentScore": "40",
+          "scoreToSpend": "1000",
+          "boosterAmount": "2"
+        }
+      ]
+    },
+    "expected": {
+      "rows": [
+        {
+          "claimId": "1",
+          "eligibleAmount": "100000000000000000000",
+          "lossUsd": "100000000000000000000",
+          "earnedScore": "60",
+          "scoreSpent": "60",
+          "boostedScore": "61",
+          "payoutUsd": "80000000000000000000",
+          "amounts": ["80000000000000000000"]
+        }
+      ],
+      "poolPayouts": ["80000000000000000000"]
+    }
+  },
+  {
+    "name": "equal weights split a scarce pool exactly",
+    "derivation": [
+      "each claim has $100 loss and an 80% cap, so each covered need is $80",
+      "each spends 50 score, so both geometric weights sqrt(80 * 50) are equal",
+      "the $100 pool budget therefore splits exactly $50 / $50"
+    ],
+    "input": {
+      "incidentId": "102",
+      "coverageBps": "8000",
+      "insuredDecimals": 18,
+      "twapRatio": "1000000000000000000",
+      "underlyingUsd": "1000000000000000000",
+      "maxCoverPoolPayoutBps": "10000",
+      "pools": [
+        { "balance": "100000000000000000000", "assetUsd": "1000000000000000000", "assetDecimals": 18 }
+      ],
+      "claims": [
+        {
+          "claimId": "1",
+          "user": "0x00000000000000000000000000000000000000b1",
+          "escrowAmount": "100000000000000000000",
+          "minHeld": "100000000000000000000",
+          "grossEarnedScore": "50",
+          "spentScore": "0",
+          "scoreToSpend": "50",
+          "boosterAmount": "0"
+        },
+        {
+          "claimId": "2",
+          "user": "0x00000000000000000000000000000000000000b2",
+          "escrowAmount": "100000000000000000000",
+          "minHeld": "100000000000000000000",
+          "grossEarnedScore": "50",
+          "spentScore": "0",
+          "scoreToSpend": "50",
+          "boosterAmount": "0"
+        }
+      ]
+    },
+    "expected": {
+      "rows": [
+        {
+          "claimId": "1",
+          "eligibleAmount": "100000000000000000000",
+          "lossUsd": "100000000000000000000",
+          "earnedScore": "50",
+          "scoreSpent": "50",
+          "boostedScore": "50",
+          "payoutUsd": "50000000000000000000",
+          "amounts": ["50000000000000000000"]
+        },
+        {
+          "claimId": "2",
+          "eligibleAmount": "100000000000000000000",
+          "lossUsd": "100000000000000000000",
+          "earnedScore": "50",
+          "scoreSpent": "50",
+          "boostedScore": "50",
+          "payoutUsd": "50000000000000000000",
+          "amounts": ["50000000000000000000"]
+        }
+      ],
+      "poolPayouts": ["100000000000000000000"]
+    }
+  },
+  {
+    "name": "water filling redistributes a saturated claim share",
+    "derivation": [
+      "80% coverage gives claim caps of $10, $36, and $64",
+      "scores 90, 100, and 100 make exact geometric weights sqrt(10*90)=30, sqrt(36*100)=60, sqrt(64*100)=80",
+      "the first 30:60:80 split would exceed claim 1's $10 cap, so claim 1 saturates at $10",
+      "the remaining $70 splits 60:80 between claims 2 and 3, yielding $30 and $40"
+    ],
+    "input": {
+      "incidentId": "103",
+      "coverageBps": "8000",
+      "insuredDecimals": 18,
+      "twapRatio": "1000000000000000000",
+      "underlyingUsd": "1000000000000000000",
+      "maxCoverPoolPayoutBps": "10000",
+      "pools": [
+        { "balance": "80000000000000000000", "assetUsd": "1000000000000000000", "assetDecimals": 18 }
+      ],
+      "claims": [
+        {
+          "claimId": "1",
+          "user": "0x00000000000000000000000000000000000000c1",
+          "escrowAmount": "12500000000000000000",
+          "minHeld": "12500000000000000000",
+          "grossEarnedScore": "90",
+          "spentScore": "0",
+          "scoreToSpend": "90",
+          "boosterAmount": "0"
+        },
+        {
+          "claimId": "2",
+          "user": "0x00000000000000000000000000000000000000c2",
+          "escrowAmount": "45000000000000000000",
+          "minHeld": "45000000000000000000",
+          "grossEarnedScore": "100",
+          "spentScore": "0",
+          "scoreToSpend": "100",
+          "boosterAmount": "0"
+        },
+        {
+          "claimId": "3",
+          "user": "0x00000000000000000000000000000000000000c3",
+          "escrowAmount": "80000000000000000000",
+          "minHeld": "80000000000000000000",
+          "grossEarnedScore": "100",
+          "spentScore": "0",
+          "scoreToSpend": "100",
+          "boosterAmount": "0"
+        }
+      ]
+    },
+    "expected": {
+      "rows": [
+        {
+          "claimId": "1",
+          "eligibleAmount": "12500000000000000000",
+          "lossUsd": "12500000000000000000",
+          "earnedScore": "90",
+          "scoreSpent": "90",
+          "boostedScore": "90",
+          "payoutUsd": "10000000000000000000",
+          "amounts": ["10000000000000000000"]
+        },
+        {
+          "claimId": "2",
+          "eligibleAmount": "45000000000000000000",
+          "lossUsd": "45000000000000000000",
+          "earnedScore": "100",
+          "scoreSpent": "100",
+          "boostedScore": "100",
+          "payoutUsd": "30000000000000000000",
+          "amounts": ["30000000000000000000"]
+        },
+        {
+          "claimId": "3",
+          "eligibleAmount": "80000000000000000000",
+          "lossUsd": "80000000000000000000",
+          "earnedScore": "100",
+          "scoreSpent": "100",
+          "boostedScore": "100",
+          "payoutUsd": "40000000000000000000",
+          "amounts": ["40000000000000000000"]
+        }
+      ],
+      "poolPayouts": ["80000000000000000000"]
+    }
+  },
+  {
+    "name": "eligibility and prior spending cap the claim before pool allocation",
+    "derivation": [
+      "eligible = min(100 escrowed, 30 minimum insured-token balance) = 30 tokens, hence $30 loss",
+      "80% coverage caps the claim at $24; the pool's 25% incident budget is $25, so the claim cap binds at $24",
+      "earned score = 1000 gross - 900 previously spent = 100; requested 500 clamps to 100",
+      "boosted score = floor(100 * (10000 + 3 * 100) / 10000) = 103"
+    ],
+    "input": {
+      "incidentId": "104",
+      "coverageBps": "8000",
+      "insuredDecimals": 18,
+      "twapRatio": "1000000000000000000",
+      "underlyingUsd": "1000000000000000000",
+      "maxCoverPoolPayoutBps": "2500",
+      "pools": [
+        { "balance": "100000000000000000000", "assetUsd": "1000000000000000000", "assetDecimals": 18 }
+      ],
+      "claims": [
+        {
+          "claimId": "1",
+          "user": "0x00000000000000000000000000000000000000d1",
+          "escrowAmount": "100000000000000000000",
+          "minHeld": "30000000000000000000",
+          "grossEarnedScore": "1000",
+          "spentScore": "900",
+          "scoreToSpend": "500",
+          "boosterAmount": "3"
+        }
+      ]
+    },
+    "expected": {
+      "rows": [
+        {
+          "claimId": "1",
+          "eligibleAmount": "30000000000000000000",
+          "lossUsd": "30000000000000000000",
+          "earnedScore": "100",
+          "scoreSpent": "100",
+          "boostedScore": "103",
+          "payoutUsd": "24000000000000000000",
+          "amounts": ["24000000000000000000"]
+        }
+      ],
+      "poolPayouts": ["24000000000000000000"]
+    }
+  }
+]

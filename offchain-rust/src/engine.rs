@@ -5,7 +5,7 @@ use crate::chain::{
     incident_tee_pcr_hash_at, max_cover_pool_payout_bps_at, min_balance_over, pool_state_at,
     pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
 };
-use crate::checkpoint::{CheckpointError, CheckpointScoreSource};
+use crate::checkpoint::{BulkScoreSource, CheckpointError, CheckpointScoreSource};
 use crate::config::{BootstrapConfig, ConfigError, LOG_RESULT_CAP, MAX_LOG_RANGE};
 use crate::rpc::{LogMetrics, Rpc, RpcMetrics};
 use crate::typed_data::{SettlementDigestInput, TypedDataError, settlement_digest};
@@ -15,7 +15,7 @@ use crate::{
 };
 use num_bigint::BigUint;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -23,6 +23,7 @@ use thiserror::Error;
 #[derive(Clone)]
 pub enum ScoreMode {
     Raw,
+    Bulk,
     Checkpoint {
         path: PathBuf,
         integrity_key: Vec<u8>,
@@ -33,6 +34,7 @@ impl std::fmt::Debug for ScoreMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Raw => formatter.write_str("Raw"),
+            Self::Bulk => formatter.write_str("Bulk"),
             Self::Checkpoint { path, .. } => formatter
                 .debug_struct("Checkpoint")
                 .field("path", path)
@@ -62,6 +64,13 @@ pub enum EngineError {
 pub enum ScoreSourceMetadata {
     Raw {
         as_of_block: u64,
+    },
+    Bulk {
+        as_of_block: u64,
+        as_of_block_hash: String,
+        indexed_transfers: usize,
+        indexed_tokens: usize,
+        tracked_accounts: usize,
     },
     Checkpoint {
         path: PathBuf,
@@ -172,6 +181,20 @@ impl SettlementRun {
             ScoreSourceMetadata::Raw { as_of_block } => {
                 json!({ "kind": "raw-rpc", "asOfBlock": as_of_block.to_string() })
             }
+            ScoreSourceMetadata::Bulk {
+                as_of_block,
+                as_of_block_hash,
+                indexed_transfers,
+                indexed_tokens,
+                tracked_accounts,
+            } => json!({
+                "kind": "ephemeral-bulk-rpc",
+                "asOfBlock": as_of_block.to_string(),
+                "asOfBlockHash": as_of_block_hash,
+                "indexedTransfers": indexed_transfers,
+                "indexedTokens": indexed_tokens,
+                "trackedAccounts": tracked_accounts,
+            }),
             ScoreSourceMetadata::Checkpoint {
                 path,
                 as_of_block,
@@ -506,8 +529,41 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
     )
     .await?;
 
-    let (mut checkpoint_source, checkpoint_integrity_key) = match score_mode {
-        ScoreMode::Raw => (None, None),
+    let registrations = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Register))
+        .map(|event| (event.claim_id.clone(), event))
+        .collect::<HashMap<_, _>>();
+    let claimant_users = replay
+        .live_claim_ids
+        .iter()
+        .map(|claim_id| {
+            registrations
+                .get(claim_id)
+                .map(|event| event.user)
+                .ok_or_else(|| {
+                    EngineError::Invariant(format!(
+                        "missing registration for live claim {claim_id}"
+                    ))
+                })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
+    let (mut checkpoint_source, checkpoint_integrity_key, bulk_source) = match score_mode {
+        ScoreMode::Raw => (None, None, None),
+        ScoreMode::Bulk => {
+            let source = BulkScoreSource::open(
+                rpc.clone(),
+                &incident_config,
+                provisional.reference_block,
+                claimant_users,
+                config.chain_id,
+                MAX_LOG_RANGE,
+                LOG_RESULT_CAP,
+            )
+            .await?;
+            (None, None, Some(source))
+        }
         ScoreMode::Checkpoint {
             path,
             integrity_key,
@@ -523,30 +579,37 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
                 LOG_RESULT_CAP,
             )
             .await?;
-            (Some(source), Some(integrity_key))
+            (Some(source), Some(integrity_key), None)
         }
     };
-    let score_source = checkpoint_source.as_ref().map_or(
-        ScoreSourceMetadata::Raw {
-            as_of_block: provisional.reference_block,
-        },
-        |source| ScoreSourceMetadata::Checkpoint {
+    let score_source = if let Some(source) = &bulk_source {
+        ScoreSourceMetadata::Bulk {
+            as_of_block: source.metadata.as_of_block,
+            as_of_block_hash: source.metadata.as_of_block_hash.clone(),
+            indexed_transfers: source.metadata.indexed_transfers,
+            indexed_tokens: source.metadata.indexed_tokens,
+            tracked_accounts: source.metadata.tracked_accounts,
+        }
+    } else if let Some(source) = &checkpoint_source {
+        ScoreSourceMetadata::Checkpoint {
             path: source.metadata.path.clone(),
             as_of_block: source.metadata.as_of_block,
             as_of_block_hash: source.metadata.as_of_block_hash.clone(),
             indexed_transfers: source.metadata.indexed_transfers,
             indexed_tokens: source.metadata.indexed_tokens,
-        },
-    );
-    let mut log_metrics = checkpoint_source.as_ref().map_or(event_metrics, |source| {
+        }
+    } else {
+        ScoreSourceMetadata::Raw {
+            as_of_block: provisional.reference_block,
+        }
+    };
+    let mut log_metrics = if let Some(source) = &bulk_source {
         merge_metrics(event_metrics, source.metadata.log_metrics)
-    });
-
-    let registrations = events
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::Register))
-        .map(|event| (event.claim_id.clone(), event))
-        .collect::<HashMap<_, _>>();
+    } else if let Some(source) = &checkpoint_source {
+        merge_metrics(event_metrics, source.metadata.log_metrics)
+    } else {
+        event_metrics
+    };
     let hold_from = if provisional.reference_block > incident_config.params.holding_margin_blocks {
         provisional.reference_block - incident_config.params.holding_margin_blocks
     } else {
@@ -568,7 +631,9 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         )
         .await?;
         log_metrics = merge_metrics(log_metrics, eligibility_metrics);
-        let gross_earned_score = if let Some(source) = &checkpoint_source {
+        let gross_earned_score = if let Some(source) = &bulk_source {
+            source.gross_score_of(event.user).await?
+        } else if let Some(source) = &checkpoint_source {
             source.gross_score_of(event.user).await?
         } else {
             let (score, score_metrics) = earned_score_of(

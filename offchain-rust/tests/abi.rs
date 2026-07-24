@@ -21,6 +21,31 @@ fn generated_function_selectors_match_solidity_authority() {
         hex::encode(IDefiInsurance::settlementParamsCall::SELECTOR),
         "cbeee318"
     );
+    assert_eq!(
+        hex::encode(IDefiInsurance::nextIncidentIdCall::SELECTOR),
+        "0fd19668"
+    );
+    assert_eq!(
+        hex::encode(IDefiInsurance::isTeeSignerCall::SELECTOR),
+        "8e50991b"
+    );
+    assert_eq!(
+        hex::encode(IDefiInsurance::MAX_REFERENCE_BLOCK_AGECall::SELECTOR),
+        "c01c587c"
+    );
+    assert_eq!(
+        hex::encode(IDefiInsurance::SUBMIT_DEADLINECall::SELECTOR),
+        "ca271f92"
+    );
+    assert_eq!(
+        hex::encode(IDefiInsurance::DISPUTE_PERIODCall::SELECTOR),
+        "a5bbe22b"
+    );
+    assert_eq!(
+        hex::encode(IDefiInsurance::FINALIZE_WINDOWCall::SELECTOR),
+        "977487f4"
+    );
+    assert_eq!(hex::encode(IRegistry::teePcrHashCall::SELECTOR), "235c9c7b");
     assert_eq!(hex::encode(IRegistry::coverPoolsCall::SELECTOR), "87549445");
     assert_eq!(
         hex::encode(IRegistry::coverPoolsLengthCall::SELECTOR),

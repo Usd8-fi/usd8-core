@@ -240,9 +240,9 @@ contract DefiInsurance is
         "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
     );
 
-    /// @notice EIP-712 open schema binds token, reference block, and single-use incident id.
+    /// @notice EIP-712 open schema binds token, reference block, single-use incident id, and PCR.
     bytes32 internal constant OPEN_TYPEHASH =
-        keccak256("IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId)");
+        keccak256("IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId,bytes32 teePcrHash)");
 
     // ─────────────────────────── Errors ──────────────────────────
 
@@ -614,8 +614,11 @@ contract DefiInsurance is
         // Matured exits are no longer underwriting capital. Settle them before
         // recording the incident so the frozen balances contain only active capital.
         (, address[] memory poolAddrs) = registry().coverPools();
-        for (uint256 i = 0; i < poolAddrs.length; i++) {
+        for (uint256 i = 0; i < poolAddrs.length;) {
             ISingleAssetCoverPool(poolAddrs[i]).settleMaturedExitEpochs(type(uint256).max);
+            unchecked {
+                ++i;
+            }
         }
 
         incidentId = nextIncidentId;
@@ -675,13 +678,19 @@ contract DefiInsurance is
             // Prevent score-budget multiplication through claim splitting.
             if (activeClaimId[incidentId][msg.sender] != 0) revert DuplicateClaim(incidentId);
         } else {
-            // The first claim requires a fresh TEE-attested open.
+            // Preserve ECDSA's canonical malformed-signature errors before the
+            // open, then verify valid-length signatures against its PCR snapshot.
+            if (signature.length != 65) ECDSA.recover(bytes32(0), signature);
+            incidentId = _openIncident(insuredToken, referenceBlock);
             bytes32 digest = _hashTypedDataV4(
-                keccak256(abi.encode(OPEN_TYPEHASH, address(insuredToken), referenceBlock, nextIncidentId))
+                keccak256(
+                    abi.encode(
+                        OPEN_TYPEHASH, address(insuredToken), referenceBlock, incidentId, incidentTeePcrHash[incidentId]
+                    )
+                )
             );
             address recovered = ECDSA.recover(digest, signature);
             if (!isTeeSigner[recovered]) revert UnauthorizedOpenSigner(recovered);
-            incidentId = _openIncident(insuredToken, referenceBlock);
         }
 
         uint128 escrow = uint128(_pullToken(insuredToken, msg.sender, insuredTokenAmount));
