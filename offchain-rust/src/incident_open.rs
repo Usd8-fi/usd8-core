@@ -81,8 +81,6 @@ pub enum IncidentOpenError {
         "post-reference TWAP ending at block {required} is not finalized; finalized head is {finalized}"
     )]
     InsufficientPostReferenceWindow { required: u64, finalized: u64 },
-    #[error("insured token has no token-to-underlying price source")]
-    MissingPriceSource,
     #[error(
         "insured-token/immediate-underlying price drop is below the required {minimum_drop_bps} bps"
     )]
@@ -112,9 +110,6 @@ async fn incident_open_twap_sums<R: Rpc + ?Sized>(
     twap_blocks: u64,
     sample_step_blocks: u64,
 ) -> Result<(BigUint, BigUint, u64), IncidentOpenError> {
-    if conversion_address.is_zero() {
-        return Err(IncidentOpenError::MissingPriceSource);
-    }
     let mut baseline_sum = BigUint::zero();
     let mut distress_sum = BigUint::zero();
     let mut samples = 0u64;

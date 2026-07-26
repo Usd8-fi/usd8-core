@@ -357,7 +357,9 @@ mod linux {
         let (drpc_plaintext, _) =
             recipient_decrypt(&kms, &drpc_ciphertext, "usd8-tee-drpc-v1", &job_binding).await?;
         drpc_ciphertext.zeroize();
-        let drpc_key = Zeroizing::new(String::from_utf8(drpc_plaintext.to_vec())?);
+        let drpc_text =
+            std::str::from_utf8(drpc_plaintext.as_slice()).map_err(|_| "invalid dRPC key")?;
+        let drpc_key = Zeroizing::new(drpc_text.to_owned());
         if drpc_key.is_empty() || drpc_key.len() > 512 || drpc_key.contains('\0') {
             return Err("invalid dRPC key".into());
         }

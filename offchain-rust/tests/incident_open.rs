@@ -278,7 +278,7 @@ async fn open_authorization_is_derived_from_live_contract_state() {
 }
 
 #[tokio::test]
-async fn open_authorization_rejects_identity_as_an_unprovable_price_source() {
+async fn open_authorization_applies_identity_ratio_before_threshold_decision() {
     let mut rpc = fixture(false);
     rpc.responses.insert(
         (
@@ -308,7 +308,7 @@ async fn open_authorization_rejects_identity_as_an_unprovable_price_source() {
     assert!(
         error
             .to_string()
-            .contains("no token-to-underlying price source")
+            .contains("price drop is below the required 2000 bps")
     );
 }
 
