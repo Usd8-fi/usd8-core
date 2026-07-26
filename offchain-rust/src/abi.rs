@@ -34,10 +34,8 @@ sol! {
         );
         function nextIncidentId() external view returns (uint256);
         function isTeeSigner(address signer) external view returns (bool);
-        function MAX_REFERENCE_BLOCK_AGE() external view returns (uint64);
-        function SUBMIT_DEADLINE() external view returns (uint64);
-        function DISPUTE_PERIOD() external view returns (uint64);
-        function FINALIZE_WINDOW() external view returns (uint64);
+        function incidentFinalizeDeadline(uint256 incidentId) external view returns (uint64);
+        function incidentOpenEligibilityHash(address insuredToken) external view returns (bytes32);
         function registry() external view returns (address);
         function BOOSTER_ID() external view returns (uint256);
         function BOOSTER_BOOST_BPS() external view returns (uint256);
@@ -54,6 +52,20 @@ sol! {
     }
 
     interface IRegistry {
+        struct IncidentTimingConfig {
+            uint64 claimWindow;
+            uint64 submissionWindow;
+            uint64 disputePeriod;
+            uint64 finalizeWindow;
+            uint64 maxReferenceBlockAge;
+        }
+
+        struct IncidentOpenPriceConfig {
+            uint64 twapBlocks;
+            uint64 sampleStepBlocks;
+            uint16 minimumDropBps;
+        }
+
         struct RatePoint {
             uint64 fromBlock;
             uint128 rate;
@@ -70,6 +82,8 @@ sol! {
         function assetUsdFeed(address asset) external view returns (address);
         function maxOracleStaleness() external view returns (uint64);
         function teePcrHash() external view returns (bytes32);
+        function incidentTimingConfig() external view returns (IncidentTimingConfig memory);
+        function incidentOpenPriceConfig() external view returns (IncidentOpenPriceConfig memory);
     }
 
     interface ISingleAssetCoverPool {

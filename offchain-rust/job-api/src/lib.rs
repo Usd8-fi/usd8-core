@@ -7,6 +7,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+mod kms_recipient_cms;
+#[cfg(feature = "worker")]
+pub use kms_recipient_cms::decrypt_kms_recipient_envelope;
+pub use kms_recipient_cms::{KmsRecipientEnvelope, parse_kms_recipient_cms};
+
 const MAX_UINT256: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const JOB_ID_DOMAIN: &[u8] = b"USD8_TEE_JOB_V2\0";

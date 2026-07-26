@@ -299,7 +299,17 @@ Content-Type: application/json
 
 The enclave reads `nextIncidentId`, Registry/DefiInsurance bindings, token
 approval, active-incident state, chain ID, signer authorization, and the current
-PCR commitment at one pinned Sepolia block before signing `IncidentOpen`.
+PCR commitment at one pinned head. It also reads `incidentOpenPriceConfig`,
+uses the insured token's configured conversion recipe to take 2–256 equally
+spaced samples at `referenceBlock - step ... - twapBlocks` and
+`referenceBlock + step ... + twapBlocks`, requires the post-window endpoint to
+be finalized, and compares the unrounded sample sums. It signs only when the
+decline is strictly greater than `minimumDropBps`; no insured-token/USD oracle
+enters incident-open eligibility. The EIP-712 authorization binds an on-chain
+hash of the Registry address, price config, conversion address, and conversion
+calldata, so policy or recipe changes invalidate outstanding signatures. The
+artifact records both sums and displayed TWAPs, sample count, observation block,
+sampling parameters, threshold, and eligibility hash.
 
 ```json
 {"accepted":true,"jobId":"<64 lowercase hex characters>"}

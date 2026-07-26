@@ -16,9 +16,10 @@ fn incident_open_digest_matches_solidity_and_cast_vector() {
         incident_id: BigUint::from(1u8),
         tee_pcr_hash: "0x97f92ff2d9622568c12c8acb7e352e0f4786c2cd683021cafc391077f30b915d"
             .to_owned(),
+        eligibility_hash: format!("0x{}", "55".repeat(32)),
     };
     assert_eq!(
         incident_open_digest(&input).unwrap(),
-        "0x23817acb0898da281c3cc8e24c57f11dd566a8b0d87dc6a247add82d3ed85fac"
+        "0xd6398a2db6e7a92da2fd70f6784763537c3202477194e695dc5716d0e574a4e1"
     );
 }
