@@ -1,0 +1,25 @@
+{
+  "Rules": [
+    {
+      "ID": "ExpireRequests",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "requests/"},
+      "Expiration": {"Days": 31},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 7}
+    },
+    {
+      "ID": "ExpireTerminal",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "terminal/"},
+      "Expiration": {"Days": 30},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 7}
+    },
+    {
+      "ID": "ExpireLaunchCapabilities",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "launch/"},
+      "Expiration": {"Days": 1},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 1}
+    }
+  ]
+}

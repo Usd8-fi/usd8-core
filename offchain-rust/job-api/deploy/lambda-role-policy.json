@@ -1,0 +1,89 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteFunctionLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:eu-central-1:919437049909:log-group:/aws/lambda/usd8-tee-job-api:*"
+    },
+    {
+      "Sid": "CreateRequests",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": [
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*"
+      ]
+    },
+    {
+      "Sid": "ReadJobs",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": [
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/secrets/*"
+      ]
+    },
+    {
+      "Sid": "ListExactJobPrefixes",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1",
+      "Condition": {
+        "ForAnyValue:StringLike": {
+          "s3:prefix": ["requests/*", "terminal/*", "launch/*", "secrets/*"]
+        }
+      }
+    },
+    {
+      "Sid": "UseApprovedWorkerInfrastructure",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:eu-central-1::image/ami-00be9df40b2d17012",
+        "arn:aws:ec2:eu-central-1:919437049909:subnet/subnet-0d42339eecdaddbaa",
+        "arn:aws:ec2:eu-central-1:919437049909:security-group/sg-0d93490bebb3d2251",
+        "arn:aws:ec2:eu-central-1:919437049909:network-interface/*",
+        "arn:aws:ec2:eu-central-1:919437049909:volume/*"
+      ]
+    },
+    {
+      "Sid": "LaunchTaggedWorkers",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:eu-central-1:919437049909:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:InstanceType": "c6i.xlarge",
+          "aws:RequestTag/Project": "USD8-TEE"
+        },
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["Project", "JobId", "ExpiresAt"]}
+      }
+    },
+
+    {
+      "Sid": "TagLaunchedWorkers",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:eu-central-1:919437049909:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": "RunInstances",
+          "aws:RequestTag/Project": "USD8-TEE"
+        }
+      }
+    },
+
+    {
+      "Sid": "PassWorkerRoleOnly",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::919437049909:role/USD8TeeInstanceRole",
+      "Condition": {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}}
+    }
+  ]
+}

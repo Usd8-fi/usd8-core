@@ -1,0 +1,45 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RequireTls",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/*"
+      ],
+      "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+    },
+    {
+      "Sid": "RequireCreateIfAbsent",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:PutObject",
+      "Resource": [
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*"
+      ],
+      "Condition": {"StringNotEquals": {"s3:if-none-match": "*"}}
+    },
+    {
+      "Sid": "AllowLambdaJobReads",
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::919437049909:root"},
+      "Action": "s3:GetObject",
+      "Resource": [
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/secrets/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalArn": "arn:aws:iam::919437049909:role/USD8TeeLambdaRole"
+        }
+      }
+    }
+  ]
+}

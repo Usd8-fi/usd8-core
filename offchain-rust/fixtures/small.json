@@ -1,0 +1,39 @@
+{
+  "incidentId": "1",
+  "coverageBps": "8000",
+  "insuredDecimals": 18,
+  "twapRatio": "1000000000000000000",
+  "underlyingUsd": "1000000000000000000",
+  "maxCoverPoolPayoutBps": "10000",
+  "pools": [
+    {
+      "balance": "100000000000000000000",
+      "assetUsd": "1000000000000000000",
+      "assetDecimals": 18
+    }
+  ],
+  "claims": [
+    {
+      "claimId": "1",
+      "user": "0x000000000000000000000000000000000000b0b0",
+      "escrowAmount": "100000000000000000000",
+      "minHeld": "100000000000000000000",
+      "grossEarnedScore": "60",
+      "spentScore": "0",
+      "scoreToSpend": "60",
+      "boosterAmount": "0",
+      "boosterHeld": "0"
+    },
+    {
+      "claimId": "2",
+      "user": "0x000000000000000000000000000000000000ca50",
+      "escrowAmount": "100000000000000000000",
+      "minHeld": "100000000000000000000",
+      "grossEarnedScore": "40",
+      "spentScore": "0",
+      "scoreToSpend": "40",
+      "boosterAmount": "0",
+      "boosterHeld": "0"
+    }
+  ]
+}

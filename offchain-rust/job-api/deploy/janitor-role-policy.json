@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteJanitorLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:eu-central-1:919437049909:log-group:/aws/lambda/usd8-tee-janitor:*"
+    },
+    {
+      "Sid": "ReadWorkers",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "TerminateTaggedWorkers",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "*",
+      "Condition": {"StringEquals": {"ec2:ResourceTag/Project": "USD8-TEE"}}
+    }
+  ]
+}
