@@ -40,6 +40,13 @@ class MeasuredRegistryTest(unittest.TestCase):
             2,
         )
 
+    def test_finalization_binds_instance_policy_to_selected_kms_key(self) -> None:
+        source = FINALIZE_RELEASE.read_text()
+        self.assertIn('aws kms describe-key --key-id "$KMS_KEY_ID"', source)
+        self.assertIn('--arg kmsKeyArn "$KMS_KEY_ARN"', source)
+        self.assertIn('--arg kmsKey "$KMS_KEY_ARN"', source)
+        self.assertIn('.Resource = $kmsKeyArn', source)
+
     def test_finalization_labels_output_as_a_candidate_pending_live_verification(self) -> None:
         source = FINALIZE_RELEASE.read_text()
         self.assertIn('RELEASE_CANDIDATE_CREATED=', source)

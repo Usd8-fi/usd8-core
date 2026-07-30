@@ -47,6 +47,11 @@ import json, sys
 print(json.load(sys.stdin)["Role"]["Arn"])
 ' <<<"$INSTANCE_ROLE_JSON")
 PCR3=$(python3 "$HERE/verify-release.py" --pcr3-for-role-arn "$INSTANCE_ROLE_ARN")
+KMS_KEY_JSON=$(aws kms describe-key --key-id "$KMS_KEY_ID" --region "$AWS_REGION" --output json)
+KMS_KEY_ARN=$(python3 -c '
+import json, sys
+print(json.load(sys.stdin)["KeyMetadata"]["Arn"])
+' <<<"$KMS_KEY_JSON")
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
@@ -63,10 +68,11 @@ jq --arg roleArn "$INSTANCE_ROLE_ARN" --arg pcr3 "$PCR3" '
   )
 ' "$RELEASE/kms-key-policy.json" > "$RELEASE/kms-key-policy.json.tmp"
 mv "$RELEASE/kms-key-policy.json.tmp" "$RELEASE/kms-key-policy.json"
-jq --arg pcr3 "$PCR3" '
+jq --arg pcr3 "$PCR3" --arg kmsKeyArn "$KMS_KEY_ARN" '
   .Statement |= map(
     if .Sid == "AttestedDecryptOnly"
-    then .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:PCR3"] = $pcr3
+    then .Resource = $kmsKeyArn |
+      .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:PCR3"] = $pcr3
     else . end
   )
 ' "$RELEASE/instance-role-policy.json" > "$RELEASE/instance-role-policy.json.tmp"
@@ -96,7 +102,7 @@ jq \
   --arg region "$AWS_REGION" --arg ami "$AMI_ID" \
   --arg snapshot "$ROOT_SNAPSHOT" --arg lambdaFunction "$LAMBDA_FUNCTION" \
   --arg janitorFunction "$JANITOR_FUNCTION" --arg lambdaCode "$LAMBDA_CODE_SHA256_B64" \
-  --arg janitorCode "$JANITOR_CODE_SHA256_B64" --arg kmsKey "$KMS_KEY_ID" \
+  --arg janitorCode "$JANITOR_CODE_SHA256_B64" --arg kmsKey "$KMS_KEY_ARN" \
   --arg instanceRole "$INSTANCE_ROLE" --arg instanceRoleArn "$INSTANCE_ROLE_ARN" \
   --arg instancePolicyName "$INSTANCE_POLICY_NAME" --arg pcr3 "$PCR3" \
   --arg lambdaRole "$LAMBDA_ROLE" --arg lambdaPolicyName "$LAMBDA_POLICY_NAME" \
