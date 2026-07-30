@@ -253,9 +253,8 @@ NETWORK=sepolia REGISTRY=0x... EXPECTED_SIGNER=0x... \
   OUT_DIR=releases/build-<id> deploy/build-release.sh
 ```
 
-This compiles both the settlement chain ID and dRPC network into the measured
-binaries. Use `NETWORK=ethereum` explicitly for mainnet. A caller cannot select
-the network.
+This compiles the Sepolia chain ID and dRPC network into the measured binaries.
+Releases are Sepolia-only; a caller cannot select the network.
 
 `job-api/rust-toolchain.toml` pins its independently tested Lambda toolchain.
 For deployment, produce a Linux Lambda artifact rather than uploading a macOS
