@@ -4,7 +4,9 @@
   "underlyingUsd": "1000000000000000000",
   "twapRatio": "1000000000000000000",
   "coverageBps": "8000",
+  "boosterBoostBps": "100",
   "maxCoverPoolPayoutBps": "10000",
+  "protocolFeeShareBps": "0",
   "claims": [
     {
       "claimId": "1",

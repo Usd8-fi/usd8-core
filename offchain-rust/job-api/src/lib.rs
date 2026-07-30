@@ -7,10 +7,18 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+mod kms_recipient_cms;
+#[cfg(feature = "worker")]
+pub use kms_recipient_cms::decrypt_kms_recipient_envelope;
+pub use kms_recipient_cms::{KmsRecipientEnvelope, parse_kms_recipient_cms};
+
 const MAX_UINT256: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
-const JOB_ID_DOMAIN: &[u8] = b"USD8_TEE_JOB_V2\0";
+const JOB_ID_DOMAIN: &[u8] = b"USD8_TEE_JOB_V3\0";
 const REQUEST_COMMITMENT_DOMAIN: &[u8] = b"USD8_TEE_REQUEST_V1\0";
+
+pub const JOB_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const STORED_REQUEST_SCHEMA_VERSION: u32 = 3;
 
 pub const MAX_STORED_REQUEST_BYTES: usize = 4_096;
 pub const MAX_CIPHERTEXT_BYTES: usize = 65_536;
@@ -298,7 +306,6 @@ pub struct CanonicalSettlementRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CanonicalOpenRequest {
     pub insured_token: String,
-    pub reference_block: String,
     pub registry: String,
 }
 
@@ -312,7 +319,6 @@ struct SettlementApiRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OpenApiRequest {
     insured_token: String,
-    reference_block: String,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -325,8 +331,7 @@ pub enum ProtocolError {
     InvalidRegistry,
     #[error("invalid insured token address")]
     InvalidInsuredToken,
-    #[error("invalid referenceBlock")]
-    InvalidReferenceBlock,
+
     #[error("request Registry does not match the configured Registry")]
     RegistryMismatch,
     #[error("job secret must contain at least 32 bytes")]
@@ -358,10 +363,8 @@ pub fn canonicalize_open_request(
         serde_json::from_slice(body).map_err(|_| ProtocolError::InvalidJson)?;
     let insured_token = normalize_address(&request.insured_token)
         .map_err(|_| ProtocolError::InvalidInsuredToken)?;
-    validate_reference_block(&request.reference_block)?;
     Ok(CanonicalRequest::Open(CanonicalOpenRequest {
         insured_token,
-        reference_block: request.reference_block,
         registry: normalize_registry(configured_registry)?,
     }))
 }
@@ -374,18 +377,6 @@ fn validate_incident_id(value: &str) -> Result<(), ProtocolError> {
         || (value.len() == MAX_UINT256.len() && value > MAX_UINT256)
     {
         return Err(ProtocolError::InvalidIncidentId);
-    }
-    Ok(())
-}
-
-fn validate_reference_block(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty()
-        || value == "0"
-        || (value.len() > 1 && value.starts_with('0'))
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-        || value.parse::<u64>().is_err()
-    {
-        return Err(ProtocolError::InvalidReferenceBlock);
     }
     Ok(())
 }
@@ -631,7 +622,7 @@ pub struct StoredRequest {
 }
 
 pub fn stored_request_is_live(request: &StoredRequest, now: u64) -> bool {
-    request.schema_version == 2
+    request.schema_version == STORED_REQUEST_SCHEMA_VERSION
         && request.created_at < request.expires_at
         && now <= request.expires_at
         && JobPaths::new(&request.job_id).is_ok()
@@ -761,7 +752,7 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
             .map_err(|_| ServiceError::Unavailable)?
             .as_secs();
         let stored = StoredRequest {
-            schema_version: 2,
+            schema_version: STORED_REQUEST_SCHEMA_VERSION,
             job_id: job_id.clone(),
             request: request.clone(),
             created_at,
@@ -773,7 +764,7 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
             CreateOutcome::Exists(existing) => serde_json::from_slice::<StoredRequest>(&existing)
                 .map_err(|_| ServiceError::InvalidStoredResult)?,
         };
-        if stored.schema_version != 2
+        if stored.schema_version != STORED_REQUEST_SCHEMA_VERSION
             || stored.job_id != job_id
             || stored.request != request
             || stored.expires_at.saturating_sub(stored.created_at) != self.config.job_ttl_seconds
@@ -820,7 +811,7 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
                     .ok_or(ServiceError::NotFound)?;
                 let stored: StoredRequest = serde_json::from_slice(&request)
                     .map_err(|_| ServiceError::InvalidStoredResult)?;
-                if stored.schema_version != 2
+                if stored.schema_version != STORED_REQUEST_SCHEMA_VERSION
                     || stored.job_id != job_id
                     || verify_job_request_binding(job_id, &stored.request).is_err()
                     || stored.expires_at.saturating_sub(stored.created_at)

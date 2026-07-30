@@ -2,7 +2,7 @@
 set -euo pipefail
 
 EXPECTED_SIGNER=${EXPECTED_SIGNER:?set EXPECTED_SIGNER}
-NETWORK=${NETWORK:?set NETWORK to ethereum or sepolia}
+NETWORK=${NETWORK:?set NETWORK to sepolia}
 REGISTRY=${REGISTRY:?set REGISTRY}
 OUT=${OUT_DIR:?set OUT_DIR to a new release-build directory}
 [[ "$EXPECTED_SIGNER" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
@@ -11,11 +11,10 @@ OUT=${OUT_DIR:?set OUT_DIR to a new release-build directory}
 [[ "$REGISTRY" =~ ^0x[0-9a-fA-F]{40}$ && "$REGISTRY" != 0x0000000000000000000000000000000000000000 ]] || {
   echo 'REGISTRY must be a nonzero 20-byte 0x hex address' >&2; exit 2;
 }
-case "$NETWORK" in
-  ethereum) ROOT_FEATURES=(); JOB_FEATURES=worker,parent; CHAIN_ID=1 ;;
-  sepolia) ROOT_FEATURES=(--features sepolia); JOB_FEATURES=worker,parent,sepolia; CHAIN_ID=11155111 ;;
-  *) echo 'NETWORK must be ethereum or sepolia' >&2; exit 2 ;;
-esac
+[[ "$NETWORK" == sepolia ]] || { echo 'NETWORK must be sepolia' >&2; exit 2; }
+ROOT_FEATURES=(--features sepolia)
+JOB_FEATURES=worker,parent,sepolia
+CHAIN_ID=11155111
 WORKTREE_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 REPO_ROOT=$(git -C "$WORKTREE_ROOT" rev-parse --show-toplevel)
 export RUSTUP_TOOLCHAIN=1.94.1
@@ -102,15 +101,24 @@ PY
 PCR0=$(jq -er '.Measurements.PCR0 | select(test("^[0-9a-fA-F]{96}$"))' "$RELEASE/measurements.json")
 PCR1=$(jq -er '.Measurements.PCR1 | select(test("^[0-9a-fA-F]{96}$"))' "$RELEASE/measurements.json")
 PCR2=$(jq -er '.Measurements.PCR2 | select(test("^[0-9a-fA-F]{96}$"))' "$RELEASE/measurements.json")
+PCR3=$(jq -er '.Statement[] | select(.Sid == "AttestedEnclaveDecryptOnly") |
+  .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:PCR3"] |
+  select(test("^[0-9a-fA-F]{96}$"))' deploy/kms-key-policy.json)
+INSTANCE_PCR3=$(jq -er '.Statement[] | select(.Sid == "AttestedDecryptOnly") |
+  .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:PCR3"] |
+  select(test("^[0-9a-fA-F]{96}$"))' deploy/instance-role-policy.json)
+[[ "$PCR3" == "$INSTANCE_PCR3" ]] || { echo 'KMS and instance policies disagree on PCR3' >&2; exit 1; }
 TEE_PCR_HASH=$("$ROOT/target/release/usd8-settlement" pcr-hash "$PCR0" "$PCR1" "$PCR2")
 [[ "$TEE_PCR_HASH" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
   echo 'invalid derived TEE PCR hash' >&2; exit 1;
 }
+rm -f "$RELEASE/measurements.json"
 for POLICY in kms-key-policy.json instance-role-policy.json; do
-  jq --arg pcr0 "$PCR0" '
+  jq --arg pcr0 "$PCR0" --arg pcr3 "$PCR3" '
     .Statement |= map(
       if (.Sid == "AttestedEnclaveDecryptOnly" or .Sid == "AttestedDecryptOnly")
-      then .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:ImageSha384"] = $pcr0
+      then .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:ImageSha384"] = $pcr0 |
+        .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:PCR3"] = $pcr3
       else . end
     )' "deploy/$POLICY" > "$RELEASE/$POLICY"
 done
@@ -126,7 +134,7 @@ jq -n \
   --arg source "$SOURCE_SHA256" --arg commit "$GIT_COMMIT" --argjson dirty "$GIT_DIRTY" \
   --arg rootLock "$ROOT_LOCK_SHA256" --arg jobLock "$JOB_LOCK_SHA256" \
   --arg rustc "$RUSTC_VERSION" --arg baseImage "$BASE_IMAGE" \
-  --arg pcr0 "$PCR0" --arg pcr1 "$PCR1" --arg pcr2 "$PCR2" \
+  --arg pcr0 "$PCR0" --arg pcr1 "$PCR1" --arg pcr2 "$PCR2" --arg pcr3 "$PCR3" \
   --arg teePcrHash "$TEE_PCR_HASH" \
   --arg network "$NETWORK" --argjson chainId "$CHAIN_ID" \
   --arg registry "$REGISTRY" --arg signer "$EXPECTED_SIGNER" \
@@ -141,6 +149,7 @@ jq -n \
       cargoLocks: {root: $rootLock, jobApi: $jobLock}},
     toolchain: {rustc: $rustc, enclaveBaseImage: $baseImage},
     Measurements: {HashAlgorithm: "Sha384", PCR0: $pcr0, PCR1: $pcr1, PCR2: $pcr2},
+    recipientAttestation: {PCR3: $pcr3},
     chainId: $chainId,
     network: $network,
     registry: $registry,

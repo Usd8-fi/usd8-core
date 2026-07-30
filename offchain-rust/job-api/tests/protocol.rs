@@ -1,7 +1,7 @@
 use usd8_tee_job_api::{
-    CanonicalOpenRequest, CanonicalRequest, CanonicalSettlementRequest, JobPaths,
+    CanonicalOpenRequest, CanonicalRequest, CanonicalSettlementRequest, JobPaths, StoredRequest,
     canonicalize_open_request, canonicalize_request, derive_job_id, enclave_timeout_seconds,
-    parent_timeout_seconds, verify_job_request_binding,
+    parent_timeout_seconds, stored_request_is_live, verify_job_request_binding,
 };
 
 const REGISTRY: &str = "0x1111111111111111111111111111111111111111";
@@ -10,7 +10,7 @@ const REGISTRY: &str = "0x1111111111111111111111111111111111111111";
 fn request_timeouts_are_kind_specific_and_bounded() {
     let settlement = canonicalize_request(br#"{"incidentId":"7"}"#, REGISTRY).unwrap();
     let open = canonicalize_open_request(
-        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"123"}"#,
+        br#"{"insuredToken":"0x2222222222222222222222222222222222222222"}"#,
         REGISTRY,
     )
     .unwrap();
@@ -102,7 +102,6 @@ fn enclave_visible_job_id_commitment_rejects_request_substitution() {
     });
     let substituted = CanonicalRequest::Open(CanonicalOpenRequest {
         insured_token: "0x2222222222222222222222222222222222222222".into(),
-        reference_block: "1234567".into(),
         registry: REGISTRY.into(),
     });
     let job_id = derive_job_id(
@@ -118,23 +117,19 @@ fn enclave_visible_job_id_commitment_rejects_request_substitution() {
 
 #[test]
 fn open_request_is_canonical_and_job_kind_is_domain_bound() {
-    let body = br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"1234567"}"#;
+    let body = br#"{"insuredToken":"0x2222222222222222222222222222222222222222"}"#;
     let open = canonicalize_open_request(body, REGISTRY).unwrap();
     assert_eq!(
         open,
         CanonicalRequest::Open(CanonicalOpenRequest {
             insured_token: "0x2222222222222222222222222222222222222222".into(),
-            reference_block: "1234567".into(),
             registry: REGISTRY.into(),
         })
     );
     for invalid in [
-        br#"{"insuredToken":"0x0000000000000000000000000000000000000000","referenceBlock":"1234567"}"#.as_slice(),
-        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":1234567}"#.as_slice(),
-        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"0"}"#.as_slice(),
-        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"01"}"#.as_slice(),
-        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"18446744073709551616"}"#.as_slice(),
-        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"1234567","registry":"0x1111111111111111111111111111111111111111"}"#.as_slice(),
+        br#"{"insuredToken":"0x0000000000000000000000000000000000000000"}"#.as_slice(),
+        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"1234567"}"#.as_slice(),
+        br#"{"insuredToken":"0x2222222222222222222222222222222222222222","registry":"0x1111111111111111111111111111111111111111"}"#.as_slice(),
     ] {
         assert!(canonicalize_open_request(invalid, REGISTRY).is_err());
     }
@@ -151,6 +146,42 @@ fn open_request_is_canonical_and_job_kind_is_domain_bound() {
         )
         .unwrap()
     );
+}
+
+#[test]
+fn legacy_v2_open_jobs_are_rejected_and_must_be_drained_before_cutover() {
+    let legacy_with_reference = serde_json::json!({
+        "schemaVersion": 2,
+        "jobId": "a".repeat(64),
+        "request": {
+            "kind": "open",
+            "insuredToken": "0x2222222222222222222222222222222222222222",
+            "registry": REGISTRY,
+            "referenceBlock": "1234567"
+        },
+        "createdAt": 1,
+        "expiresAt": 1801
+    });
+    assert!(serde_json::from_value::<StoredRequest>(legacy_with_reference).is_err());
+
+    let request = CanonicalRequest::Open(CanonicalOpenRequest {
+        insured_token: "0x2222222222222222222222222222222222222222".into(),
+        registry: REGISTRY.into(),
+    });
+    let job_id = derive_job_id(
+        b"a sufficiently long deployment secret",
+        "legacy-v2",
+        &request,
+    )
+    .unwrap();
+    let legacy_without_reference = StoredRequest {
+        schema_version: 2,
+        job_id,
+        request,
+        created_at: 1,
+        expires_at: 1_801,
+    };
+    assert!(!stored_request_is_live(&legacy_without_reference, 2));
 }
 
 #[test]

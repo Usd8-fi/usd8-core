@@ -1,7 +1,6 @@
 use num_bigint::BigUint;
-use num_traits::{One, Zero};
+use num_traits::Zero;
 use sha3::{Digest, Keccak256};
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
@@ -23,7 +22,8 @@ pub mod typed_data;
 pub use json::{compute_json, parse_json, serialize_output};
 
 const BPS: u64 = 10_000;
-const BOOSTER_BOOST_BPS: u64 = 100;
+const MAX_COVERAGE_BPS: u64 = 8_000;
+const MAX_PROTOCOL_FEE_BPS: u64 = 2_000;
 pub(crate) type Hash = [u8; 32];
 const ZERO_HASH: Hash = [0; 32];
 
@@ -142,10 +142,12 @@ pub struct ClaimInput {
 pub struct KernelInput {
     pub incident_id: BigUint,
     pub coverage_bps: BigUint,
+    pub booster_boost_bps: BigUint,
     pub insured_decimals: u32,
     pub twap_ratio: BigUint,
     pub underlying_usd: BigUint,
     pub max_cover_pool_payout_bps: BigUint,
+    pub protocol_fee_share_bps: BigUint,
     pub pools: Vec<PoolInput>,
     pub claims: Vec<ClaimInput>,
 }
@@ -234,20 +236,6 @@ pub(crate) fn hash_hex(hash: Hash) -> String {
     format!("0x{}", hex::encode(hash))
 }
 
-fn sqrt_floor(value: &BigUint) -> BigUint {
-    if value < &BigUint::from(2u8) {
-        return value.clone();
-    }
-    let mut previous = BigUint::one() << value.bits().div_ceil(2);
-    loop {
-        let next = (&previous + value / &previous) >> 1usize;
-        if next >= previous {
-            return previous;
-        }
-        previous = next;
-    }
-}
-
 pub fn settlement_input_hash(rows: &[(Address, BigUint)]) -> Result<String, KernelError> {
     let mut canonical = rows.to_vec();
     canonical.sort_by(|a, b| a.0.as_slice().cmp(b.0.as_slice()));
@@ -300,7 +288,7 @@ pub fn claim_set_hash(events: &[ClaimEvent]) -> Result<String, KernelError> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimSetReplay {
     pub hash: String,
-    pub unresolved: usize,
+    pub unresolved_claims: usize,
     pub live_claim_ids: Vec<BigUint>,
 }
 
@@ -344,7 +332,7 @@ pub fn replay_claim_set(events: &[ClaimEvent]) -> Result<ClaimSetReplay, KernelE
         .collect::<Vec<_>>();
     Ok(ClaimSetReplay {
         hash: claim_set_hash(events)?,
-        unresolved: live_claim_ids.len(),
+        unresolved_claims: live_claim_ids.len(),
         live_claim_ids,
     })
 }
@@ -459,10 +447,10 @@ impl SettlementTree {
 
 pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
     let bps = BigUint::from(BPS);
-    let boost_bps = BigUint::from(BOOSTER_BOOST_BPS);
-    if input.coverage_bps > bps {
+    let max_booster_boost_bps = BigUint::from(u16::MAX);
+    if input.coverage_bps > BigUint::from(MAX_COVERAGE_BPS) {
         return Err(KernelError::InvalidPolicy(format!(
-            "coverageBps exceeds {BPS}: {}",
+            "coverageBps exceeds {MAX_COVERAGE_BPS}: {}",
             input.coverage_bps
         )));
     }
@@ -470,6 +458,18 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
         return Err(KernelError::InvalidPolicy(format!(
             "maxCoverPoolPayoutBps exceeds {BPS}: {}",
             input.max_cover_pool_payout_bps
+        )));
+    }
+    if input.protocol_fee_share_bps > BigUint::from(MAX_PROTOCOL_FEE_BPS) {
+        return Err(KernelError::InvalidPolicy(format!(
+            "protocolFeeShareBps exceeds {MAX_PROTOCOL_FEE_BPS}: {}",
+            input.protocol_fee_share_bps
+        )));
+    }
+    if input.booster_boost_bps.is_zero() || input.booster_boost_bps > max_booster_boost_bps {
+        return Err(KernelError::InvalidPolicy(format!(
+            "boosterBoostBps must be a nonzero uint16: {}",
+            input.booster_boost_bps
         )));
     }
     if input.insured_decimals > 255 {
@@ -497,8 +497,14 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
             BigUint::zero()
         };
         let boost = claim.booster_amount.clone();
-        let score_spent = claim.score_to_spend.clone().min(unspent.clone());
-        let boosted_score = (&score_spent * (&bps + &boost * &boost_bps)) / &bps;
+        // Keep zero-eligible claims in the signed resolution set without letting them spend score
+        // or dilute the relative-score denominator used by economically eligible claims.
+        let score_spent = if eligible.is_zero() {
+            BigUint::zero()
+        } else {
+            claim.score_to_spend.clone().min(unspent.clone())
+        };
+        let boosted_score = (&score_spent * (&bps + &boost * &input.booster_boost_bps)) / &bps;
         rows.push(SettledRow {
             claim_id: claim.claim_id.clone(),
             user: claim.user,
@@ -517,53 +523,18 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
     let pool_usd = input.pools.iter().fold(BigUint::zero(), |sum, pool| {
         sum + (&pool.balance * &pool.asset_usd) / pow10(pool.asset_decimals)
     });
-    let max_total_usd = (&pool_usd * &input.max_cover_pool_payout_bps) / &bps;
+    let user_share_bps = &bps - &input.protocol_fee_share_bps;
+    let max_total_gross_usd = (&pool_usd * &input.max_cover_pool_payout_bps) / &bps;
+    let max_total_usd = (&max_total_gross_usd * &user_share_bps) / &bps;
 
-    struct Weighted {
-        row_index: usize,
-        cap: BigUint,
-        weight: BigUint,
-    }
-    let mut active = Vec::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        let cap = (&row.loss_usd * &input.coverage_bps) / &bps;
-        let weight = sqrt_floor(&(&cap * &row.boosted_score));
-        if !cap.is_zero() && !weight.is_zero() {
-            active.push(Weighted {
-                row_index,
-                cap,
-                weight,
-            });
-        }
-    }
-    active.sort_by(|a, b| {
-        let left = &a.cap * &b.weight;
-        let right = &b.cap * &a.weight;
-        match left.cmp(&right) {
-            Ordering::Equal => rows[a.row_index].claim_id.cmp(&rows[b.row_index].claim_id),
-            ordering => ordering,
-        }
-    });
-
-    let mut remaining_budget = max_total_usd;
-    let mut remaining_weight = active
+    let total_boosted_score = rows
         .iter()
-        .fold(BigUint::zero(), |sum, claim| sum + &claim.weight);
-    let mut first_unsaturated = 0usize;
-    while first_unsaturated < active.len() && !remaining_weight.is_zero() {
-        let claim = &active[first_unsaturated];
-        if &remaining_budget * &claim.weight < &claim.cap * &remaining_weight {
-            break;
-        }
-        rows[claim.row_index].payout_usd = claim.cap.clone();
-        remaining_budget -= &claim.cap;
-        remaining_weight -= &claim.weight;
-        first_unsaturated += 1;
-    }
-    if !remaining_budget.is_zero() && !remaining_weight.is_zero() {
-        for claim in &active[first_unsaturated..] {
-            rows[claim.row_index].payout_usd =
-                (&remaining_budget * &claim.weight) / &remaining_weight;
+        .fold(BigUint::zero(), |sum, row| sum + &row.boosted_score);
+    if !total_boosted_score.is_zero() {
+        for row in &mut rows {
+            let cap = (&row.loss_usd * &input.coverage_bps) / &bps;
+            let entitlement = (&max_total_usd * &row.boosted_score) / &total_boosted_score;
+            row.payout_usd = entitlement.min(cap);
         }
     }
 
@@ -581,7 +552,7 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
             })
             .collect();
         for (total, amount) in pool_payouts.iter_mut().zip(&row.amounts) {
-            *total += amount;
+            *total += (amount * &bps) / &user_share_bps;
         }
     }
 

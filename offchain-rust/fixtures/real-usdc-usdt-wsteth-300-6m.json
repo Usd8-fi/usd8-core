@@ -3302,9 +3302,11 @@
     }
   ],
   "coverageBps": "8000",
+  "boosterBoostBps": "100",
   "incidentId": "2000",
   "insuredDecimals": 18,
   "maxCoverPoolPayoutBps": "5000",
+  "protocolFeeShareBps": "0",
   "pools": [
     {
       "assetDecimals": 18,

@@ -11,16 +11,16 @@ fn shared_fixture_matches_golden_output() {
     let expected: Value = serde_json::from_str(
         r#"{
           "rows":[
-            {"claimId":"1","user":"0x000000000000000000000000000000000000b0b0","escrowAmount":"100000000000000000000","eligibleAmount":"100000000000000000000","lossUsd":"100000000000000000000","grossEarnedScore":"60","earnedScore":"60","scoreSpent":"60","boostedScore":"60","payoutUsd":"55051025721816600736","amounts":["55051025721816600736"]},
-            {"claimId":"2","user":"0x000000000000000000000000000000000000ca50","escrowAmount":"100000000000000000000","eligibleAmount":"100000000000000000000","lossUsd":"100000000000000000000","grossEarnedScore":"40","earnedScore":"40","scoreSpent":"40","boostedScore":"40","payoutUsd":"44948974278183399263","amounts":["44948974278183399263"]}
+            {"claimId":"1","user":"0x000000000000000000000000000000000000b0b0","escrowAmount":"100000000000000000000","eligibleAmount":"100000000000000000000","lossUsd":"100000000000000000000","grossEarnedScore":"60","earnedScore":"60","scoreSpent":"60","boostedScore":"60","payoutUsd":"60000000000000000000","amounts":["60000000000000000000"]},
+            {"claimId":"2","user":"0x000000000000000000000000000000000000ca50","escrowAmount":"100000000000000000000","eligibleAmount":"100000000000000000000","lossUsd":"100000000000000000000","grossEarnedScore":"40","earnedScore":"40","scoreSpent":"40","boostedScore":"40","payoutUsd":"40000000000000000000","amounts":["40000000000000000000"]}
           ],
-          "poolPayouts":["99999999999999999999"],
+          "poolPayouts":["100000000000000000000"],
           "claimSetHash":"0x3a845fd00f6b76821faf799229f6bbc7533ded1399c08d33261e87a96326ae37",
           "settlementInputHash":"0x6fdf7088dad356db1a44c02996b33691d1ead1c10b008cf67abc2d456ba4eca0",
-          "root":"0xc49d55c3cf8eb13b6610f2ea535f30915e824a498ed05b2f6d0ca1d94ba15e66",
+          "root":"0x0848a0b33adc7f178a91c19524dfa89870eceac79be40201bdf89bc106661e7b",
           "proofs":{
-            "1":["0xa7a37192744b909ef7188777172160185ef8dc048d61f0f91206917600d48f7c"],
-            "2":["0x1dfaa622c93c2219664c5338dc00b9a88ec7564fd55613e97126c5d3c4584ed7"]
+            "1":["0x83b69733304617e45b299fb7cbbce4257c570a16409cced96d5af3bb632f8c7c"],
+            "2":["0x87ea9740f708d2218ea737952b931e6ee9110b47bd6b15378dfce8147bb27b5c"]
           }
         }"#,
     )
@@ -62,6 +62,6 @@ fn cli_computes_shared_fixture() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         value["root"],
-        "0xc49d55c3cf8eb13b6610f2ea535f30915e824a498ed05b2f6d0ca1d94ba15e66"
+        "0x0848a0b33adc7f178a91c19524dfa89870eceac79be40201bdf89bc106661e7b"
     );
 }

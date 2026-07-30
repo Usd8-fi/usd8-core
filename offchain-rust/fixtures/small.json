@@ -1,10 +1,12 @@
 {
   "incidentId": "1",
   "coverageBps": "8000",
+  "boosterBoostBps": "100",
   "insuredDecimals": 18,
   "twapRatio": "1000000000000000000",
   "underlyingUsd": "1000000000000000000",
   "maxCoverPoolPayoutBps": "10000",
+  "protocolFeeShareBps": "0",
   "pools": [
     {
       "balance": "100000000000000000000",

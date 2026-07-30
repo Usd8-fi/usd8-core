@@ -224,7 +224,12 @@ struct FakeLogs {
 #[async_trait]
 impl Rpc for FakeLogs {
     async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        assert_eq!(method, "eth_getLogs");
+        if method != "eth_getLogs" {
+            return Err(RpcError::JsonRpc {
+                code: -32601,
+                message: "method not found".to_owned(),
+            });
+        }
         let filter = &params[0];
         let from = u64::from_str_radix(
             filter["fromBlock"]
@@ -331,6 +336,7 @@ fn log(block: u64, index: u64) -> Value {
         "topics": [format!("0x{}", "11".repeat(32))],
         "data": "0x",
         "blockNumber": format!("0x{block:x}"),
+        "blockHash": format!("0x{}", "aa".repeat(32)),
         "transactionHash": format!("0x{index:064x}"),
         "logIndex": format!("0x{index:x}"),
         "removed": false
@@ -374,8 +380,91 @@ async fn chunked_logs_recover_silent_caps_and_preserve_order() {
     assert!(rpc.calls.lock().unwrap().len() > 1);
 }
 
+#[derive(Clone)]
+struct ReceiptFallback {
+    logs: Arc<Vec<Value>>,
+    calls: Arc<Mutex<Vec<String>>>,
+    log_error: bool,
+}
+
+#[async_trait]
+impl Rpc for ReceiptFallback {
+    async fn request(&self, method: &str, _params: Value) -> Result<Value, RpcError> {
+        self.calls.lock().unwrap().push(method.to_owned());
+        match method {
+            "eth_getLogs" if self.log_error => Err(RpcError::JsonRpc {
+                code: -32000,
+                message: "too many results".to_owned(),
+            }),
+            "eth_getLogs" => Ok(Value::Array(self.logs.iter().take(3).cloned().collect())),
+            "eth_getBlockByNumber" => Ok(json!({
+                "number": "0x5",
+                "hash": format!("0x{}", "aa".repeat(32)),
+                "transactions": self.logs.iter().map(|entry| entry["transactionHash"].clone()).collect::<Vec<_>>()
+            })),
+            "eth_getBlockReceipts" => Ok(Value::Array(
+                self.logs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        json!({
+                            "blockHash": format!("0x{}", "aa".repeat(32)),
+                            "blockNumber": "0x5",
+                            "transactionHash": entry["transactionHash"].clone(),
+                            "transactionIndex": format!("0x{index:x}"),
+                            "logs": [entry.clone()]
+                        })
+                    })
+                    .collect(),
+            )),
+            _ => unreachable!(),
+        }
+    }
+
+    fn metrics(&self) -> RpcMetrics {
+        RpcMetrics::default()
+    }
+}
+
 #[tokio::test]
-async fn single_block_cap_and_unrelated_errors_fail_without_retry_tree() {
+async fn saturated_single_block_uses_complete_block_receipts() {
+    let rpc = ReceiptFallback {
+        logs: Arc::new(vec![log(5, 0), log(5, 1), log(5, 2), log(5, 3)]),
+        calls: Arc::new(Mutex::new(Vec::new())),
+        log_error: false,
+    };
+
+    let (logs, _) = get_logs_chunked(&rpc, &filter(), 5, 5, 1_000, 3)
+        .await
+        .unwrap();
+
+    assert_eq!(logs.len(), 4);
+    assert_eq!(
+        rpc.calls.lock().unwrap().as_slice(),
+        [
+            "eth_getLogs",
+            "eth_getBlockByNumber",
+            "eth_getBlockReceipts"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn single_block_result_limit_error_uses_complete_block_receipts() {
+    let rpc = ReceiptFallback {
+        logs: Arc::new(vec![log(5, 0), log(5, 1), log(5, 2), log(5, 3)]),
+        calls: Arc::new(Mutex::new(Vec::new())),
+        log_error: true,
+    };
+
+    let (logs, _) = get_logs_chunked(&rpc, &filter(), 5, 5, 1_000, 3)
+        .await
+        .unwrap();
+    assert_eq!(logs.len(), 4);
+}
+
+#[tokio::test]
+async fn single_block_cap_without_receipt_support_and_unrelated_errors_fail_without_retry_tree() {
     let rpc = FakeLogs {
         logs: Arc::new(vec![log(5, 0), log(5, 1), log(5, 2), log(5, 3)]),
         cap: 3,
@@ -387,7 +476,7 @@ async fn single_block_cap_and_unrelated_errors_fail_without_retry_tree() {
             .await
             .unwrap_err()
             .to_string()
-            .contains("cannot prove completeness")
+            .contains("method not found")
     );
 
     let failing = FakeLogs {

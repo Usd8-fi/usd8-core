@@ -612,6 +612,101 @@ async fn fetch_logs<R: Rpc + ?Sized>(
     Ok(logs)
 }
 
+async fn fetch_block_receipt_logs<R: Rpc + ?Sized>(
+    rpc: &R,
+    filter: &LogFilter,
+    block: u64,
+) -> Result<Vec<RpcLog>, RpcError> {
+    let block_tag = format!("0x{block:x}");
+    let block_value = rpc
+        .request("eth_getBlockByNumber", json!([block_tag, false]))
+        .await?;
+    let block_object = block_value
+        .as_object()
+        .ok_or_else(|| RpcError::InvalidResponse {
+            method: "eth_getBlockByNumber".to_owned(),
+            message: "result is not an object".to_owned(),
+        })?;
+    if hex_quantity("block number", &block_object["number"])? != block {
+        return Err(RpcError::InvalidLog(
+            "block response does not match requested number".to_owned(),
+        ));
+    }
+    let block_hash = exact_hex("block hash", &block_object["hash"], 32)?;
+    let transaction_values =
+        block_object["transactions"]
+            .as_array()
+            .ok_or_else(|| RpcError::InvalidResponse {
+                method: "eth_getBlockByNumber".to_owned(),
+                message: "transactions is not an array".to_owned(),
+            })?;
+    let transaction_hashes = transaction_values
+        .iter()
+        .enumerate()
+        .map(|(index, hash)| exact_hex(&format!("transactions[{index}]"), hash, 32))
+        .collect::<Result<Vec<_>, _>>()?;
+    if transaction_hashes.iter().collect::<HashSet<_>>().len() != transaction_hashes.len() {
+        return Err(RpcError::InvalidLog(
+            "block contains duplicate transaction hashes".to_owned(),
+        ));
+    }
+
+    let receipts_value = rpc
+        .request("eth_getBlockReceipts", json!([format!("0x{block:x}")]))
+        .await?;
+    let receipts = receipts_value
+        .as_array()
+        .ok_or_else(|| RpcError::InvalidResponse {
+            method: "eth_getBlockReceipts".to_owned(),
+            message: "result is not an array".to_owned(),
+        })?;
+    if receipts.len() != transaction_hashes.len() {
+        return Err(RpcError::InvalidLog(format!(
+            "receipt count {} does not match block transaction count {}",
+            receipts.len(),
+            transaction_hashes.len()
+        )));
+    }
+
+    let mut output = Vec::new();
+    for (index, receipt) in receipts.iter().enumerate() {
+        if hex_quantity("receipt blockNumber", &receipt["blockNumber"])? != block
+            || exact_hex("receipt blockHash", &receipt["blockHash"], 32)? != block_hash
+            || hex_quantity("receipt transactionIndex", &receipt["transactionIndex"])?
+                != index as u64
+            || exact_hex("receipt transactionHash", &receipt["transactionHash"], 32)?
+                != transaction_hashes[index]
+        {
+            return Err(RpcError::InvalidLog(
+                "receipt does not match the requested canonical block".to_owned(),
+            ));
+        }
+        let values = receipt["logs"]
+            .as_array()
+            .ok_or_else(|| RpcError::InvalidResponse {
+                method: "eth_getBlockReceipts".to_owned(),
+                message: "receipt logs is not an array".to_owned(),
+            })?;
+        for value in values {
+            if exact_hex("log blockHash", &value["blockHash"], 32)? != block_hash {
+                return Err(RpcError::InvalidLog(
+                    "receipt log block hash mismatch".to_owned(),
+                ));
+            }
+            let log = parse_log(value.clone())?;
+            if log.block_number != block || log.transaction_hash != transaction_hashes[index] {
+                return Err(RpcError::InvalidLog(
+                    "receipt log position does not match its receipt".to_owned(),
+                ));
+            }
+            if log.address == filter.address && log_matches_filter(&log, filter) {
+                output.push(log);
+            }
+        }
+    }
+    Ok(output)
+}
+
 fn range_limited(error: &RpcError) -> bool {
     if matches!(error, RpcError::ResponseTooLarge { .. }) {
         return true;
@@ -702,6 +797,24 @@ pub async fn get_logs_chunked<R: Rpc + ?Sized>(
                 Ok(logs) => logs,
                 Err(error) => {
                     metrics.errors += 1;
+                    if range_limited(&error) && from == to {
+                        if chunk_requests.saturating_add(2) > MAX_LOG_REQUESTS_PER_CHUNK {
+                            return Err(RpcError::LogBudgetExceeded("logical-request"));
+                        }
+                        chunk_requests += 2;
+                        metrics.requests += 2;
+                        let remaining = MAX_LOG_CHUNK_DURATION
+                            .checked_sub(chunk_started.elapsed())
+                            .ok_or(RpcError::LogBudgetExceeded("deadline"))?;
+                        let receipt_logs = tokio::time::timeout(
+                            remaining,
+                            fetch_block_receipt_logs(rpc, &filter, from),
+                        )
+                        .await
+                        .map_err(|_| RpcError::LogBudgetExceeded("deadline"))??;
+                        output.extend(receipt_logs);
+                        continue;
+                    }
                     if range_limited(&error) && from < to {
                         if chunk_bisections >= MAX_LOG_BISECTIONS_PER_CHUNK {
                             return Err(RpcError::LogBudgetExceeded("bisection"));
@@ -718,11 +831,30 @@ pub async fn get_logs_chunked<R: Rpc + ?Sized>(
             };
             if logs.len() >= result_cap {
                 if from == to {
-                    return Err(RpcError::LogCompleteness {
-                        count: logs.len(),
-                        cap: result_cap,
-                        block: from,
-                    });
+                    if chunk_requests.saturating_add(2) > MAX_LOG_REQUESTS_PER_CHUNK {
+                        return Err(RpcError::LogBudgetExceeded("logical-request"));
+                    }
+                    chunk_requests += 2;
+                    metrics.requests += 2;
+                    let remaining = MAX_LOG_CHUNK_DURATION
+                        .checked_sub(chunk_started.elapsed())
+                        .ok_or(RpcError::LogBudgetExceeded("deadline"))?;
+                    let receipt_logs = tokio::time::timeout(
+                        remaining,
+                        fetch_block_receipt_logs(rpc, &filter, from),
+                    )
+                    .await
+                    .map_err(|_| RpcError::LogBudgetExceeded("deadline"))??;
+                    if rpc
+                        .metrics()
+                        .transport_attempts
+                        .saturating_sub(transport_attempts_started)
+                        > MAX_LOG_TRANSPORT_ATTEMPTS_PER_CHUNK
+                    {
+                        return Err(RpcError::LogBudgetExceeded("transport-attempt"));
+                    }
+                    output.extend(receipt_logs);
+                    continue;
                 }
                 if chunk_bisections >= MAX_LOG_BISECTIONS_PER_CHUNK {
                     return Err(RpcError::LogBudgetExceeded("bisection"));

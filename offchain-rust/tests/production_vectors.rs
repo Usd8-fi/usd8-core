@@ -1,7 +1,8 @@
 use num_bigint::BigUint;
 use std::str::FromStr;
 use usd8_settlement::{
-    Address, ClaimEvent, ClaimInput, EventKind, KernelInput, PoolInput, allocate_with_events,
+    Address, ClaimEvent, ClaimInput, EventKind, KernelError, KernelInput, PoolInput, allocate,
+    allocate_with_events,
 };
 
 fn n(value: &str) -> BigUint {
@@ -61,10 +62,13 @@ fn input(claims: Vec<ClaimInput>) -> KernelInput {
     KernelInput {
         incident_id: 1u8.into(),
         coverage_bps: 8_000u16.into(),
+        booster_boost_bps: 100u8.into(),
         insured_decimals: 18,
         twap_ratio: n("1000000000000000000"),
         underlying_usd: n("1000000000000000000"),
         max_cover_pool_payout_bps: 10_000u16.into(),
+
+        protocol_fee_share_bps: 0u8.into(),
         pools: vec![PoolInput {
             balance: n("100000000000000000000"),
             asset_usd: n("1000000000000000000"),
@@ -72,6 +76,25 @@ fn input(claims: Vec<ClaimInput>) -> KernelInput {
         }],
         claims,
     }
+}
+
+#[test]
+fn invalid_kernel_policy_ranges_fail_closed() {
+    for invalid_rate in [0u64, u64::from(u16::MAX) + 1] {
+        let mut invalid = input(Vec::new());
+        invalid.booster_boost_bps = invalid_rate.into();
+        assert!(matches!(
+            allocate(&invalid),
+            Err(KernelError::InvalidPolicy(message)) if message.contains("boosterBoostBps")
+        ));
+    }
+
+    let mut invalid = input(Vec::new());
+    invalid.coverage_bps = 8_001u16.into();
+    assert!(matches!(
+        allocate(&invalid),
+        Err(KernelError::InvalidPolicy(message)) if message.contains("coverageBps")
+    ));
 }
 
 #[test]

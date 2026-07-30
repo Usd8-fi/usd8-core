@@ -85,8 +85,21 @@ fn derived_config_rejects_invalid_onchain_state() {
         )
         .is_err()
     );
-    assert!(BootstrapConfig::derived(registry, defi, 2, 100, BTreeMap::new(), 1).is_err());
-    assert!(BootstrapConfig::derived(registry, defi, 1, 101, BTreeMap::new(), 1).is_err());
+    let custom = BootstrapConfig::derived(registry, defi, 2, 250, BTreeMap::new(), 1).unwrap();
+    assert_eq!(custom.booster_id, 2);
+    assert_eq!(custom.booster_boost_bps, 250);
+    assert!(BootstrapConfig::derived(registry, defi, 1, 0, BTreeMap::new(), 1).is_err());
+    assert!(
+        BootstrapConfig::derived(
+            registry,
+            defi,
+            1,
+            u64::from(u16::MAX) + 1,
+            BTreeMap::new(),
+            1
+        )
+        .is_err()
+    );
     assert!(BootstrapConfig::derived(registry, defi, 1, 100, BTreeMap::new(), 0).is_err());
 
     let feeds = [(

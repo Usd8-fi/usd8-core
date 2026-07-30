@@ -4,7 +4,7 @@ use usd8_settlement::compute_json;
 #[test]
 fn pre_crafted_claim_results_match_golden_vectors() {
     let vectors: Value =
-        serde_json::from_str(include_str!("../../test-vectors/golden-claim-results.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/golden-claim-results.json")).unwrap();
 
     for vector in vectors.as_array().unwrap() {
         let name = vector["name"].as_str().unwrap();

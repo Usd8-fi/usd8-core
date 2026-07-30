@@ -2,6 +2,7 @@ use alloy_primitives::aliases::U80;
 use alloy_primitives::{Address as AlloyAddress, Bytes, I256, U256};
 use alloy_sol_types::SolCall;
 use async_trait::async_trait;
+use num_bigint::BigUint;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -11,8 +12,8 @@ use usd8_settlement::abi::{
     IAggregatorV3, IDefiInsurance, IERC20, IRegistry, ISingleAssetCoverPool,
 };
 use usd8_settlement::chain::{
-    derive_bootstrap_config_at, incident_at, incident_config_at, pool_state_at, pools_at,
-    price_usd_1e18, ratio_at, twap_ratio_before,
+    ChainError, derive_bootstrap_config_at, incident_at, incident_config_at, pool_state_at,
+    pools_at, price_usd_1e18, ratio_at, twap_ratio_before,
 };
 use usd8_settlement::config::BootstrapConfig;
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
@@ -73,6 +74,10 @@ impl Rpc for CallRpc {
 }
 
 fn fixture(answer: I256) -> CallRpc {
+    fixture_with_feed_decimals(answer, 8)
+}
+
+fn fixture_with_feed_decimals(answer: I256, feed_decimals: u8) -> CallRpc {
     let mut responses = HashMap::new();
     let mut insert = |to: &str, selector: [u8; 4], value: Value| {
         responses.insert(
@@ -88,15 +93,15 @@ fn fixture(answer: I256) -> CallRpc {
         IDefiInsurance::incidentsCall::SELECTOR,
         encoded::<IDefiInsurance::incidentsCall>(&IDefiInsurance::incidentsReturn {
             insuredToken: a(INSURED),
-            claimWindowEndTime: 900,
-            root: [0x22; 32].into(),
-            unresolved: U256::from(2),
-            rootSubmittedAt: 0,
+            resolvedAt: 0,
             referenceBlock: 80,
             openBlock: 90,
-            status: 1,
-            disputedAt: 0,
+            phaseDeadline: 900,
+            root: [0x22; 32].into(),
+            unresolvedClaims: U256::from(2),
             claimSetHash: [0x33; 32].into(),
+            teePcrHash: [0x44; 32].into(),
+            protocolFeeShareBps: 2_000,
         }),
     );
     insert(
@@ -110,14 +115,13 @@ fn fixture(answer: I256) -> CallRpc {
         encoded::<IDefiInsurance::registryCall>(&a(REGISTRY)),
     );
     insert(
-        DEFI,
-        IDefiInsurance::BOOSTER_IDCall::SELECTOR,
-        encoded::<IDefiInsurance::BOOSTER_IDCall>(&U256::from(1)),
-    );
-    insert(
-        DEFI,
-        IDefiInsurance::BOOSTER_BOOST_BPSCall::SELECTOR,
-        encoded::<IDefiInsurance::BOOSTER_BOOST_BPSCall>(&U256::from(100)),
+        REGISTRY,
+        IRegistry::boosterConfigCall::SELECTOR,
+        encoded::<IRegistry::boosterConfigCall>(&IRegistry::boosterConfigReturn {
+            collection: AlloyAddress::ZERO,
+            tokenId: 1,
+            boostBps: 100,
+        }),
     );
     insert(
         REGISTRY,
@@ -133,11 +137,10 @@ fn fixture(answer: I256) -> CallRpc {
         DEFI,
         IDefiInsurance::getInsuredTokenCall::SELECTOR,
         encoded::<IDefiInsurance::getInsuredTokenCall>(&IDefiInsurance::InsuredToken {
-            maxCoverageBps: U256::from(8_000),
+            maxCoverageBps: 8_000,
             underlyingPriceOracle: a(ORACLE),
             underlyingConversionAddress: AlloyAddress::ZERO,
             underlyingConversionCallData: Bytes::new(),
-            minClaimAmount: 1_000,
         }),
     );
     insert(
@@ -145,7 +148,7 @@ fn fixture(answer: I256) -> CallRpc {
         IDefiInsurance::settlementParamsCall::SELECTOR,
         encoded::<IDefiInsurance::settlementParamsCall>(&IDefiInsurance::settlementParamsReturn {
             twapLookbackBlocks: 10,
-            holdingMarginBlocks: 5,
+            minHoldingRequired: 5,
             sampleStepBlocks: 2,
         }),
     );
@@ -157,10 +160,16 @@ fn fixture(answer: I256) -> CallRpc {
     insert(
         REGISTRY,
         IRegistry::getScoredRateHistoryCall::SELECTOR,
-        encoded::<IRegistry::getScoredRateHistoryCall>(&vec![IRegistry::RatePoint {
-            fromBlock: 5,
-            rate: 1_000_000_000_000_000_000,
-        }]),
+        encoded::<IRegistry::getScoredRateHistoryCall>(&vec![
+            IRegistry::RatePoint {
+                fromBlock: 5,
+                rate: 1_000_000_000_000_000_000,
+            },
+            IRegistry::RatePoint {
+                fromBlock: 50,
+                rate: 2_000_000_000_000_000_000,
+            },
+        ]),
     );
     insert(
         REGISTRY,
@@ -204,7 +213,7 @@ fn fixture(answer: I256) -> CallRpc {
     insert(
         FEED,
         IAggregatorV3::decimalsCall::SELECTOR,
-        encoded::<IAggregatorV3::decimalsCall>(&8),
+        encoded::<IAggregatorV3::decimalsCall>(&feed_decimals),
     );
     CallRpc {
         responses: Arc::new(responses),
@@ -259,7 +268,7 @@ async fn historical_abi_reads_reconstruct_incident_config_and_pool_state() {
         .unwrap();
     assert_eq!(incident.reference_block, 80);
     assert_eq!(incident.open_block, 90);
-    assert_eq!(incident.unresolved.to_string(), "2");
+    assert_eq!(incident.unresolved_claims.to_string(), "2");
 
     let incident_cfg = incident_config_at(&rpc, &cfg, incident.insured_token, 90)
         .await
@@ -268,7 +277,17 @@ async fn historical_abi_reads_reconstruct_incident_config_and_pool_state() {
     assert_eq!(incident_cfg.params.sample_step_blocks, 2);
     assert_eq!(incident_cfg.scored_tokens.len(), 1);
     assert_eq!(incident_cfg.scored_tokens[0].decimals, 6);
+    assert_eq!(incident_cfg.scored_tokens[0].rates.len(), 2);
     assert_eq!(incident_cfg.scored_tokens[0].rates[0].from_block, 5);
+    assert_eq!(
+        incident_cfg.scored_tokens[0].rates[0].rate,
+        BigUint::from(1_000_000_000_000_000_000u64)
+    );
+    assert_eq!(incident_cfg.scored_tokens[0].rates[1].from_block, 50);
+    assert_eq!(
+        incident_cfg.scored_tokens[0].rates[1].rate,
+        BigUint::from(2_000_000_000_000_000_000u64)
+    );
     assert_eq!(
         twap_ratio_before(&rpc, &incident_cfg, 80)
             .await
@@ -285,6 +304,25 @@ async fn historical_abi_reads_reconstruct_incident_config_and_pool_state() {
     assert_eq!(pool.balance.to_string(), "1000000000");
     assert_eq!(pool.asset_decimals, 6);
     assert_eq!(pool.asset_usd.to_string(), "1000000000000000000");
+}
+
+#[tokio::test]
+async fn oracle_price_that_normalizes_to_zero_is_rejected() {
+    let cfg = config();
+    let rpc = fixture_with_feed_decimals(I256::try_from(100_000_000i64).unwrap(), 30);
+
+    let error = price_usd_1e18(
+        &rpc,
+        cfg.asset_feed(Address::from_str(ASSET).unwrap()).unwrap(),
+        100,
+        cfg.max_oracle_staleness,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ChainError::InvalidOracle { message, .. } if message == "normalized price rounds to zero"
+    ));
 }
 
 #[tokio::test]

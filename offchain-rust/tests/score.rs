@@ -61,6 +61,9 @@ struct ScoreRpc {
 fn topic_matches(filter: &Value, topic: &Value) -> bool {
     filter.is_null()
         || filter
+            .as_array()
+            .is_some_and(|options| options.iter().any(|option| topic_matches(option, topic)))
+        || filter
             .as_str()
             .zip(topic.as_str())
             .is_some_and(|(wanted, actual)| wanted.eq_ignore_ascii_case(actual))
@@ -86,7 +89,7 @@ impl Rpc for ScoreRpc {
                 )
                 .unwrap();
                 let wanted = filter["topics"].as_array().unwrap();
-                if wanted.len() == 1 {
+                if wanted.len() == 1 || wanted.iter().any(Value::is_array) {
                     self.global_log_queries.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(Value::Array(
@@ -240,7 +243,7 @@ async fn raw_score_matches_rate_segment_golden_vector() {
 }
 
 #[tokio::test]
-async fn ephemeral_bulk_matches_raw_for_multiple_users_and_tracks_only_claimants() {
+async fn ephemeral_bulk_matches_raw_for_multiple_users_and_historical_rate_segments() {
     let rpc = Arc::new(rpc());
     let bulk = BulkScoreSource::open(
         rpc.clone(),
@@ -259,11 +262,86 @@ async fn ephemeral_bulk_matches_raw_for_multiple_users_and_tracks_only_claimants
             .unwrap();
         assert_eq!(bulk.gross_score_of(user).await.unwrap(), raw);
     }
+    assert_eq!(
+        bulk.gross_score_of(ka(ALICE)).await.unwrap(),
+        BigUint::from(900u16)
+    );
+    assert_eq!(
+        bulk.gross_score_of(ka(BOB)).await.unwrap(),
+        BigUint::from(300u16)
+    );
     assert_eq!(bulk.metadata.tracked_accounts, 2);
     assert_eq!(bulk.metadata.indexed_tokens, 1);
-    assert_eq!(bulk.metadata.indexed_transfers, 3);
-    // Four bounded 3-block slices, independent of claimant and rate-segment counts.
-    assert_eq!(rpc.global_log_queries.load(Ordering::Relaxed), 4);
+    assert_eq!(bulk.metadata.indexed_transfers, 2);
+    // The first scoring segment starts at block 2. Seed that block's balances, then
+    // replay blocks 3..=10 in three bounded slices; block-1 history is irrelevant.
+    assert_eq!(rpc.global_log_queries.load(Ordering::Relaxed), 6);
+}
+
+#[tokio::test]
+async fn ephemeral_bulk_request_count_excludes_pre_scoring_history() {
+    let mut config = cfg();
+    config.scored_tokens[0].rates = vec![RatePoint {
+        from_block: 100,
+        rate: BigUint::from(1_000_000_000_000_000_000u64),
+    }];
+    let balances = [
+        ((ALICE.to_ascii_lowercase(), 100), U256::from(100)),
+        ((ALICE.to_ascii_lowercase(), 110), U256::from(100)),
+    ]
+    .into_iter()
+    .collect();
+    let rpc = Arc::new(score_rpc(vec![transfer(ZERO, ALICE, 100, 1, 0)], balances));
+
+    let bulk = BulkScoreSource::open(
+        rpc.clone(),
+        &config,
+        110,
+        BTreeSet::from([ka(ALICE)]),
+        1,
+        10,
+        1_000,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bulk.gross_score_of(ka(ALICE)).await.unwrap(),
+        BigUint::from(1_000u16)
+    );
+    assert_eq!(bulk.metadata.indexed_transfers, 0);
+    assert_eq!(rpc.global_log_queries.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn ephemeral_bulk_ignores_busy_blocks_unrelated_to_claimants() {
+    let stranger = "0x000000000000000000000000000000000000cafe";
+    let mut logs = vec![transfer(ZERO, ALICE, 100, 1, 0)];
+    logs.extend((1..=1_000).map(|index| transfer(stranger, stranger, 0, 5, index)));
+    let balances = [
+        ((ALICE.to_ascii_lowercase(), 2), U256::from(100)),
+        ((ALICE.to_ascii_lowercase(), 10), U256::from(100)),
+    ]
+    .into_iter()
+    .collect();
+
+    let bulk = BulkScoreSource::open(
+        Arc::new(score_rpc(logs, balances)),
+        &cfg(),
+        10,
+        BTreeSet::from([ka(ALICE)]),
+        1,
+        1_000,
+        1_000,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(bulk.metadata.indexed_transfers, 0);
+    assert_eq!(
+        bulk.gross_score_of(ka(ALICE)).await.unwrap(),
+        BigUint::from(1_200u16)
+    );
 }
 
 #[tokio::test]
@@ -274,9 +352,12 @@ async fn ephemeral_bulk_reconciles_every_tracked_balance_and_ignores_untracked_a
         transfer(ZERO, ALICE, 100, 1, 1),
         transfer(stranger, ZERO, 1_000, 9, 2),
     ];
-    let balances = [((ALICE.to_ascii_lowercase(), 10), U256::from(101))]
-        .into_iter()
-        .collect();
+    let balances = [
+        ((ALICE.to_ascii_lowercase(), 2), U256::from(100)),
+        ((ALICE.to_ascii_lowercase(), 10), U256::from(101)),
+    ]
+    .into_iter()
+    .collect();
     let error = BulkScoreSource::open(
         Arc::new(score_rpc(logs, balances)),
         &cfg(),

@@ -1,15 +1,15 @@
 use usd8_tee_job_api::{
-    CanonicalRequest, CanonicalSettlementRequest, JobWireRequest, MAX_ACCESS_KEY_ID_BYTES,
-    MAX_CIPHERTEXT_B64_BYTES, MAX_CIPHERTEXT_BYTES, MAX_SECRET_ACCESS_KEY_BYTES,
-    MAX_SESSION_TOKEN_BYTES, MAX_WIRE_REQUEST_BYTES, StoredRequest, WireError, read_frame_async,
-    write_frame_async,
+    CanonicalRequest, CanonicalSettlementRequest, JOB_WIRE_SCHEMA_VERSION, JobWireRequest,
+    MAX_ACCESS_KEY_ID_BYTES, MAX_CIPHERTEXT_B64_BYTES, MAX_CIPHERTEXT_BYTES,
+    MAX_SECRET_ACCESS_KEY_BYTES, MAX_SESSION_TOKEN_BYTES, MAX_WIRE_REQUEST_BYTES,
+    STORED_REQUEST_SCHEMA_VERSION, StoredRequest, WireError, read_frame_async, write_frame_async,
 };
 
 fn request() -> JobWireRequest {
     JobWireRequest {
-        schema_version: 2,
+        schema_version: JOB_WIRE_SCHEMA_VERSION,
         stored_request: StoredRequest {
-            schema_version: 2,
+            schema_version: STORED_REQUEST_SCHEMA_VERSION,
             job_id: "a".repeat(64),
             request: CanonicalRequest::Settlement(CanonicalSettlementRequest {
                 incident_id: "7".into(),

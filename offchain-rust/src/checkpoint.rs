@@ -1,7 +1,7 @@
 use crate::Address;
 use crate::chain::{
     ChainError, IncidentConfig, RatePoint, ScoredToken, balance_of_at, block_by_number, chain_id,
-    erc20_transfers,
+    erc20_transfers, erc20_transfers_for_accounts,
 };
 use crate::rpc::{LogMetrics, Rpc};
 use hmac::{Hmac, Mac};
@@ -234,14 +234,19 @@ fn assert_rates(rates: &[RatePoint]) -> Result<(), CheckpointError> {
     Ok(())
 }
 
-fn contributes_at(scored: &ScoredToken, as_of_block: u64) -> bool {
-    scored.rates.iter().enumerate().any(|(index, point)| {
+fn first_contributing_block(scored: &ScoredToken, as_of_block: u64) -> Option<u64> {
+    scored.rates.iter().enumerate().find_map(|(index, point)| {
         let next = scored
             .rates
             .get(index + 1)
             .map_or(as_of_block, |next| next.from_block);
-        point.rate != BigUint::from(0u8) && point.from_block < next.min(as_of_block)
+        (point.rate != BigUint::from(0u8) && point.from_block < next.min(as_of_block))
+            .then_some(point.from_block)
     })
+}
+
+fn contributes_at(scored: &ScoredToken, as_of_block: u64) -> bool {
+    first_contributing_block(scored, as_of_block).is_some()
 }
 
 fn scale_integral(integral: BigUint, decimals: u8) -> BigUint {
@@ -729,15 +734,28 @@ async fn advance_token<R: Rpc + ?Sized>(
     let mut slice_from = token.cursor_block + 1;
     while slice_from <= target_block {
         let slice_to = slice_from.saturating_add(max_range - 1).min(target_block);
-        let (transfers, slice_metrics) = erc20_transfers(
-            rpc,
-            scored.token,
-            slice_from,
-            slice_to,
-            max_range,
-            result_cap,
-        )
-        .await?;
+        let (transfers, slice_metrics) = if let Some(accounts) = tracked_accounts {
+            erc20_transfers_for_accounts(
+                rpc,
+                scored.token,
+                accounts,
+                slice_from,
+                slice_to,
+                max_range,
+                result_cap,
+            )
+            .await?
+        } else {
+            erc20_transfers(
+                rpc,
+                scored.token,
+                slice_from,
+                slice_to,
+                max_range,
+                result_cap,
+            )
+            .await?
+        };
         indexed_transfers = indexed_transfers.saturating_add(transfers.len());
         metrics = merge_metrics(metrics, slice_metrics);
         for transfer in &transfers {
@@ -975,14 +993,32 @@ impl<R: Rpc + ?Sized> BulkScoreSource<R> {
                 }
                 continue;
             }
+            let scoring_start = first_contributing_block(scored, as_of_block).ok_or_else(|| {
+                CheckpointError::Invalid(format!(
+                    "bulk token {} has no contributing rate segment",
+                    scored.token
+                ))
+            })?;
+            let mut accounts = BTreeMap::new();
+            for user in &tracked_accounts {
+                accounts.insert(
+                    *user,
+                    AccountState {
+                        balance: balance_of_at(rpc.as_ref(), scored.token, *user, scoring_start)
+                            .await?,
+                        last_block: scoring_start,
+                        ..AccountState::default()
+                    },
+                );
+            }
             state.tokens.insert(
                 scored.token,
                 TokenState {
                     decimals: scored.decimals,
-                    cursor_block: 0,
+                    cursor_block: scoring_start,
                     cursor_block_hash: ZERO_HASH.to_owned(),
                     rates: scored.rates.clone(),
-                    accounts: BTreeMap::new(),
+                    accounts,
                 },
             );
             let token = state.tokens.get_mut(&scored.token).ok_or_else(|| {

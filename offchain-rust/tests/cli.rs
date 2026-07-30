@@ -83,7 +83,6 @@ fn bulk_score_is_accepted_and_score_modes_are_pairwise_exclusive() {
     let open = run(&[
         "attested-open",
         "0x0000000000000000000000000000000000003000",
-        "1234567",
         "--bulk-score",
     ]);
     assert_eq!(open.status.code(), Some(2));
@@ -91,11 +90,21 @@ fn bulk_score_is_accepted_and_score_modes_are_pairwise_exclusive() {
 }
 
 #[test]
-fn attested_open_requires_the_approved_credentialed_provider() {
+fn attested_open_rejects_a_caller_supplied_reference_block() {
     let output = run(&[
         "attested-open",
         "0x0000000000000000000000000000000000003000",
         "1234567",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown option: 1234567"));
+}
+
+#[test]
+fn attested_open_requires_the_approved_credentialed_provider() {
+    let output = run(&[
+        "attested-open",
+        "0x0000000000000000000000000000000000003000",
         "--registry",
         "0x0000000000000000000000000000000000001000",
         "--rpc-url",

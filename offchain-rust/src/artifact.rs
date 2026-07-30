@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+const BPS: u64 = 10_000;
+const MAX_PROTOCOL_FEE_BPS: u64 = 2_000;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -97,6 +100,13 @@ pub fn verify_run(run: &SettlementRun, config: &BootstrapConfig) -> Result<(), A
             "pool address/payout arrays have different lengths".to_owned(),
         ));
     }
+    if run.incident.protocol_fee_share_bps > BigUint::from(MAX_PROTOCOL_FEE_BPS) {
+        return Err(ArtifactError::Invariant(
+            "incident protocol fee share exceeds maximum".to_owned(),
+        ));
+    }
+    let bps = BigUint::from(BPS);
+    let user_share_bps = &bps - &run.incident.protocol_fee_share_bps;
     let mut totals = vec![BigUint::zero(); run.pool_addrs.len()];
     for row in &run.output.rows {
         if row.amounts.len() != totals.len() {
@@ -106,12 +116,12 @@ pub fn verify_run(run: &SettlementRun, config: &BootstrapConfig) -> Result<(), A
             )));
         }
         for (total, amount) in totals.iter_mut().zip(&row.amounts) {
-            *total += amount;
+            *total += (amount * &bps) / &user_share_bps;
         }
     }
     if totals != run.output.pool_payouts {
         return Err(ArtifactError::Invariant(
-            "pool payout totals do not equal row sums".to_owned(),
+            "pool payout totals do not equal grossed row sums".to_owned(),
         ));
     }
 
@@ -120,7 +130,7 @@ pub fn verify_run(run: &SettlementRun, config: &BootstrapConfig) -> Result<(), A
         verifying_contract: config.defi_insurance,
         incident_id: run.incident_id.clone(),
         root: run.output.root.clone(),
-        unresolved: run.window_incident.unresolved.clone(),
+        unresolved_claims: run.window_incident.unresolved_claims.clone(),
         pool_payouts: run.output.pool_payouts.clone(),
         pool_addrs: run.pool_addrs.clone(),
         claim_set: run.output.claim_set_hash.clone(),

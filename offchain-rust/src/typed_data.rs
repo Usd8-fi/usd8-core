@@ -4,9 +4,8 @@ use thiserror::Error;
 
 const DOMAIN_TYPE: &[u8] =
     b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
-const SETTLEMENT_TYPE: &[u8] = b"Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)";
-const INCIDENT_OPEN_TYPE: &[u8] =
-    b"IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId,bytes32 teePcrHash)";
+const SETTLEMENT_TYPE: &[u8] = b"Settlement(uint256 incidentId,bytes32 root,uint256 unresolvedClaims,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)";
+const INCIDENT_OPEN_TYPE: &[u8] = b"IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId,bytes32 teePcrHash,bytes32 eligibilityHash)";
 
 #[derive(Clone, Debug)]
 pub struct SettlementDigestInput {
@@ -14,7 +13,7 @@ pub struct SettlementDigestInput {
     pub verifying_contract: Address,
     pub incident_id: BigUint,
     pub root: String,
-    pub unresolved: BigUint,
+    pub unresolved_claims: BigUint,
     pub pool_payouts: Vec<BigUint>,
     pub pool_addrs: Vec<Address>,
     pub claim_set: String,
@@ -29,6 +28,7 @@ pub struct IncidentOpenDigestInput {
     pub reference_block: u64,
     pub incident_id: BigUint,
     pub tee_pcr_hash: String,
+    pub eligibility_hash: String,
 }
 
 #[derive(Debug, Error)]
@@ -107,7 +107,7 @@ pub fn settlement_digest(input: &SettlementDigestInput) -> Result<String, TypedD
     structure.extend_from_slice(&keccak256(SETTLEMENT_TYPE));
     structure.extend_from_slice(&word(&input.incident_id)?);
     structure.extend_from_slice(&root);
-    structure.extend_from_slice(&word(&input.unresolved)?);
+    structure.extend_from_slice(&word(&input.unresolved_claims)?);
     structure.extend_from_slice(&packed_uint256_hash(&input.pool_payouts)?);
     structure.extend_from_slice(&packed_address_hash(&input.pool_addrs));
     structure.extend_from_slice(&claim_set);
@@ -117,14 +117,29 @@ pub fn settlement_digest(input: &SettlementDigestInput) -> Result<String, TypedD
 
 pub fn incident_open_digest(input: &IncidentOpenDigestInput) -> Result<String, TypedDataError> {
     let tee_pcr_hash = hash32("teePcrHash", &input.tee_pcr_hash)?;
-    let mut structure = Vec::with_capacity(160);
+    let eligibility_hash = hash32("eligibilityHash", &input.eligibility_hash)?;
+    let mut structure = Vec::with_capacity(192);
     structure.extend_from_slice(&keccak256(INCIDENT_OPEN_TYPE));
     structure.extend_from_slice(&input.insured_token.abi_word());
     structure.extend_from_slice(&word(&BigUint::from(input.reference_block))?);
     structure.extend_from_slice(&word(&input.incident_id)?);
     structure.extend_from_slice(&tee_pcr_hash);
+    structure.extend_from_slice(&eligibility_hash);
     Ok(typed_digest(
         domain_hash(input.chain_id, input.verifying_contract)?,
         keccak256(structure),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settlement_schema_names_live_count_unresolved_claims() {
+        assert_eq!(
+            hash_hex(keccak256(SETTLEMENT_TYPE)),
+            "0x4803e14af6987e9b70d65516bb96b7adb6bb57534e54d8a6e347b8b54f9b3964"
+        );
+    }
 }

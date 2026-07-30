@@ -3,6 +3,44 @@ fn settlement_score_mode() -> usd8_settlement::engine::ScoreMode {
     usd8_settlement::engine::ScoreMode::Bulk
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn terminal_error_code(detail: &str) -> &str {
+    match detail {
+        "CMS_PARSE_FAILED"
+        | "CMS_KEY_OR_IV_LENGTH"
+        | "CMS_CONTENT_DECRYPT_FAILED"
+        | "RSA_UNWRAP_FAILED" => "KMS_RECIPIENT_DECRYPT_FAILED",
+        "ENCLAVE_VALIDATE_FAILED"
+        | "DRPC_DECRYPT_FAILED"
+        | "LOCAL_RSA_FAILED"
+        | "NSM_ATTESTATION_FAILED"
+        | "KMS_ACCESS_DENIED"
+        | "KMS_SERVICE_FAILED"
+        | "KMS_SERVICE_UNMODELED"
+        | "KMS_TRANSPORT_FAILED"
+        | "KMS_CONSTRUCTION_FAILED"
+        | "KMS_TIMEOUT_FAILED"
+        | "KMS_DISPATCH_TIMEOUT"
+        | "KMS_DISPATCH_IO"
+        | "KMS_IO_NO_PROXY_ACCEPT"
+        | "KMS_IO_PROXY_REQUEST_READ"
+        | "KMS_IO_PROXY_REQUEST_PARSE"
+        | "KMS_IO_VSOCK_CONNECT"
+        | "KMS_IO_CONNECT_RESPONSE"
+        | "KMS_IO_TUNNEL"
+        | "KMS_IO_TUNNEL_EOF"
+        | "KMS_DISPATCH_USER"
+        | "KMS_DISPATCH_OTHER"
+        | "KMS_RESPONSE_PARSE_FAILED"
+        | "KMS_RESPONSE_FAILED"
+        | "OPEN_COMPUTE_FAILED"
+        | "OPEN_ARTIFACT_FAILED"
+        | "SIGNER_DECRYPT_FAILED"
+        | "SIGNER_FAILED" => detail,
+        _ => "ENCLAVE_FAILED",
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("usd8-tee-enclave requires Linux and /dev/nsm");
@@ -24,11 +62,15 @@ mod linux {
     use base64::Engine;
     use rand_core::OsRng;
     use rsa::pkcs8::EncodePublicKey;
-    use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
     use serde_bytes::ByteBuf;
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::env;
+    use std::io;
+    use std::mem::MaybeUninit;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
@@ -37,12 +79,13 @@ mod linux {
     use tokio::time::timeout;
     use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
     use usd8_tee_job_api::{
-        AttestedDigestKind, CanonicalRequest, JobPaths, JobWireRequest, MAX_ACCESS_KEY_ID_BYTES,
-        MAX_CIPHERTEXT_BYTES, MAX_SECRET_ACCESS_KEY_BYTES, MAX_SESSION_TOKEN_BYTES,
-        MAX_WIRE_REQUEST_BYTES, TerminalEnvelope, canonicalize_open_request, canonicalize_request,
-        connect_proxy_port, enclave_timeout_seconds, extract_attested_digest, read_frame_async,
-        settlement_rpc_url, sign_digest, stored_request_is_live, verify_job_request_binding,
-        write_frame_async,
+        AttestedDigestKind, CanonicalRequest, JOB_WIRE_SCHEMA_VERSION, JobPaths, JobWireRequest,
+        MAX_ACCESS_KEY_ID_BYTES, MAX_CIPHERTEXT_BYTES, MAX_SECRET_ACCESS_KEY_BYTES,
+        MAX_SESSION_TOKEN_BYTES, MAX_WIRE_REQUEST_BYTES, TerminalEnvelope,
+        canonicalize_open_request, canonicalize_request, connect_proxy_port,
+        decrypt_kms_recipient_envelope, enclave_timeout_seconds, extract_attested_digest,
+        parse_kms_recipient_cms, read_frame_async, settlement_rpc_url, sign_digest,
+        stored_request_is_live, verify_job_request_binding, write_frame_async,
     };
     use zeroize::{Zeroize, Zeroizing};
 
@@ -51,11 +94,39 @@ mod linux {
     const PARENT_CID: u32 = 3;
     const JOB_PORT: u32 = 5000;
     const MAX_RESPONSE: usize = 16 * 1024 * 1024;
+    static PROXY_STAGE: AtomicU8 = AtomicU8::new(0);
 
-    const EXPECTED_REGISTRY: &str = match option_env!("USD8_REGISTRY") {
-        Some(value) => value,
-        None => "0x3Fa82eC1842f72c36580D84E03377b10B5E2F590",
-    };
+    fn enable_loopback() -> io::Result<()> {
+        // Nitro Enclaves have no external network device, and their loopback
+        // interface is not guaranteed to be administratively up. The AWS SDK
+        // reaches the fixed-destination vsock relay through this local TCP
+        // listener, so fail closed if `lo` cannot be enabled.
+        let raw_fd =
+            unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let mut request = MaybeUninit::<libc::ifreq>::zeroed();
+        let request = unsafe { request.assume_init_mut() };
+        request.ifr_name[0] = b'l' as libc::c_char;
+        request.ifr_name[1] = b'o' as libc::c_char;
+
+        if unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFFLAGS, &mut *request) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = unsafe { request.ifr_ifru.ifru_flags };
+        request.ifr_ifru.ifru_flags = flags | libc::IFF_UP as libc::c_short;
+        if unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCSIFFLAGS, &mut *request) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    const EXPECTED_REGISTRY: &str = env!(
+        "USD8_REGISTRY",
+        "USD8_REGISTRY must be fixed at compile time for the enclave"
+    );
 
     fn validate(request: &JobWireRequest) -> Result<(Vec<u8>, Vec<u8>), Error> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -77,12 +148,11 @@ mod linux {
             CanonicalRequest::Open(open) => canonicalize_open_request(
                 &serde_json::to_vec(&json!({
                     "insuredToken": open.insured_token,
-                    "referenceBlock": open.reference_block,
                 }))?,
                 EXPECTED_REGISTRY,
             )?,
         };
-        if request.schema_version != 2
+        if request.schema_version != JOB_WIRE_SCHEMA_VERSION
             || request.region != "eu-central-1"
             || canonical != request.stored_request.request
             || request.access_key_id.is_empty()
@@ -162,25 +232,48 @@ mod linux {
             .recipient(recipient)
             .send()
             .await
-            .map_err(
-                |error| match error.as_service_error().and_then(|error| error.code()) {
+            .map_err(|error| match &error {
+                aws_sdk_kms::error::SdkError::ConstructionFailure(_) => "KMS_CONSTRUCTION_FAILED",
+                aws_sdk_kms::error::SdkError::TimeoutError(_) => "KMS_TIMEOUT_FAILED",
+                aws_sdk_kms::error::SdkError::DispatchFailure(dispatch) => {
+                    if dispatch.is_timeout() {
+                        "KMS_DISPATCH_TIMEOUT"
+                    } else if dispatch.is_io() {
+                        match PROXY_STAGE.load(Ordering::Relaxed) {
+                            0 => "KMS_IO_NO_PROXY_ACCEPT",
+                            1 => "KMS_IO_PROXY_REQUEST_READ",
+                            2 => "KMS_IO_PROXY_REQUEST_PARSE",
+                            3 => "KMS_IO_VSOCK_CONNECT",
+                            4 => "KMS_IO_CONNECT_RESPONSE",
+                            5 => "KMS_IO_TUNNEL",
+                            _ => "KMS_IO_TUNNEL_EOF",
+                        }
+                    } else if dispatch.is_user() {
+                        "KMS_DISPATCH_USER"
+                    } else {
+                        "KMS_DISPATCH_OTHER"
+                    }
+                }
+                aws_sdk_kms::error::SdkError::ResponseError(_) => "KMS_RESPONSE_PARSE_FAILED",
+                aws_sdk_kms::error::SdkError::ServiceError(service) => match service.err().code() {
                     Some("AccessDeniedException") => "KMS_ACCESS_DENIED",
                     Some(_) => "KMS_SERVICE_FAILED",
-                    None => "KMS_TRANSPORT_FAILED",
+                    None => "KMS_SERVICE_UNMODELED",
                 },
-            )?;
+                _ => "KMS_TRANSPORT_FAILED",
+            })?;
         let wrapped = output
             .ciphertext_for_recipient()
             .ok_or("KMS_RESPONSE_FAILED")?;
-        let plaintext = private_key
-            .decrypt(Oaep::new::<Sha256>(), wrapped.as_ref())
-            .map_err(|_| "RSA_UNWRAP_FAILED")?;
-        Ok((Zeroizing::new(plaintext), document))
+        let envelope = parse_kms_recipient_cms(wrapped.as_ref()).map_err(|_| "CMS_PARSE_FAILED")?;
+        let plaintext = decrypt_kms_recipient_envelope(&private_key, &envelope)?;
+        Ok((plaintext, document))
     }
 
     async fn connect_proxy(listener: TcpListener) -> Result<(), Error> {
         loop {
             let (mut local, _) = listener.accept().await?;
+            PROXY_STAGE.fetch_max(1, Ordering::Relaxed);
             tokio::spawn(async move {
                 let mut request = Vec::with_capacity(512);
                 while request.len() < 4096 && !request.ends_with(b"\r\n\r\n") {
@@ -195,20 +288,25 @@ mod linux {
                     }
                     request.extend_from_slice(&chunk[..read]);
                 }
+                PROXY_STAGE.fetch_max(2, Ordering::Relaxed);
                 let Some(parent_port) = connect_proxy_port(&request) else {
                     return;
                 };
+                PROXY_STAGE.fetch_max(3, Ordering::Relaxed);
                 let Ok(mut parent) =
                     VsockStream::connect(VsockAddr::new(PARENT_CID, parent_port)).await
                 else {
                     return;
                 };
+                PROXY_STAGE.fetch_max(4, Ordering::Relaxed);
                 if local
                     .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     .await
                     .is_ok()
                 {
+                    PROXY_STAGE.fetch_max(5, Ordering::Relaxed);
                     let _ = copy_bidirectional(&mut local, &mut parent).await;
+                    PROXY_STAGE.fetch_max(6, Ordering::Relaxed);
                 }
             });
         }
@@ -243,7 +341,6 @@ mod linux {
                     drpc_key,
                     &open.registry,
                     &open.insured_token,
-                    &open.reference_block,
                     &env::var("USD8_EXPECTED_SIGNER")?,
                     usd8_settlement::attested_runtime::AttestedRuntimeOptions {
                         proxy_url: Some("http://127.0.0.1:8080"),
@@ -297,7 +394,9 @@ mod linux {
         let (drpc_plaintext, _) =
             recipient_decrypt(&kms, &drpc_ciphertext, "usd8-tee-drpc-v1", &job_binding).await?;
         drpc_ciphertext.zeroize();
-        let drpc_key = Zeroizing::new(String::from_utf8(drpc_plaintext.to_vec())?);
+        let drpc_text =
+            std::str::from_utf8(drpc_plaintext.as_slice()).map_err(|_| "invalid dRPC key")?;
+        let drpc_key = Zeroizing::new(drpc_text.to_owned());
         if drpc_key.is_empty() || drpc_key.len() > 512 || drpc_key.contains('\0') {
             return Err("invalid dRPC key".into());
         }
@@ -347,6 +446,7 @@ mod linux {
     }
 
     pub async fn run() -> Result<(), Error> {
+        enable_loopback()?;
         // Bind before accepting the parent request so the first KMS/RPC call
         // cannot race proxy startup inside the enclave.
         let proxy_listener = TcpListener::bind("127.0.0.1:8080").await?;
@@ -362,22 +462,7 @@ mod linux {
             Ok(terminal) => terminal,
             Err(error) => {
                 let detail = error.to_string();
-                let code = match detail.as_str() {
-                    "ENCLAVE_VALIDATE_FAILED"
-                    | "DRPC_DECRYPT_FAILED"
-                    | "LOCAL_RSA_FAILED"
-                    | "NSM_ATTESTATION_FAILED"
-                    | "KMS_ACCESS_DENIED"
-                    | "KMS_SERVICE_FAILED"
-                    | "KMS_TRANSPORT_FAILED"
-                    | "KMS_RESPONSE_FAILED"
-                    | "RSA_UNWRAP_FAILED"
-                    | "OPEN_COMPUTE_FAILED"
-                    | "OPEN_ARTIFACT_FAILED"
-                    | "SIGNER_DECRYPT_FAILED"
-                    | "SIGNER_FAILED" => detail.as_str(),
-                    _ => "ENCLAVE_FAILED",
-                };
+                let code = super::terminal_error_code(&detail);
                 TerminalEnvelope::failed(&request.stored_request.job_id, code)
             }
         };
@@ -399,5 +484,20 @@ mod tests {
     #[test]
     fn settlement_jobs_use_ephemeral_bulk_scoring_without_checkpoint_material() {
         assert_eq!(format!("{:?}", super::settlement_score_mode()), "Bulk");
+    }
+
+    #[test]
+    fn recipient_crypto_failures_are_indistinguishable() {
+        for detail in [
+            "CMS_PARSE_FAILED",
+            "CMS_KEY_OR_IV_LENGTH",
+            "CMS_CONTENT_DECRYPT_FAILED",
+            "RSA_UNWRAP_FAILED",
+        ] {
+            assert_eq!(
+                super::terminal_error_code(detail),
+                "KMS_RECIPIENT_DECRYPT_FAILED"
+            );
+        }
     }
 }

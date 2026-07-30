@@ -10,10 +10,6 @@ fn generated_function_selectors_match_solidity_authority() {
         "a6c6a8f3"
     );
     assert_eq!(
-        hex::encode(IDefiInsurance::incidentTeePcrHashCall::SELECTOR),
-        "03d88b70"
-    );
-    assert_eq!(
         hex::encode(IDefiInsurance::getInsuredTokenCall::SELECTOR),
         "3f962199"
     );
@@ -26,24 +22,28 @@ fn generated_function_selectors_match_solidity_authority() {
         "0fd19668"
     );
     assert_eq!(
+        hex::encode(IDefiInsurance::incidentPhaseWindowCall::SELECTOR),
+        "a617c97b"
+    );
+    assert_eq!(
         hex::encode(IDefiInsurance::isTeeSignerCall::SELECTOR),
         "8e50991b"
     );
     assert_eq!(
-        hex::encode(IDefiInsurance::MAX_REFERENCE_BLOCK_AGECall::SELECTOR),
-        "c01c587c"
+        hex::encode(IDefiInsurance::incidentOpenEligibilityHashCall::SELECTOR),
+        "8f0328a4"
     );
     assert_eq!(
-        hex::encode(IDefiInsurance::SUBMIT_DEADLINECall::SELECTOR),
-        "ca271f92"
+        hex::encode(IDefiInsurance::fileClaimCall::SELECTOR),
+        "7dd2ac69"
     );
     assert_eq!(
-        hex::encode(IDefiInsurance::DISPUTE_PERIODCall::SELECTOR),
-        "a5bbe22b"
+        hex::encode(IRegistry::incidentTimingConfigCall::SELECTOR),
+        "0ab39260"
     );
     assert_eq!(
-        hex::encode(IDefiInsurance::FINALIZE_WINDOWCall::SELECTOR),
-        "977487f4"
+        hex::encode(IRegistry::incidentOpenPriceConfigCall::SELECTOR),
+        "7e2a1a21"
     );
     assert_eq!(hex::encode(IRegistry::teePcrHashCall::SELECTOR), "235c9c7b");
     assert_eq!(hex::encode(IRegistry::coverPoolsCall::SELECTOR), "87549445");
@@ -59,7 +59,6 @@ fn generated_function_selectors_match_solidity_authority() {
         hex::encode(IRegistry::getScoredRateHistoryCall::SELECTOR),
         "99e54713"
     );
-    assert_eq!(hex::encode(IRegistry::boosterNFTCall::SELECTOR), "821c4043");
     assert_eq!(
         hex::encode(IRegistry::maxCoverPoolPayoutBpsCall::SELECTOR),
         "6d4dffcb"
@@ -83,6 +82,33 @@ fn generated_function_selectors_match_solidity_authority() {
     );
     assert_eq!(hex::encode(IERC20::balanceOfCall::SELECTOR), "70a08231");
     assert_eq!(hex::encode(IERC1155::balanceOfCall::SELECTOR), "00fdd58e");
+}
+
+#[test]
+fn insured_token_return_shape_matches_solidity_authority() {
+    let encoded = hex::decode(concat!(
+        "0000000000000000000000000000000000000000000000000000000000000020",
+        "0000000000000000000000000000000000000000000000000000000000001f40",
+        "0000000000000000000000001111111111111111111111111111111111111111",
+        "0000000000000000000000002222222222222222222222222222222222222222",
+        "0000000000000000000000000000000000000000000000000000000000000080",
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "1234000000000000000000000000000000000000000000000000000000000000"
+    ))
+    .unwrap();
+    let decoded =
+        IDefiInsurance::getInsuredTokenCall::abi_decode_returns_validate(&encoded).unwrap();
+
+    assert_eq!(decoded.maxCoverageBps, 8_000);
+    assert_eq!(
+        format!("{:#x}", decoded.underlyingPriceOracle),
+        "0x1111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        format!("{:#x}", decoded.underlyingConversionAddress),
+        "0x2222222222222222222222222222222222222222"
+    );
+    assert_eq!(decoded.underlyingConversionCallData.as_ref(), &[0x12, 0x34]);
 }
 
 #[test]

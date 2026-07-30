@@ -15,7 +15,7 @@ use usd8_settlement::incident_open::build_incident_open;
 use usd8_settlement::rpc::HttpRpc;
 use usd8_settlement::{allocate, parse_json, serialize_output};
 
-const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-open <insuredToken> <referenceBlock> --registry <address> --rpc-url <url> --expected-signer <address> [--output <file>]\n  usd8-settlement verify  <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement pcr-hash <PCR0> <PCR1> <PCR2>\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_REGISTRY, ETH_RPC_URL, DRPC_KEY, USD8_EXPECTED_SIGNER, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
+const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-open <insuredToken> --registry <address> --rpc-url <url> --expected-signer <address> [--output <file>]\n  usd8-settlement verify  <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement pcr-hash <PCR0> <PCR1> <PCR2>\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_REGISTRY, ETH_RPC_URL, DRPC_KEY, USD8_EXPECTED_SIGNER, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
 
 #[derive(Debug)]
 enum CliError {
@@ -338,19 +338,6 @@ fn verification_exit_code(root_matches: bool) -> i32 {
     if root_matches { 0 } else { 1 }
 }
 
-fn parse_u64_decimal(value: &str, field: &str) -> Result<u64, CliError> {
-    if value.is_empty()
-        || value == "0"
-        || (value.len() > 1 && value.starts_with('0'))
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(usage(format!("invalid {field}: {value}")));
-    }
-    value
-        .parse::<u64>()
-        .map_err(|_| usage(format!("invalid {field}: {value}")))
-}
-
 fn run_pcr_hash(args: &[String]) -> Result<i32, CliError> {
     if args.len() != 3 {
         return Err(usage("pcr-hash requires PCR0 PCR1 PCR2"));
@@ -374,14 +361,12 @@ fn run_pcr_hash(args: &[String]) -> Result<i32, CliError> {
 
 async fn run_attested_open(args: &[String]) -> Result<i32, CliError> {
     let token_text = args.first().ok_or_else(|| usage("missing insuredToken"))?;
-    let reference_text = args.get(1).ok_or_else(|| usage("missing referenceBlock"))?;
     let insured_token = Address::from_str(token_text)
         .map_err(|_| usage(format!("invalid insuredToken: {token_text}")))?;
     if insured_token.is_zero() {
         return Err(usage("insuredToken is zero"));
     }
-    let reference_block = parse_u64_decimal(reference_text, "referenceBlock")?;
-    let options = parse_production_args(&args[2..]).map_err(usage)?;
+    let options = parse_production_args(&args[1..]).map_err(usage)?;
     if options.checkpoint.is_some()
         || options.checkpoint_key_env.is_some()
         || options.raw_score
@@ -447,15 +432,9 @@ async fn run_attested_open(args: &[String]) -> Result<i32, CliError> {
         options.timeout_ms.unwrap_or(30_000),
     )
     .map_err(|error| fatal(error.to_string()))?;
-    let authorization = build_incident_open(
-        &rpc,
-        registry,
-        insured_token,
-        reference_block,
-        expected_signer,
-    )
-    .await
-    .map_err(|error| fatal(error.to_string()))?;
+    let authorization = build_incident_open(&rpc, registry, insured_token, expected_signer)
+        .await
+        .map_err(|error| fatal(error.to_string()))?;
     let digest_bytes = hex::decode(
         authorization
             .digest()

@@ -108,7 +108,7 @@ async fn submit_is_idempotent_and_reuses_ec2_client_token() {
         .unwrap()
         .clone();
     let value: serde_json::Value = serde_json::from_slice(&stored).unwrap();
-    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["schemaVersion"], 3);
     assert_eq!(value["request"]["kind"], "settlement");
     assert_eq!(value["request"]["incidentId"], "7");
     assert_eq!(value["jobId"], first.job_id);
@@ -152,7 +152,7 @@ async fn open_submit_stores_a_distinct_canonical_job() {
     let store = Arc::new(FakeStore::default());
     let launcher = Arc::new(FakeLauncher::default());
     let app = app(store.clone(), launcher);
-    let body = br#"{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"1234567"}"#;
+    let body = br#"{"insuredToken":"0x2222222222222222222222222222222222222222"}"#;
     let submitted = app.submit_open("open-123", body).await.unwrap();
     let stored = store
         .objects
@@ -162,9 +162,9 @@ async fn open_submit_stores_a_distinct_canonical_job() {
         .unwrap()
         .clone();
     let value: serde_json::Value = serde_json::from_slice(&stored).unwrap();
-    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["schemaVersion"], 3);
     assert_eq!(value["request"]["kind"], "open");
-    assert_eq!(value["request"]["referenceBlock"], "1234567");
+    assert!(value["request"].get("referenceBlock").is_none());
     assert_eq!(
         value["request"]["insuredToken"],
         "0x2222222222222222222222222222222222222222"

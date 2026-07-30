@@ -63,7 +63,9 @@ pub fn pcr0_2_hash(pcr0: &[u8], pcr1: &[u8], pcr2: &[u8]) -> Result<String, TeeE
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_fresh_attestation(
+/// Structurally validates a document returned directly by this process's local
+/// NSM request. This is not a remote COSE/certificate-chain verifier.
+fn parse_local_nsm_attestation(
     document: &[u8],
     expected_nonce: &[u8],
     expected_user_data: &[u8],
@@ -151,7 +153,7 @@ fn fresh_nitro_attestation_with<N: NsmClient>(
     }
     let nonce = &random[..FRESH_NONCE_LENGTH];
     let document = nsm.attest(nonce, user_data)?;
-    let pcr_hash = parse_fresh_attestation(&document, nonce, user_data)?;
+    let pcr_hash = parse_local_nsm_attestation(&document, nonce, user_data)?;
     Ok(FreshAttestation { document, pcr_hash })
 }
 
@@ -287,14 +289,18 @@ mod tests {
         let user_data = [9u8; 32];
         let valid = document(&nonce, &user_data, "SHA384");
         assert_eq!(
-            parse_fresh_attestation(&valid, &nonce, &user_data).unwrap(),
+            parse_local_nsm_attestation(&valid, &nonce, &user_data).unwrap(),
             "0x20446d8b062e02dfab69a51bdd645d914a93ea2a6f9cd9979dfeaba332e49397"
         );
-        assert!(parse_fresh_attestation(&valid, &[8u8; 32], &user_data).is_err());
-        assert!(parse_fresh_attestation(&valid, &nonce, &[8u8; 32]).is_err());
+        assert!(parse_local_nsm_attestation(&valid, &[8u8; 32], &user_data).is_err());
+        assert!(parse_local_nsm_attestation(&valid, &nonce, &[8u8; 32]).is_err());
         assert!(
-            parse_fresh_attestation(&document(&nonce, &user_data, "SHA256"), &nonce, &user_data)
-                .is_err()
+            parse_local_nsm_attestation(
+                &document(&nonce, &user_data, "SHA256"),
+                &nonce,
+                &user_data
+            )
+            .is_err()
         );
     }
 

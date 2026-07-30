@@ -1,9 +1,9 @@
 use crate::chain::{
     BlockAnchor, ChainError, Incident, SettlementAnchors, assert_anchors_unchanged,
     assert_contract_code_at, chain_id, decimals_at, defi_insurance_at, derive_bootstrap_config_at,
-    earned_score_of, finalized_settlement_anchors, incident_at, incident_config_at,
-    incident_tee_pcr_hash_at, max_cover_pool_payout_bps_at, min_balance_over, pool_state_at,
-    pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
+    earned_score_of, finalized_settlement_anchors, incident_at, incident_claim_deadline_at,
+    incident_config_at, incident_tee_pcr_hash_at, max_cover_pool_payout_bps_at, min_balances_over,
+    pool_state_at, pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
 };
 use crate::checkpoint::{BulkScoreSource, CheckpointError, CheckpointScoreSource};
 use crate::config::{BootstrapConfig, ConfigError, LOG_RESULT_CAP, MAX_LOG_RANGE};
@@ -14,11 +14,14 @@ use crate::{
     allocate_with_events, replay_claim_set,
 };
 use num_bigint::BigUint;
+use num_traits::Zero;
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+
+const ZERO_ROOT: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Clone)]
 pub enum ScoreMode {
@@ -129,6 +132,10 @@ fn log_metrics_json(metrics: LogMetrics) -> Value {
 }
 
 impl SettlementRun {
+    pub fn is_unsettled(&self) -> bool {
+        self.latest_incident.root.eq_ignore_ascii_case(ZERO_ROOT)
+    }
+
     pub fn root_matches(&self) -> bool {
         self.output
             .root
@@ -153,6 +160,7 @@ impl SettlementRun {
                     "boostedScore": row.boosted_score.to_string(),
                     "payoutUsd": row.payout_usd.to_string(),
                     "amounts": row.amounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    "acceptPayoutRecommended": row.amounts.iter().any(|amount| !amount.is_zero()),
                 });
                 if include_proofs {
                     value["proof"] = json!(
@@ -254,7 +262,8 @@ impl SettlementRun {
             "onchainRoot": self.latest_incident.root,
             "rootMatches": self.root_matches(),
             "settlementDigest": self.digest,
-            "unresolved": self.window_incident.unresolved.to_string(),
+            "unresolvedClaims": self.window_incident.unresolved_claims.to_string(),
+            "protocolFeeShareBps": self.incident.protocol_fee_share_bps.to_string(),
             "poolOrder": self.pool_order.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "poolAddrs": self.pool_addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "poolPayouts": self.output.pool_payouts.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -287,9 +296,9 @@ fn assert_incident_anchors(
     finalized: &Incident,
 ) -> Result<(), EngineError> {
     if provisional.insured_token != finalized.insured_token
-        || provisional.claim_window_end_time != finalized.claim_window_end_time
         || provisional.reference_block != finalized.reference_block
         || provisional.open_block != finalized.open_block
+        || provisional.protocol_fee_share_bps != finalized.protocol_fee_share_bps
     {
         return Err(EngineError::Invariant(format!(
             "provisional incident anchors differ from finalized state: provisional={provisional:?}, finalized={finalized:?}"
@@ -355,13 +364,43 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             "incident {incident_id} does not exist"
         )));
     }
+    let claim_deadline = incident_claim_deadline_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        &incident_id,
+        provisional.open_block,
+    )
+    .await?;
     let anchors = finalized_settlement_anchors(
         rpc.as_ref(),
         provisional.reference_block,
         provisional.open_block,
-        provisional.claim_window_end_time,
+        claim_deadline,
     )
     .await?;
+    if provisional.root.eq_ignore_ascii_case(ZERO_ROOT) {
+        let phase_window = claim_deadline
+            .checked_sub(anchors.open.timestamp)
+            .filter(|window| *window != 0)
+            .ok_or_else(|| {
+                EngineError::Invariant("invalid snapshotted incident phase window".to_owned())
+            })?;
+        let settlement_deadline = claim_deadline
+            .checked_add(phase_window)
+            .ok_or_else(|| EngineError::Invariant("settlement deadline overflow".to_owned()))?;
+        if anchors.finalized_head.timestamp <= claim_deadline {
+            return Err(EngineError::Invariant(format!(
+                "settlement phase is not open: finalized timestamp {} is not after claim deadline {claim_deadline}",
+                anchors.finalized_head.timestamp
+            )));
+        }
+        if anchors.finalized_head.timestamp > settlement_deadline {
+            return Err(EngineError::Invariant(format!(
+                "settlement phase expired: finalized timestamp {} exceeds deadline {settlement_deadline}",
+                anchors.finalized_head.timestamp
+            )));
+        }
+    }
     let finalized_incident = incident_at(
         rpc.as_ref(),
         config.defi_insurance,
@@ -416,11 +455,18 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         Some(anchors.window_end.number),
     )
     .await?;
+    assert_incident_anchors(&provisional, &window_incident)?;
+    if window_incident.phase_deadline != claim_deadline {
+        return Err(EngineError::Invariant(format!(
+            "historical claim deadline mismatch: reconstructed {claim_deadline}, on-chain {}",
+            window_incident.phase_deadline
+        )));
+    }
     let replay = replay_claim_set(&events)?;
-    if BigUint::from(replay.unresolved) != window_incident.unresolved {
+    if BigUint::from(replay.unresolved_claims) != window_incident.unresolved_claims {
         return Err(EngineError::Invariant(format!(
             "unresolved claim count mismatch: replayed {}, on-chain {}",
-            replay.unresolved, window_incident.unresolved
+            replay.unresolved_claims, window_incident.unresolved_claims
         )));
     }
     if !replay
@@ -615,22 +661,39 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
     } else {
         1
     };
-    let mut claims = Vec::with_capacity(replay.live_claim_ids.len());
-    for claim_id in &replay.live_claim_ids {
-        let event = registrations.get(claim_id).ok_or_else(|| {
-            EngineError::Invariant(format!("missing registration for live claim {claim_id}"))
+    let live_events = replay
+        .live_claim_ids
+        .iter()
+        .map(|claim_id| {
+            registrations.get(claim_id).ok_or_else(|| {
+                EngineError::Invariant(format!("missing registration for live claim {claim_id}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let claimant_accounts = live_events
+        .iter()
+        .map(|event| event.user)
+        .collect::<BTreeSet<_>>();
+    let (minimums, eligibility_metrics) = min_balances_over(
+        rpc.as_ref(),
+        provisional.insured_token,
+        &claimant_accounts,
+        hold_from,
+        provisional.reference_block,
+        MAX_LOG_RANGE,
+        LOG_RESULT_CAP,
+    )
+    .await?;
+    log_metrics = merge_metrics(log_metrics, eligibility_metrics);
+
+    let mut claims = Vec::with_capacity(live_events.len());
+    for event in live_events {
+        let min_held = minimums.get(&event.user).cloned().ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "missing eligibility replay for claimant {}",
+                event.user
+            ))
         })?;
-        let (min_held, eligibility_metrics) = min_balance_over(
-            rpc.as_ref(),
-            provisional.insured_token,
-            event.user,
-            hold_from,
-            provisional.reference_block,
-            MAX_LOG_RANGE,
-            LOG_RESULT_CAP,
-        )
-        .await?;
-        log_metrics = merge_metrics(log_metrics, eligibility_metrics);
         let gross_earned_score = if let Some(source) = &bulk_source {
             source.gross_score_of(event.user).await?
         } else if let Some(source) = &checkpoint_source {
@@ -670,10 +733,12 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
     let kernel_input = KernelInput {
         incident_id: incident_id.clone(),
         coverage_bps: incident_config.coverage_bps,
+        booster_boost_bps: config.booster_boost_bps.into(),
         insured_decimals: u32::from(insured_decimals),
         twap_ratio: twap_ratio.clone(),
         underlying_usd: underlying_usd.clone(),
         max_cover_pool_payout_bps: max_payout_bps,
+        protocol_fee_share_bps: provisional.protocol_fee_share_bps.clone(),
         pools,
         claims,
     };
@@ -692,7 +757,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         verifying_contract: config.defi_insurance,
         incident_id: incident_id.clone(),
         root: output.root.clone(),
-        unresolved: window_incident.unresolved.clone(),
+        unresolved_claims: window_incident.unresolved_claims.clone(),
         pool_payouts: output.pool_payouts.clone(),
         pool_addrs: topology.pool_addrs.clone(),
         claim_set: output.claim_set_hash.clone(),
@@ -726,6 +791,12 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         rpc_metrics: rpc.metrics(),
         log_metrics,
     };
+    if !run.latest_incident.root.eq_ignore_ascii_case(ZERO_ROOT) && !run.root_matches() {
+        return Err(EngineError::Invariant(format!(
+            "standing settlement root mismatch: on-chain {}, recomputed {}",
+            run.latest_incident.root, run.output.root
+        )));
+    }
     crate::artifact::verify_run(&run, config).map_err(|error| {
         EngineError::Invariant(format!("internal artifact verification failed: {error}"))
     })?;

@@ -9,7 +9,7 @@ use alloy_sol_types::{SolCall, SolEvent};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -287,15 +287,15 @@ pub async fn assert_contract_code_at<R: Rpc + ?Sized>(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Incident {
     pub insured_token: Address,
-    pub claim_window_end_time: u64,
-    pub root: String,
-    pub unresolved: BigUint,
-    pub root_submitted_at: u64,
+    pub resolved_at: u64,
     pub reference_block: u64,
     pub open_block: u64,
-    pub status: u8,
-    pub disputed_at: u64,
+    pub phase_deadline: u64,
+    pub root: String,
+    pub unresolved_claims: BigUint,
     pub claim_set_hash: String,
+    pub tee_pcr_hash: String,
+    pub protocol_fee_share_bps: BigUint,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -461,26 +461,15 @@ pub async fn derive_bootstrap_config_at<R: Rpc + ?Sized>(
             "DefiInsurance registry mismatch: expected {registry}, got {reverse_registry}"
         )));
     }
-    let booster_id = u256_to_u64(
-        contract_call(
-            rpc,
-            defi_insurance,
-            &IDefiInsurance::BOOSTER_IDCall {},
-            Some(block_number),
-        )
-        .await?,
-        "BOOSTER_ID",
-    )?;
-    let booster_boost_bps = u256_to_u64(
-        contract_call(
-            rpc,
-            defi_insurance,
-            &IDefiInsurance::BOOSTER_BOOST_BPSCall {},
-            Some(block_number),
-        )
-        .await?,
-        "BOOSTER_BOOST_BPS",
-    )?;
+    let booster = contract_call(
+        rpc,
+        registry,
+        &IRegistry::boosterConfigCall {},
+        Some(block_number),
+    )
+    .await?;
+    let booster_id = booster.tokenId;
+    let booster_boost_bps = u64::from(booster.boostBps);
     let assets = contract_call(
         rpc,
         registry,
@@ -540,15 +529,38 @@ pub async fn incident_at<R: Rpc + ?Sized>(
     .await?;
     Ok(Incident {
         insured_token: from_alloy(result.insuredToken),
-        claim_window_end_time: result.claimWindowEndTime,
-        root: format!("{:#x}", result.root),
-        unresolved: u256_to_big(result.unresolved),
-        root_submitted_at: result.rootSubmittedAt,
+        resolved_at: result.resolvedAt,
         reference_block: result.referenceBlock,
         open_block: result.openBlock,
-        status: result.status,
-        disputed_at: result.disputedAt,
+        phase_deadline: result.phaseDeadline,
+        root: format!("{:#x}", result.root),
+        unresolved_claims: u256_to_big(result.unresolvedClaims),
         claim_set_hash: format!("{:#x}", result.claimSetHash),
+        tee_pcr_hash: format!("{:#x}", result.teePcrHash),
+        protocol_fee_share_bps: BigUint::from(result.protocolFeeShareBps),
+    })
+}
+
+pub async fn incident_claim_deadline_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    defi_insurance: Address,
+    incident_id: &BigUint,
+    open_block: u64,
+) -> Result<u64, ChainError> {
+    let phase_window = contract_call(
+        rpc,
+        defi_insurance,
+        &IDefiInsurance::incidentPhaseWindowCall {
+            incidentId: big_to_u256(incident_id, "incidentId")?,
+        },
+        Some(open_block),
+    )
+    .await?;
+    let opened_at = block_by_number(rpc, open_block).await?.timestamp;
+    opened_at.checked_add(phase_window).ok_or_else(|| {
+        ChainError::InvalidConfiguration(format!(
+            "claim deadline overflow: open timestamp {opened_at}, phase window {phase_window}"
+        ))
     })
 }
 
@@ -616,42 +628,20 @@ pub async fn spent_score_at<R: Rpc + ?Sized>(
     Ok(u256_to_big(value))
 }
 
-pub async fn booster_nft_at<R: Rpc + ?Sized>(
-    rpc: &R,
-    registry: Address,
-    block_number: u64,
-) -> Result<Address, ChainError> {
-    let value = contract_call(
-        rpc,
-        registry,
-        &IRegistry::boosterNFTCall {},
-        Some(block_number),
-    )
-    .await?;
-    Ok(from_alloy(value))
-}
-
 pub async fn incident_tee_pcr_hash_at<R: Rpc + ?Sized>(
     rpc: &R,
     defi_insurance: Address,
     incident_id: &BigUint,
     block_number: u64,
 ) -> Result<String, ChainError> {
-    let value = contract_call(
-        rpc,
-        defi_insurance,
-        &IDefiInsurance::incidentTeePcrHashCall {
-            incidentId: big_to_u256(incident_id, "incidentId")?,
-        },
-        Some(block_number),
-    )
-    .await?;
-    if value == B256::ZERO {
+    let incident =
+        incident_at(rpc, defi_insurance, incident_id.clone(), Some(block_number)).await?;
+    if incident.tee_pcr_hash == format!("0x{}", "0".repeat(64)) {
         return Err(ChainError::InvalidConfiguration(
             "incident teePcrHash is zero".to_owned(),
         ));
     }
-    Ok(format!("{value:#x}"))
+    Ok(incident.tee_pcr_hash)
 }
 
 pub async fn max_cover_pool_payout_bps_at<R: Rpc + ?Sized>(
@@ -684,7 +674,7 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
         Some(open_block),
     )
     .await?;
-    if insured.maxCoverageBps.is_zero() || insured.maxCoverageBps > U256::from(10_000u64) {
+    if insured.maxCoverageBps == 0 || insured.maxCoverageBps > 10_000 {
         return Err(ChainError::InvalidConfiguration(
             "maxCoverageBps must be in 1..=10000 at open block".to_owned(),
         ));
@@ -761,13 +751,13 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
     }
 
     Ok(IncidentConfig {
-        coverage_bps: u256_to_big(insured.maxCoverageBps),
+        coverage_bps: BigUint::from(insured.maxCoverageBps),
         underlying_price_oracle: from_alloy(insured.underlyingPriceOracle),
         conversion_address: from_alloy(insured.underlyingConversionAddress),
         conversion_call_data: insured.underlyingConversionCallData.to_vec(),
         params: SettlementParams {
             twap_lookback_blocks: params.twapLookbackBlocks,
-            holding_margin_blocks: params.holdingMarginBlocks,
+            holding_margin_blocks: params.minHoldingRequired,
             sample_step_blocks: params.sampleStepBlocks,
         },
         scored_tokens,
@@ -907,11 +897,18 @@ pub async fn price_usd_1e18<R: Rpc + ?Sized>(
     )
     .await?;
     let answer = u256_to_big(round.answer.unsigned_abs());
-    Ok(if decimals <= 18 {
+    let scaled = if decimals <= 18 {
         answer * BigUint::from(10u8).pow(u32::from(18 - decimals))
     } else {
         answer / BigUint::from(10u8).pow(u32::from(decimals - 18))
-    })
+    };
+    if scaled == BigUint::from(0u8) {
+        return Err(ChainError::InvalidOracle {
+            oracle,
+            message: "normalized price rounds to zero".to_owned(),
+        });
+    }
+    Ok(scaled)
 }
 
 pub async fn pool_state_at<R: Rpc + ?Sized>(
@@ -1138,6 +1135,76 @@ fn apply_deltas(
     Ok((minimum, balance))
 }
 
+#[allow(clippy::too_many_arguments)] // Historical range and provider completeness policy are independent inputs.
+pub async fn min_balances_over<R: Rpc + ?Sized>(
+    rpc: &R,
+    token: Address,
+    accounts: &BTreeSet<Address>,
+    from_block: u64,
+    to_block: u64,
+    max_range: u64,
+    result_cap: usize,
+) -> Result<(BTreeMap<Address, BigUint>, LogMetrics), ChainError> {
+    let mut starting_balances = BTreeMap::new();
+    for account in accounts {
+        starting_balances.insert(
+            *account,
+            balance_of_at(rpc, token, *account, from_block).await?,
+        );
+    }
+    if to_block <= from_block {
+        return Ok((starting_balances, LogMetrics::default()));
+    }
+
+    let (transfers, metrics) = erc20_transfers_for_accounts(
+        rpc,
+        token,
+        accounts,
+        from_block + 1,
+        to_block,
+        max_range,
+        result_cap,
+    )
+    .await?;
+    let mut account_deltas = BTreeMap::<Address, BTreeMap<(u64, u64), NetDelta>>::new();
+    for transfer in transfers {
+        let position = (transfer.block_number, transfer.log_index);
+        if accounts.contains(&transfer.from) {
+            let delta = account_deltas
+                .entry(transfer.from)
+                .or_default()
+                .entry(position)
+                .or_default();
+            delta.outflow += &transfer.value;
+        }
+        if accounts.contains(&transfer.to) {
+            let delta = account_deltas
+                .entry(transfer.to)
+                .or_default()
+                .entry(position)
+                .or_default();
+            delta.inflow += &transfer.value;
+        }
+    }
+
+    let mut minimums = BTreeMap::new();
+    for (account, starting_balance) in starting_balances {
+        let deltas = account_deltas.remove(&account).unwrap_or_default();
+        let (minimum, replayed) = apply_deltas(token, starting_balance, deltas)?;
+        let actual = balance_of_at(rpc, token, account, to_block).await?;
+        if actual != replayed {
+            return Err(ChainError::BalanceReplayMismatch {
+                asset: token,
+                replayed,
+                actual,
+                block: to_block,
+            });
+        }
+        minimums.insert(account, minimum);
+    }
+    Ok((minimums, metrics))
+}
+
 pub async fn min_balance_over<R: Rpc + ?Sized>(
     rpc: &R,
     token: Address,
@@ -1147,66 +1214,15 @@ pub async fn min_balance_over<R: Rpc + ?Sized>(
     max_range: u64,
     result_cap: usize,
 ) -> Result<(BigUint, LogMetrics), ChainError> {
-    let starting_balance = balance_of_at(rpc, token, account, from_block).await?;
-    if to_block <= from_block {
-        return Ok((starting_balance, LogMetrics::default()));
-    }
-    let from_filter = LogFilter {
-        address: token.to_string(),
-        topics: vec![
-            topic_hash(IERC20::Transfer::SIGNATURE_HASH),
-            address_topic(account),
-        ],
-    };
-    let to_filter = LogFilter {
-        address: token.to_string(),
-        topics: vec![
-            topic_hash(IERC20::Transfer::SIGNATURE_HASH),
-            Value::Null,
-            address_topic(account),
-        ],
-    };
-    let (outgoing, outgoing_metrics) = get_logs_chunked(
-        rpc,
-        &from_filter,
-        from_block + 1,
-        to_block,
-        max_range,
-        result_cap,
+    let accounts = BTreeSet::from([account]);
+    let (mut minimums, metrics) = min_balances_over(
+        rpc, token, &accounts, from_block, to_block, max_range, result_cap,
     )
     .await?;
-    let (incoming, incoming_metrics) = get_logs_chunked(
-        rpc,
-        &to_filter,
-        from_block + 1,
-        to_block,
-        max_range,
-        result_cap,
-    )
-    .await?;
-    let mut deltas = BTreeMap::new();
-    for log in outgoing {
-        let event = decode_event::<IERC20::Transfer>(&log)?;
-        add_delta(&mut deltas, &log, u256_to_big(event.value), false);
-    }
-    for log in incoming {
-        let event = decode_event::<IERC20::Transfer>(&log)?;
-        add_delta(&mut deltas, &log, u256_to_big(event.value), true);
-    }
-    let (minimum, replayed) = apply_deltas(token, starting_balance, deltas)?;
-    let actual = balance_of_at(rpc, token, account, to_block).await?;
-    if actual != replayed {
-        return Err(ChainError::BalanceReplayMismatch {
-            asset: token,
-            replayed,
-            actual,
-            block: to_block,
-        });
-    }
-    Ok((
-        minimum,
-        merge_log_metrics(outgoing_metrics, incoming_metrics),
-    ))
+    let minimum = minimums.remove(&account).ok_or_else(|| {
+        ChainError::InvalidConfiguration("missing replayed account minimum".to_owned())
+    })?;
+    Ok((minimum, metrics))
 }
 
 fn values_for_id(ids: &[U256], values: &[U256], wanted: U256) -> Result<BigUint, ChainError> {
@@ -1520,6 +1536,75 @@ pub struct TokenTransfer {
     pub value: BigUint,
     pub block_number: u64,
     pub log_index: u64,
+}
+
+pub async fn erc20_transfers_for_accounts<R: Rpc + ?Sized>(
+    rpc: &R,
+    token: Address,
+    accounts: &BTreeSet<Address>,
+    from_block: u64,
+    to_block: u64,
+    max_range: u64,
+    result_cap: usize,
+) -> Result<(Vec<TokenTransfer>, LogMetrics), ChainError> {
+    if to_block < from_block || accounts.is_empty() {
+        return Ok((Vec::new(), LogMetrics::default()));
+    }
+    let account_topics = accounts
+        .iter()
+        .copied()
+        .map(address_topic)
+        .collect::<Vec<_>>();
+    let mut unique = BTreeMap::<(u64, u64), RpcLog>::new();
+    let mut metrics = LogMetrics::default();
+    for batch in account_topics.chunks(64) {
+        let options = Value::Array(batch.to_vec());
+        let filters = [
+            LogFilter {
+                address: token.to_string(),
+                topics: vec![
+                    topic_hash(IERC20::Transfer::SIGNATURE_HASH),
+                    options.clone(),
+                ],
+            },
+            LogFilter {
+                address: token.to_string(),
+                topics: vec![
+                    topic_hash(IERC20::Transfer::SIGNATURE_HASH),
+                    Value::Null,
+                    options,
+                ],
+            },
+        ];
+        for filter in filters {
+            let (logs, query_metrics) =
+                get_logs_chunked(rpc, &filter, from_block, to_block, max_range, result_cap).await?;
+            metrics = merge_log_metrics(metrics, query_metrics);
+            for log in logs {
+                let key = (log.block_number, log.log_index);
+                if let Some(previous) = unique.insert(key, log.clone())
+                    && previous != log
+                {
+                    return Err(ChainError::InvalidConfiguration(format!(
+                        "conflicting duplicate transfer log at {}:{}",
+                        key.0, key.1
+                    )));
+                }
+            }
+        }
+    }
+    let mut transfers = Vec::with_capacity(unique.len());
+    for (_, log) in unique {
+        let event = decode_event::<IERC20::Transfer>(&log)?;
+        transfers.push(TokenTransfer {
+            from: from_alloy(event.from),
+            to: from_alloy(event.to),
+            value: u256_to_big(event.value),
+            block_number: log.block_number,
+            log_index: log.log_index,
+        });
+    }
+    Ok((transfers, metrics))
 }
 
 pub async fn erc20_transfers<R: Rpc + ?Sized>(

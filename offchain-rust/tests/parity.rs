@@ -21,14 +21,17 @@ const BOB: &str = "0x000000000000000000000000000000000000b0b0";
 const CAROL: &str = "0x000000000000000000000000000000000000ca50";
 
 #[test]
-fn capped_geometric_allocation_matches_golden_vector() {
+fn payout_entitlement_is_proportional_to_boosted_score() {
     let input = KernelInput {
         incident_id: 1u8.into(),
         coverage_bps: 8_000u16.into(),
+        booster_boost_bps: 100u8.into(),
         insured_decimals: 18,
         twap_ratio: wad(1),
         underlying_usd: wad(1),
         max_cover_pool_payout_bps: 10_000u16.into(),
+
+        protocol_fee_share_bps: 0u8.into(),
         pools: vec![PoolInput {
             balance: wad(100),
             asset_usd: wad(1),
@@ -59,20 +62,123 @@ fn capped_geometric_allocation_matches_golden_vector() {
     };
 
     let output = allocate(&input).unwrap();
-    assert_eq!(output.rows[0].payout_usd, n("55051025721816600736"));
-    assert_eq!(output.rows[1].payout_usd, n("44948974278183399263"));
-    assert_eq!(output.pool_payouts, vec![wad(100) - BigUint::from(1u8)]);
+    assert_eq!(output.rows[0].payout_usd, wad(60));
+    assert_eq!(output.rows[1].payout_usd, wad(40));
+    assert_eq!(output.pool_payouts, vec![wad(100)]);
 }
 
 #[test]
-fn booster_changes_payout_score_without_inflating_raw_score_spent() {
+fn unused_entitlement_remains_in_cover_pools() {
     let input = KernelInput {
         incident_id: 1u8.into(),
         coverage_bps: 8_000u16.into(),
+        booster_boost_bps: 100u8.into(),
         insured_decimals: 18,
         twap_ratio: wad(1),
         underlying_usd: wad(1),
         max_cover_pool_payout_bps: 10_000u16.into(),
+
+        protocol_fee_share_bps: 0u8.into(),
+        pools: vec![PoolInput {
+            balance: wad(100),
+            asset_usd: wad(1),
+            asset_decimals: 18,
+        }],
+        claims: vec![
+            ClaimInput {
+                claim_id: 1u8.into(),
+                user: address(BOB),
+                escrow_amount: wad(10),
+                min_held: wad(10),
+                gross_earned_score: 50u8.into(),
+                spent_score: 0u8.into(),
+                score_to_spend: 50u8.into(),
+                booster_amount: 0u8.into(),
+            },
+            ClaimInput {
+                claim_id: 2u8.into(),
+                user: address(CAROL),
+                escrow_amount: wad(100),
+                min_held: wad(100),
+                gross_earned_score: 50u8.into(),
+                spent_score: 0u8.into(),
+                score_to_spend: 50u8.into(),
+                booster_amount: 0u8.into(),
+            },
+        ],
+    };
+
+    let output = allocate(&input).unwrap();
+    assert_eq!(output.rows[0].payout_usd, wad(8));
+    assert_eq!(output.rows[1].payout_usd, wad(50));
+    assert_eq!(output.pool_payouts, vec![wad(58)]);
+}
+
+#[test]
+fn zero_eligible_claim_is_signed_but_excluded_from_payout_allocation() {
+    let input = KernelInput {
+        incident_id: 1u8.into(),
+        coverage_bps: 8_000u16.into(),
+        booster_boost_bps: 100u8.into(),
+        insured_decimals: 18,
+        twap_ratio: wad(1),
+        underlying_usd: wad(1),
+        max_cover_pool_payout_bps: 10_000u16.into(),
+
+        protocol_fee_share_bps: 0u8.into(),
+        pools: vec![PoolInput {
+            balance: wad(100),
+            asset_usd: wad(1),
+            asset_decimals: 18,
+        }],
+        claims: vec![
+            ClaimInput {
+                claim_id: 1u8.into(),
+                user: address(BOB),
+                escrow_amount: wad(100),
+                min_held: wad(100),
+                gross_earned_score: 50u8.into(),
+                spent_score: 0u8.into(),
+                score_to_spend: 50u8.into(),
+                booster_amount: 0u8.into(),
+            },
+            ClaimInput {
+                claim_id: 2u8.into(),
+                user: address(CAROL),
+                escrow_amount: wad(100),
+                min_held: BigUint::from(0u8),
+                gross_earned_score: 50u8.into(),
+                spent_score: 0u8.into(),
+                score_to_spend: 50u8.into(),
+                booster_amount: 10u8.into(),
+            },
+        ],
+    };
+
+    let output = allocate(&input).unwrap();
+    assert_eq!(output.rows.len(), 2);
+    assert_eq!(output.rows[0].payout_usd, wad(80));
+    assert_eq!(output.rows[1].eligible_amount, BigUint::from(0u8));
+    assert_eq!(output.rows[1].score_spent, BigUint::from(0u8));
+    assert_eq!(output.rows[1].boosted_score, BigUint::from(0u8));
+    assert_eq!(output.rows[1].payout_usd, BigUint::from(0u8));
+    assert_eq!(output.rows[1].amounts, vec![BigUint::from(0u8)]);
+    assert!(output.proofs.contains_key(&BigUint::from(2u8)));
+    assert_eq!(output.pool_payouts, vec![wad(80)]);
+}
+
+#[test]
+fn configured_booster_rate_changes_payout_score_without_inflating_raw_score_spent() {
+    let input = KernelInput {
+        incident_id: 1u8.into(),
+        coverage_bps: 8_000u16.into(),
+        booster_boost_bps: 250u16.into(),
+        insured_decimals: 18,
+        twap_ratio: wad(1),
+        underlying_usd: wad(1),
+        max_cover_pool_payout_bps: 10_000u16.into(),
+
+        protocol_fee_share_bps: 0u8.into(),
         pools: vec![PoolInput {
             balance: wad(1_000),
             asset_usd: wad(1),
@@ -93,7 +199,56 @@ fn booster_changes_payout_score_without_inflating_raw_score_spent() {
     let output = allocate(&input).unwrap();
     assert_eq!(output.rows[0].earned_score, 60u8.into());
     assert_eq!(output.rows[0].score_spent, 60u8.into());
-    assert_eq!(output.rows[0].boosted_score, 61u8.into());
+    assert_eq!(output.rows[0].boosted_score, 63u8.into());
+}
+
+#[test]
+fn relative_payouts_use_boosted_not_raw_scores() {
+    let input = KernelInput {
+        incident_id: 1u8.into(),
+        coverage_bps: 8_000u16.into(),
+        booster_boost_bps: 100u8.into(),
+        insured_decimals: 18,
+        twap_ratio: wad(1),
+        underlying_usd: wad(1),
+        max_cover_pool_payout_bps: 10_000u16.into(),
+
+        protocol_fee_share_bps: 0u8.into(),
+        pools: vec![PoolInput {
+            balance: wad(210),
+            asset_usd: wad(1),
+            asset_decimals: 18,
+        }],
+        claims: vec![
+            ClaimInput {
+                claim_id: 1u8.into(),
+                user: address(BOB),
+                escrow_amount: wad(1_000),
+                min_held: wad(1_000),
+                gross_earned_score: 100u8.into(),
+                spent_score: 0u8.into(),
+                score_to_spend: 100u8.into(),
+                booster_amount: 0u8.into(),
+            },
+            ClaimInput {
+                claim_id: 2u8.into(),
+                user: address(CAROL),
+                escrow_amount: wad(1_000),
+                min_held: wad(1_000),
+                gross_earned_score: 100u8.into(),
+                spent_score: 0u8.into(),
+                score_to_spend: 100u8.into(),
+                booster_amount: 10u8.into(),
+            },
+        ],
+    };
+
+    let output = allocate(&input).unwrap();
+    assert_eq!(output.rows[0].boosted_score, 100u8.into());
+    assert_eq!(output.rows[1].boosted_score, 110u8.into());
+    assert_eq!(output.rows[0].payout_usd, wad(100));
+    assert_eq!(output.rows[1].payout_usd, wad(110));
+    assert_eq!(output.pool_payouts, vec![wad(210)]);
 }
 
 #[test]

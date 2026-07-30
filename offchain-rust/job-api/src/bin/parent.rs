@@ -23,9 +23,10 @@ mod linux {
     use tokio::time::{sleep, timeout};
     use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
     use usd8_tee_job_api::{
-        JobPaths, JobWireRequest, MAX_CIPHERTEXT_BYTES, MAX_STORED_REQUEST_BYTES,
-        MAX_WIRE_REQUEST_BYTES, StoredRequest, TerminalEnvelope, parent_timeout_seconds,
-        read_frame_async, settlement_rpc_authority, write_frame_async,
+        JOB_WIRE_SCHEMA_VERSION, JobPaths, JobWireRequest, MAX_CIPHERTEXT_BYTES,
+        MAX_STORED_REQUEST_BYTES, MAX_WIRE_REQUEST_BYTES, STORED_REQUEST_SCHEMA_VERSION,
+        StoredRequest, TerminalEnvelope, parent_timeout_seconds, read_frame_async,
+        settlement_rpc_authority, write_frame_async,
     };
 
     type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -172,7 +173,9 @@ mod linux {
         let request_bytes =
             get_capability(client, &config.request_get_url, MAX_STORED_REQUEST_BYTES).await?;
         let request: StoredRequest = serde_json::from_slice(&request_bytes)?;
-        if request.schema_version != 2 || request.job_id != config.job_id {
+        if request.schema_version != STORED_REQUEST_SCHEMA_VERSION
+            || request.job_id != config.job_id
+        {
             return Err("stored request binding mismatch".into());
         }
         let signer = get_capability(client, &config.signer_get_url, MAX_CIPHERTEXT_BYTES).await?;
@@ -186,7 +189,7 @@ mod linux {
             .ok_or("session token required")?;
         let response_timeout = parent_timeout_seconds(&request.request);
         let wire = JobWireRequest {
-            schema_version: 2,
+            schema_version: JOB_WIRE_SCHEMA_VERSION,
             stored_request: request,
             region: config.region.clone(),
             access_key_id: credentials.access_key_id().to_owned(),

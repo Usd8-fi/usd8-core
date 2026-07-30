@@ -11,10 +11,12 @@ use std::str::FromStr;
 struct JsonKernelInput {
     incident_id: String,
     coverage_bps: String,
+    booster_boost_bps: String,
     insured_decimals: u32,
     twap_ratio: String,
     underlying_usd: String,
     max_cover_pool_payout_bps: String,
+    protocol_fee_share_bps: String,
     pools: Vec<JsonPoolInput>,
     claims: Vec<JsonClaimInput>,
 }
@@ -144,6 +146,7 @@ impl TryFrom<JsonKernelInput> for KernelInput {
         Ok(Self {
             incident_id: decimal("incidentId", &value.incident_id)?,
             coverage_bps: decimal("coverageBps", &value.coverage_bps)?,
+            booster_boost_bps: decimal("boosterBoostBps", &value.booster_boost_bps)?,
             insured_decimals: value.insured_decimals,
             twap_ratio: decimal("twapRatio", &value.twap_ratio)?,
             underlying_usd: decimal("underlyingUsd", &value.underlying_usd)?,
@@ -151,6 +154,7 @@ impl TryFrom<JsonKernelInput> for KernelInput {
                 "maxCoverPoolPayoutBps",
                 &value.max_cover_pool_payout_bps,
             )?,
+            protocol_fee_share_bps: decimal("protocolFeeShareBps", &value.protocol_fee_share_bps)?,
             pools,
             claims,
         })

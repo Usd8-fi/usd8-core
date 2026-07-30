@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "fixture": {
+    "path": "offchain-rust/fixtures/real-usdc-usdt-wsteth-300-6m.json",
+    "sha256": "92d7ee06ff8a950a6fccaf683b19b596d095796f8cff91e2c5d792721b3e9772",
+    "claims": 300
+  },
+  "scope": {
+    "claimAmounts": "synthetic",
+    "coverPoolBalance": "synthetic",
+    "historyData": "fresh-mainnet-dRPC-collected-immediately-before-enclave",
+    "poolAssetAndOracle": "real-mainnet-wstETH-and-Chainlink-feed",
+    "proxyRoles": {
+      "USDC": "USD8",
+      "USDT": "sUSD8"
+    },
+    "scoreCalculation": "recomputed-inside-enclave"
+  },
+  "historicalReport": {
+    "path": "offchain-rust/fixtures/provenance/benchmark-real-history-wsteth-300-6m-2026-07-15.json",
+    "sha256": "9ea9dcbab5412b28ac971a18d797ac06c340666b8e927f5809454418a532daaf",
+    "historySha256": "8647446398c728292dcc511d38e48e38b9f97a2427050decbb6d99e312106472",
+    "claimSetHash": "0x23ebb1b973915ba73823091a91a88a16d8990fd9b3d05d97e44d7c9425b358e1",
+    "root": "0x4cb7ed9677bea4245ac7511cdc2c8e4895f22bb84c54612072d6bc553490afdf"
+  },
+  "currentReplay": {
+    "toolchain": "Rust 1.92.0",
+    "command": "usd8-settlement kernel fixtures/real-usdc-usdt-wsteth-300-6m.json",
+    "claimSetHash": "0x23ebb1b973915ba73823091a91a88a16d8990fd9b3d05d97e44d7c9425b358e1",
+    "settlementInputHash": "0x8389779f9042a9242e9b12555233f32a4ac7f875190f3755973447abd2f4a954",
+    "root": "0xf3ea211950a9bfc561fa72ca6b1108aab3ec4e3a2bb5e93d18ed14b6ff5562b1",
+    "poolPayouts": [
+      "73917524084776006121"
+    ]
+  },
+  "relationship": "All 300 claimant IDs, users, escrow amounts, gross scores, and requested score spends map exactly to the archived report. The archived root used the retired comparison leaf/allocation schema and is not a current-Rust parity oracle; currentReplay is the release regression value."
+}

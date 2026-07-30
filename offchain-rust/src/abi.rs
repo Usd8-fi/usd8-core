@@ -6,41 +6,43 @@ use alloy_sol_types::sol;
 sol! {
     interface IDefiInsurance {
         struct InsuredToken {
-            uint256 maxCoverageBps;
+            uint16 maxCoverageBps;
             address underlyingPriceOracle;
             address underlyingConversionAddress;
             bytes underlyingConversionCallData;
-            uint128 minClaimAmount;
         }
 
         function incidents(uint256 incidentId) external view returns (
             address insuredToken,
-            uint64 claimWindowEndTime,
-            bytes32 root,
-            uint256 unresolved,
-            uint64 rootSubmittedAt,
+            uint64 resolvedAt,
             uint64 referenceBlock,
             uint64 openBlock,
-            uint8 status,
-            uint64 disputedAt,
-            bytes32 claimSetHash
+            uint64 phaseDeadline,
+            bytes32 root,
+            uint256 unresolvedClaims,
+            bytes32 claimSetHash,
+            bytes32 teePcrHash,
+            uint16 protocolFeeShareBps
         );
-        function incidentTeePcrHash(uint256 incidentId) external view returns (bytes32);
         function getInsuredToken(address token) external view returns (InsuredToken memory);
         function settlementParams() external view returns (
             uint64 twapLookbackBlocks,
-            uint64 holdingMarginBlocks,
+            uint64 minHoldingRequired,
             uint64 sampleStepBlocks
         );
-        function nextIncidentId() external view returns (uint256);
+        function nextIncidentId() external view returns (uint64);
+        function incidentPhaseWindow(uint256 incidentId) external view returns (uint64);
         function isTeeSigner(address signer) external view returns (bool);
-        function MAX_REFERENCE_BLOCK_AGE() external view returns (uint64);
-        function SUBMIT_DEADLINE() external view returns (uint64);
-        function DISPUTE_PERIOD() external view returns (uint64);
-        function FINALIZE_WINDOW() external view returns (uint64);
+        function incidentOpenEligibilityHash(address insuredToken) external view returns (bytes32);
+        function fileClaim(
+            address insuredToken,
+            uint128 insuredTokenAmount,
+            uint256 scoreToSpend,
+            uint256 boosterAmount,
+            uint64 referenceBlock,
+            bytes calldata signature
+        ) external returns (uint256 claimId);
         function registry() external view returns (address);
-        function BOOSTER_ID() external view returns (uint256);
-        function BOOSTER_BOOST_BPS() external view returns (uint256);
 
         event ClaimRegistered(
             uint256 indexed claimId,
@@ -54,6 +56,17 @@ sol! {
     }
 
     interface IRegistry {
+        struct IncidentTimingConfig {
+            uint64 phaseWindow;
+            uint64 maxReferenceBlockAge;
+        }
+
+        struct IncidentOpenPriceConfig {
+            uint64 twapBlocks;
+            uint64 sampleStepBlocks;
+            uint16 minimumDropBps;
+        }
+
         struct RatePoint {
             uint64 fromBlock;
             uint128 rate;
@@ -63,13 +76,15 @@ sol! {
         function coverPoolsLength() external view returns (uint256);
         function getScoredTokens() external view returns (address[] memory);
         function getScoredRateHistory(address token) external view returns (RatePoint[] memory);
-        function boosterNFT() external view returns (address);
         function maxCoverPoolPayoutBps() external view returns (uint256);
         function scoreSpent(address account) external view returns (uint256);
         function defiInsurance() external view returns (address);
         function assetUsdFeed(address asset) external view returns (address);
         function maxOracleStaleness() external view returns (uint64);
+        function boosterConfig() external view returns (address collection, uint64 tokenId, uint16 boostBps);
         function teePcrHash() external view returns (bytes32);
+        function incidentTimingConfig() external view returns (IncidentTimingConfig memory);
+        function incidentOpenPriceConfig() external view returns (IncidentOpenPriceConfig memory);
     }
 
     interface ISingleAssetCoverPool {

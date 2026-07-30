@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "usage: $0 <built-release-directory> <final-release-directory>" >&2
+  echo "usage: $0 <built-release-directory> <candidate-release-directory>" >&2
   exit 2
 fi
 BUILD_DIR=$(cd "$1" && pwd)
@@ -24,10 +24,11 @@ INSTANCE_PROFILE=${INSTANCE_PROFILE:?set INSTANCE_PROFILE}
 SUBNET_ID=${SUBNET_ID:?set SUBNET_ID}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:?set SECURITY_GROUP_ID}
 JANITOR_MAX_AGE_SECONDS=${JANITOR_MAX_AGE_SECONDS:?set JANITOR_MAX_AGE_SECONDS}
+USD8_JOB_HMAC_KEY_B64=${USD8_JOB_HMAC_KEY_B64:?set USD8_JOB_HMAC_KEY_B64}
 
 [[ "$AMI_ID" =~ ^ami-[0-9a-f]+$ ]] || { echo 'invalid AMI_ID' >&2; exit 2; }
 [[ "$AWS_REGION" == eu-central-1 ]] || { echo 'AWS_REGION must be eu-central-1' >&2; exit 2; }
-[[ ! -e "$OUT" ]] || { echo "final release already exists: $OUT" >&2; exit 2; }
+[[ ! -e "$OUT" ]] || { echo "candidate release already exists: $OUT" >&2; exit 2; }
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 python3 "$HERE/verify-release.py" "$BUILD_DIR/release-manifest.json" --allow-built
@@ -40,12 +41,38 @@ image = json.load(sys.stdin)["Images"][0]
 root = image["RootDeviceName"]
 print(next(item["Ebs"]["SnapshotId"] for item in image["BlockDeviceMappings"] if item["DeviceName"] == root))
 ' <<<"$IMAGE_JSON")
+INSTANCE_ROLE_JSON=$(aws iam get-role --role-name "$INSTANCE_ROLE" --output json)
+INSTANCE_ROLE_ARN=$(python3 -c '
+import json, sys
+print(json.load(sys.stdin)["Role"]["Arn"])
+' <<<"$INSTANCE_ROLE_JSON")
+PCR3=$(python3 "$HERE/verify-release.py" --pcr3-for-role-arn "$INSTANCE_ROLE_ARN")
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 RELEASE="$STAGE/release"
 mkdir "$RELEASE"
 cp -a "$BUILD_DIR/." "$RELEASE/"
+
+jq --arg roleArn "$INSTANCE_ROLE_ARN" --arg pcr3 "$PCR3" '
+  .Statement |= map(
+    if .Sid == "AttestedEnclaveDecryptOnly"
+    then .Principal.AWS = $roleArn |
+      .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:PCR3"] = $pcr3
+    else . end
+  )
+' "$RELEASE/kms-key-policy.json" > "$RELEASE/kms-key-policy.json.tmp"
+mv "$RELEASE/kms-key-policy.json.tmp" "$RELEASE/kms-key-policy.json"
+jq --arg pcr3 "$PCR3" '
+  .Statement |= map(
+    if .Sid == "AttestedDecryptOnly"
+    then .Condition.StringEqualsIgnoreCase["kms:RecipientAttestation:PCR3"] = $pcr3
+    else . end
+  )
+' "$RELEASE/instance-role-policy.json" > "$RELEASE/instance-role-policy.json.tmp"
+mv "$RELEASE/instance-role-policy.json.tmp" "$RELEASE/instance-role-policy.json"
+KMS_POLICY_SHA256=$(sha256sum "$RELEASE/kms-key-policy.json" | cut -d' ' -f1)
+INSTANCE_POLICY_SHA256=$(sha256sum "$RELEASE/instance-role-policy.json" | cut -d' ' -f1)
 
 jq --arg ami "arn:aws:ec2:${AWS_REGION}::image/${AMI_ID}" '
   walk(if type == "string" and test("^arn:aws:ec2:[^:]+::image/ami-") then $ami else . end)
@@ -63,20 +90,27 @@ import base64, hashlib, pathlib, sys
 print(base64.b64encode(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).digest()).decode())
 PY
 )
+JOB_HMAC_KEY_SHA256=$(printf '%s' "$USD8_JOB_HMAC_KEY_B64" | sha256sum | cut -d' ' -f1)
 TMP_MANIFEST="$RELEASE/release-manifest.json.tmp"
 jq \
   --arg region "$AWS_REGION" --arg ami "$AMI_ID" \
   --arg snapshot "$ROOT_SNAPSHOT" --arg lambdaFunction "$LAMBDA_FUNCTION" \
   --arg janitorFunction "$JANITOR_FUNCTION" --arg lambdaCode "$LAMBDA_CODE_SHA256_B64" \
   --arg janitorCode "$JANITOR_CODE_SHA256_B64" --arg kmsKey "$KMS_KEY_ID" \
-  --arg instanceRole "$INSTANCE_ROLE" --arg instancePolicyName "$INSTANCE_POLICY_NAME" \
+  --arg instanceRole "$INSTANCE_ROLE" --arg instanceRoleArn "$INSTANCE_ROLE_ARN" \
+  --arg instancePolicyName "$INSTANCE_POLICY_NAME" --arg pcr3 "$PCR3" \
   --arg lambdaRole "$LAMBDA_ROLE" --arg lambdaPolicyName "$LAMBDA_POLICY_NAME" \
   --arg janitorRole "$JANITOR_ROLE" --arg janitorPolicyName "$JANITOR_POLICY_NAME" \
   --arg jobBucket "$JOB_BUCKET" --arg instanceType "$INSTANCE_TYPE" \
   --arg instanceProfile "$INSTANCE_PROFILE" --arg subnet "$SUBNET_ID" \
   --arg securityGroup "$SECURITY_GROUP_ID" --arg janitorMaxAge "$JANITOR_MAX_AGE_SECONDS" \
+  --arg jobHmacKeySha256 "$JOB_HMAC_KEY_SHA256" \
+  --arg kmsPolicyHash "$KMS_POLICY_SHA256" --arg instancePolicyHash "$INSTANCE_POLICY_SHA256" \
   --arg lambdaPolicyHash "$LAMBDA_POLICY_SHA256" --arg janitorPolicyHash "$JANITOR_POLICY_SHA256" '
   .status = "final"
+  | .recipientAttestation.PCR3 = $pcr3
+  | .artifacts.kmsPolicy.sha256 = $kmsPolicyHash
+  | .artifacts.instancePolicy.sha256 = $instancePolicyHash
   | .artifacts.lambdaPolicy = {
       path: "lambda-role-policy.json", sha256: $lambdaPolicyHash
     }
@@ -93,6 +127,7 @@ jq \
       janitorCodeSha256Base64: $janitorCode,
       kmsKeyId: $kmsKey,
       instanceRole: $instanceRole,
+      instanceRoleArn: $instanceRoleArn,
       instancePolicyName: $instancePolicyName,
       lambdaRole: $lambdaRole,
       lambdaPolicyName: $lambdaPolicyName,
@@ -108,6 +143,7 @@ jq \
         USD8_TEE_SUBNET_ID: $subnet,
         USD8_TEE_SECURITY_GROUP_ID: $securityGroup
       },
+      lambdaSecretEnvironmentSha256: {USD8_JOB_HMAC_KEY_B64: $jobHmacKeySha256},
       janitorEnvironment: {USD8_TEE_MAX_AGE_SECONDS: $janitorMaxAge}
     }
 ' "$RELEASE/release-manifest.json" > "$TMP_MANIFEST"
@@ -122,7 +158,9 @@ PY
 jq --arg releaseId "$RELEASE_ID" '.releaseId = $releaseId' \
   "$RELEASE/release-manifest.json" > "$TMP_MANIFEST"
 mv "$TMP_MANIFEST" "$RELEASE/release-manifest.json"
-(cd "$RELEASE" && sha256sum lambda-role-policy.json janitor-role-policy.json >> SHA256SUMS)
+(cd "$RELEASE" && sha256sum usd8-tee-enclave.eif usd8-tee-parent usd8-settlement \
+  lambda.zip janitor.zip kms-key-policy.json instance-role-policy.json \
+  lambda-role-policy.json janitor-role-policy.json > SHA256SUMS)
 python3 "$HERE/verify-release.py" "$RELEASE/release-manifest.json"
 mkdir -p "$(dirname "$OUT")"
 mv "$RELEASE" "$OUT"
@@ -133,4 +171,5 @@ for path in root.rglob("*"):
     path.chmod(0o555 if path.is_dir() else 0o444)
 root.chmod(0o555)
 PY
-printf 'FINAL_RELEASE_CREATED=%s\nRELEASE_ID=%s\n' "$OUT" "$RELEASE_ID"
+printf 'RELEASE_CANDIDATE_CREATED=%s\nRELEASE_ID=%s\n' "$OUT" "$RELEASE_ID"
+printf 'LIVE_VERIFICATION_REQUIRED=python3 %s/verify-release.py "%s/release-manifest.json" --live --rpc-url <direct-https-sepolia-rpc>\n' "$HERE" "$OUT"

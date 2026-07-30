@@ -19,8 +19,8 @@ pub enum ConfigError {
     ZeroRegistry,
     #[error("defiInsurance address is zero")]
     ZeroDefiInsurance,
-    #[error("unsupported booster policy: id={id}, boostBps={boost_bps}")]
-    UnsupportedBoosterPolicy { id: u64, boost_bps: u64 },
+    #[error("booster boostBps must be a nonzero uint16: {0}")]
+    InvalidBoosterBoostBps(u64),
     #[error("maxOracleStaleness must be positive")]
     InvalidOracleStaleness,
     #[error("no on-chain USD feed configured for pool asset {0}")]
@@ -71,11 +71,8 @@ impl BootstrapConfig {
         if defi_insurance.is_zero() {
             return Err(ConfigError::ZeroDefiInsurance);
         }
-        if booster_id != 1 || booster_boost_bps != 100 {
-            return Err(ConfigError::UnsupportedBoosterPolicy {
-                id: booster_id,
-                boost_bps: booster_boost_bps,
-            });
+        if booster_boost_bps == 0 || booster_boost_bps > u64::from(u16::MAX) {
+            return Err(ConfigError::InvalidBoosterBoostBps(booster_boost_bps));
         }
         if max_oracle_staleness == 0 {
             return Err(ConfigError::InvalidOracleStaleness);

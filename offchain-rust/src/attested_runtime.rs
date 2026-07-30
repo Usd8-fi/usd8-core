@@ -94,6 +94,11 @@ pub async fn settlement_artifact(
     let run = build_settlement(rpc, &config, incident_id, score_mode)
         .await
         .map_err(fail)?;
+    if !run.is_unsettled() {
+        return Err(fail(
+            "incident already has a standing settlement root; replay is verification-only",
+        ));
+    }
     verify_run(&run, &config).map_err(fail)?;
     let artifact = run.artifact(&config, false);
     bounded_artifact(
@@ -107,19 +112,14 @@ pub async fn incident_open_artifact(
     drpc_key: &str,
     registry: &str,
     insured_token: &str,
-    reference_block: &str,
     expected_signer: &str,
     options: AttestedRuntimeOptions<'_>,
 ) -> Result<Value, AttestedRuntimeError> {
     let rpc = rpc(rpc_url, drpc_key, options.proxy_url)?;
-    let reference_block = reference_block
-        .parse::<u64>()
-        .map_err(|_| fail("invalid reference block"))?;
     let authorization = build_incident_open(
         &rpc,
         address(registry)?,
         address(insured_token)?,
-        reference_block,
         address(expected_signer)?,
     )
     .await

@@ -3,12 +3,14 @@ use alloy_sol_types::{SolCall, SolEvent};
 use async_trait::async_trait;
 use num_bigint::BigUint;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use usd8_settlement::Address;
 use usd8_settlement::abi::{IDefiInsurance, IERC20, IERC1155};
-use usd8_settlement::chain::{min_balance_over, min_erc1155_balance_over, read_input_events};
+use usd8_settlement::chain::{
+    min_balance_over, min_balances_over, min_erc1155_balance_over, read_input_events,
+};
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
 
 const DEFI: &str = "0x0000000000000000000000000000000000002000";
@@ -142,6 +144,45 @@ fn rpc(logs: Vec<Value>, balances: &[((&str, u64), u64)]) -> HistoryRpc {
                 })
                 .collect(),
         ),
+    }
+}
+
+#[derive(Clone)]
+struct BatchHistoryRpc {
+    balances: Arc<HashMap<(Address, u64), U256>>,
+    log_calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl Rpc for BatchHistoryRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match method {
+            "eth_getLogs" => {
+                *self.log_calls.lock().unwrap() += 1;
+                Ok(Value::Array(Vec::new()))
+            }
+            "eth_call" => {
+                let data = params[0]["data"].as_str().unwrap();
+                let call = IERC20::balanceOfCall::abi_decode(
+                    &hex::decode(data.trim_start_matches("0x")).unwrap(),
+                )
+                .unwrap();
+                let account = Address::from_str(&format!("{:#x}", call.account)).unwrap();
+                let block =
+                    u64::from_str_radix(params[1].as_str().unwrap().trim_start_matches("0x"), 16)
+                        .unwrap();
+                let value = self.balances.get(&(account, block)).copied().unwrap();
+                Ok(json!(format!(
+                    "0x{}",
+                    hex::encode(IERC20::balanceOfCall::abi_encode_returns(&value))
+                )))
+            }
+            _ => panic!("unexpected method {method}"),
+        }
+    }
+
+    fn metrics(&self) -> RpcMetrics {
+        RpcMetrics::default()
     }
 }
 
@@ -289,6 +330,38 @@ async fn erc20_endpoint_mismatch_fails_closed() {
             .to_string()
             .contains("unsupported token balance semantics")
     );
+}
+
+#[tokio::test]
+async fn eligibility_log_requests_scale_by_topic_batches_not_claim_count() {
+    let accounts = (1u64..=65)
+        .map(|value| Address::from_str(&format!("0x{value:040x}")).unwrap())
+        .collect::<BTreeSet<_>>();
+    let balances = accounts
+        .iter()
+        .flat_map(|account| {
+            [(10, U256::from(100)), (20, U256::from(100))]
+                .into_iter()
+                .map(move |(block, value)| ((*account, block), value))
+        })
+        .collect();
+    let rpc = BatchHistoryRpc {
+        balances: Arc::new(balances),
+        log_calls: Arc::new(Mutex::new(0)),
+    };
+
+    let (minimums, metrics) = min_balances_over(&rpc, ka(TOKEN), &accounts, 10, 20, 1_000, 1_000)
+        .await
+        .unwrap();
+
+    assert_eq!(minimums.len(), 65);
+    assert!(
+        minimums
+            .values()
+            .all(|value| value == &BigUint::from(100u8))
+    );
+    assert_eq!(*rpc.log_calls.lock().unwrap(), 4);
+    assert_eq!(metrics.requests, 4);
 }
 
 #[tokio::test]

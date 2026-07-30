@@ -40,7 +40,7 @@ oracle-staleness limit. The default build is fixed to Ethereum mainnet; the
 `MAX_LOG_RANGE = 1000` and `LOG_RESULT_CAP = 1000` are compiled into the measured
 runtime because they describe approved RPC behavior rather than protocol state.
 The derived state and baked limits are committed in the artifact `configHash`.
-Missing feeds, zero policy, unsupported booster policy, wrong chain, wiring
+Missing feeds, zero policy, invalid booster policy, wrong chain, wiring
 mismatch, or missing historical bytecode fail closed. Version 5 applies only to
 incidents opened after these Registry selectors and values exist; rollout must
 have no active incident and configure every active pool feed before reopening.
@@ -125,7 +125,7 @@ root/proofs, per-pool row totals, and settlement digest. Each payout leaf commit
 booster-adjusted value used only for allocation). The contract recomputes the
 boosted score from the claim's escrowed booster amount before finalizing.
 
-Boosters are escrowed by `joinClaim`; settlement therefore uses the committed
+Boosters are escrowed by `fileClaim`; settlement therefore uses the committed
 amount directly without replaying ERC-1155 balance history.
 
 ## Ephemeral bulk score replay
@@ -222,7 +222,7 @@ The runtime fails closed unless it can:
    block or any request/deadline budget exhaustion;
 6. validate oracle answers, timestamps, decimals, conversion returns, pool
    topology, historical balances, and score-spent values at pinned blocks;
-7. read the latest submitted root after expensive work, then re-read every
+7. read the latest settled root after expensive work, then re-read every
    anchor hash as the final RPC operation before output.
 
 Tokens whose balances cannot be reconstructed from standard Transfer semantics
@@ -294,12 +294,37 @@ POST /jobs/open
 Idempotency-Key: client-generated-unique-value
 Content-Type: application/json
 
-{"insuredToken":"0x2222222222222222222222222222222222222222","referenceBlock":"1234567"}
+{"insuredToken":"0x2222222222222222222222222222222222222222"}
 ```
 
 The enclave reads `nextIncidentId`, Registry/DefiInsurance bindings, token
 approval, active-incident state, chain ID, signer authorization, and the current
-PCR commitment at one pinned Sepolia block before signing `IncidentOpen`.
+PCR commitment at one pinned head. It also reads `incidentTimingConfig` and
+`incidentOpenPriceConfig`, then searches fixed grid-aligned reference blocks from
+`latestBlock - maxReferenceBlockAge` through `finalizedBlock - twapBlocks`.
+Historical conversion ratios are fetched once per unique grid point, with a hard
+256-point bound. For every candidate it compares the unrounded sums from the
+pre-reference and post-reference windows. Qualifying candidates are grouped into
+contiguous drop episodes; the first candidate in the latest qualifying episode
+is selected. The enclave signs only when the decline is strictly greater than
+`minimumDropBps`; no insured-token/USD oracle enters incident-open eligibility.
+The EIP-712 authorization binds an on-chain hash of the Registry address, price
+config, conversion address, and conversion calldata, so governance changes or a
+conversion recipe change invalidate stale open artifacts. The artifact records the
+selected reference and observation blocks, both sums and displayed TWAPs,
+sampling parameters, threshold, and eligibility hash.
+
+After verifying the attestation and ECDSA signature, the first claimant submits
+`fileClaim(artifact.insuredToken, amount, scoreToSpend, boosterAmount,
+artifact.referenceBlock, signature)`. The contract validates the TEE authorization,
+opens the incident, and escrows that claim atomically. The reference block is copied
+mechanically from the signed artifact rather than selected by the claimant. Later
+claimants call the same function with `referenceBlock = 0` and an empty signature.
+
+This claimant-facing restriction does not remove DefiInsurance's explicitly trusted
+`onlyAdminOrTimelock` emergency fallback, which may still choose a reference block
+without a TEE signature. That governance capability is outside the permissionless
+job API trust boundary and must remain an intentional protocol trust assumption.
 
 ```json
 {"accepted":true,"jobId":"<64 lowercase hex characters>"}
@@ -314,9 +339,8 @@ GET /jobs/<jobId>
 ```
 
 Settlement accepts only `incidentId` and `registry`; incident opening accepts
-only `insuredToken` and `referenceBlock`, with Registry injected from Lambda's
-fixed configuration. Unknown fields, numeric rather than canonical
-decimal-string IDs, leading zeroes, out-of-range integers, zero/malformed
+only `insuredToken`, with Registry injected from Lambda's fixed configuration.
+Unknown fields, numeric rather than canonical decimal-string IDs, leading zeroes, out-of-range integers, zero/malformed
 addresses, and any requested Registry other than the configured one are
 rejected before an AWS write. Users cannot supply an RPC URL, AMI,
 instance type, subnet, security group, IAM profile, user data, command, S3 key,
@@ -328,7 +352,7 @@ The 32-byte job ID is:
 
 ```text
 opaque = HMAC-SHA256(jobSecret,
-    "USD8_TEE_JOB_V2\\0" || idempotencyKey || "\\0" || canonicalRequest)[0:16]
+    "USD8_TEE_JOB_V3\\0" || idempotencyKey || "\\0" || canonicalRequest)[0:16]
 commitment = SHA256("USD8_TEE_REQUEST_V1\\0" || canonicalRequest)[0:16]
 jobId = hex(opaque || commitment)
 ```
@@ -351,7 +375,11 @@ terminal/<jobId>.json    immutable completed-or-failed envelope
 The worker conditionally creates the single terminal key, so success and failure
 cannot race across separate objects. Lambda requires terminal schema version 1,
 matching job ID, a `completed` or `failed` discriminator, and an object payload.
-Stored-request schema version 2 records the fixed creation time and hard expiry.
+Stored-request schema version 3 records the fixed creation time and hard expiry.
+Version 3 removes caller-supplied `referenceBlock` from open requests and changes
+job-ID domain separation. Rollout must first stop intake and drain or expire every
+version-2 request, then deploy the API, parent, and enclave together; version-3
+components intentionally reject version-2 queued jobs and clients.
 If no terminal exists after that deadline, polling returns `expired`; retrying the
 same deterministic job does not relaunch it. A caller that intentionally needs a
 new computation after expiry must use a new idempotency key. A completed or failed
@@ -451,9 +479,11 @@ For each release:
    configuration into one read-only manifest;
 6. update KMS, IAM, Lambda and the on-chain PCR commitment only from that final
    bundle;
-7. run `deploy/verify-release.py <final-dir>/release-manifest.json --live` and
-   fail the deployment unless the live AMI, Lambda code/configuration, Function
-   URL authorization, KMS policy and IAM policies exactly match the manifest.
+7. run `deploy/verify-release.py <final-dir>/release-manifest.json --live
+   --rpc-url "$SEPOLIA_RPC_URL"` and fail the deployment unless the live chain
+   ID, Registry bytecode, Registry PCR commitment, and authorized DefiInsurance
+   signer, plus the AMI, Lambda code/configuration, Function URL authorization,
+   KMS policy and IAM policies exactly match the manifest.
 
 Rebuild only when measured code or dependencies change. AMI snapshot and private
 S3 artifact storage remain while all compute is terminated.
@@ -522,6 +552,10 @@ target/release/usd8-settlement fixtures/small.json
 
 Fixture output contains decimal-string rows and pool payouts, `claimSetHash`,
 `settlementInputHash`, Merkle root, and all proofs keyed by claim ID.
+`fixtures/small.json` and `fixtures/matrix.json` are synthetic runnable inputs;
+the fixture-provenance table in `fixtures/README.md` labels every bundled input.
+`fixtures/golden-claim-results.json` is the fixed, manually derived economic
+oracle described in `fixtures/README.md`; it must not be regenerated from Rust.
 
 ## Real-history fixture
 

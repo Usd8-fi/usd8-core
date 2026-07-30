@@ -14,7 +14,7 @@ fn n(value: u8) -> BigUint {
 }
 
 #[test]
-fn pools_hash_and_full_digest_match_viem_and_solidity_vector() {
+fn pools_hash_and_full_digest_match_solidity_vector() {
     let verifying = address("0x0000000000000000000000000000000000001115");
     let pools = vec![
         address("0x0000000000000000000000000000000000000a55"),
@@ -30,7 +30,7 @@ fn pools_hash_and_full_digest_match_viem_and_solidity_vector() {
         verifying_contract: verifying,
         incident_id: n(7),
         root: format!("0x{}", "11".repeat(32)),
-        unresolved: n(2),
+        unresolved_claims: n(2),
         pool_payouts: vec![n(1), n(2)],
         pool_addrs: pools,
         claim_set: format!("0x{}", "22".repeat(32)),
@@ -38,7 +38,7 @@ fn pools_hash_and_full_digest_match_viem_and_solidity_vector() {
     };
     assert_eq!(
         settlement_digest(&input).unwrap(),
-        "0x8c97ed7ca7361c63a6a7448e7f3a4e6720412fc4c2ee7e162000e9391d968f42"
+        "0xa7dbb7268f5cc2e21e66b5b7b6b144f70852523016f73e9c2de07f1793db9c6c"
     );
 }
 
@@ -49,7 +49,7 @@ fn typed_data_rejects_malformed_hashes_and_uint256_overflow() {
         verifying_contract: address("0x0000000000000000000000000000000000001115"),
         incident_id: n(1),
         root: "0x12".to_owned(),
-        unresolved: n(0),
+        unresolved_claims: n(0),
         pool_payouts: vec![],
         pool_addrs: vec![],
         claim_set: format!("0x{}", "00".repeat(32)),
