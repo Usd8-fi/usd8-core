@@ -116,7 +116,8 @@ contract PoolHandler is Test {
         address who = _actor(actorSeed);
         (uint256 shares, uint64 exitEpoch) = pool.exitRequests(who);
         if (shares == 0 || block.timestamp < exitEpoch) return;
-        (,,,, bool settled) = pool.exitEpochs(exitEpoch);
+        (,, uint256 epochRemainingShares,) = pool.exitEpochs(exitEpoch);
+        bool settled = epochRemainingShares != 0;
         if (!settled && activeIncidentId != 0) return;
         if (!settled) {
             pool.settleMaturedExitEpochs(16);
@@ -273,9 +274,9 @@ contract PoolHandler is Test {
         for (uint256 i = 0; i < ghostKnownEpochs.length; i++) {
             uint64 epochId = ghostKnownEpochs[i];
             if (ghostEpochSettled[epochId]) continue;
-            (uint256 totalShares, uint256 totalAssets, uint256 remainingShares, uint256 remainingAssets, bool settled) =
+            (uint256 totalShares, uint256 totalAssets, uint256 remainingShares, uint256 remainingAssets) =
                 pool.exitEpochs(epochId);
-            if (!settled) continue;
+            if (remainingShares == 0) continue;
             assertEq(totalShares, ghostEpochTotalShares[epochId], "settled epoch share debt drift");
             assertEq(remainingShares, totalShares, "fresh epoch remaining shares");
             assertEq(remainingAssets, totalAssets, "fresh epoch remaining assets");
@@ -427,10 +428,10 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
         uint256 remainingAssetDebt;
         for (uint256 i = 0; i < handler.knownEpochsLength(); i++) {
             uint64 epochId = handler.knownEpoch(i);
-            (uint256 totalShares, uint256 totalAssets, uint256 remainingShares, uint256 remainingAssets, bool settled) =
+            (uint256 totalShares, uint256 totalAssets, uint256 remainingShares, uint256 remainingAssets) =
                 pool.exitEpochs(epochId);
+            bool settled = handler.ghostEpochSettled(epochId);
             assertEq(totalShares, handler.ghostEpochTotalShares(epochId), "epoch total-share drift");
-            assertEq(settled, handler.ghostEpochSettled(epochId), "epoch settlement drift");
             if (settled) {
                 assertEq(totalAssets, handler.ghostEpochTotalAssets(epochId), "epoch total-asset drift");
                 assertEq(remainingShares, handler.ghostEpochRemainingShares(epochId), "epoch remaining-share drift");
@@ -468,8 +469,8 @@ contract SingleAssetCoverPoolInvariantTest is StdInvariant, Test {
         uint64 exitEpoch;
         (shares, exitEpoch) = pool.exitRequests(user);
         if (shares == 0) return 0;
-        (,,,, bool settled) = pool.exitEpochs(exitEpoch);
-        return settled ? 0 : shares;
+        (,, uint256 remainingShares,) = pool.exitEpochs(exitEpoch);
+        return remainingShares != 0 ? 0 : shares;
     }
 }
 

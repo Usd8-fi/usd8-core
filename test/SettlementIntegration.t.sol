@@ -24,13 +24,11 @@ import {MockERC1155} from "./mocks/MockERC1155.sol";
 /// Cross-language end-to-end check: drive a real incident on-chain, then use the
 /// Rust settlement runtime (via FFI) to produce the merkle root and per-claim
 /// proofs — and prove they settle and pay each claimant exactly those amounts.
-/// Set USE_RUST_FFI=0 to exercise the temporary TypeScript oracle instead.
 ///
 /// Opt-in (keeps the default forge test green and FFI-free):
 ///   cargo build --release --locked --manifest-path offchain-rust/Cargo.toml
 ///   RUN_INTEGRATION=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 contract SettlementIntegrationTest is Test {
-    string constant FFI = "offchain/dist/ffi.js";
     string constant RUST_FFI = "offchain-rust/target/release/usd8-settlement";
 
     MockERC20 usdc; // pool stake asset (payout currency)
@@ -66,8 +64,10 @@ contract SettlementIntegrationTest is Test {
         );
         USD8 impl = new USD8();
         usd8 = USD8(address(new ERC1967Proxy(address(impl), abi.encodeCall(USD8.initialize, (registry)))));
-        vm.prank(admin);
+        vm.startPrank(admin);
         registry.setUsd8(address(usd8));
+        registry.setTreasury(admin);
+        vm.stopPrank();
 
         SingleAssetCoverPool pImpl = new SingleAssetCoverPool();
         UpgradeableBeacon beacon = new UpgradeableBeacon(address(pImpl), admin);
@@ -90,7 +90,7 @@ contract SettlementIntegrationTest is Test {
         registry.setTeePcrHash(TEE_PCR_HASH);
         registry.addPool(address(pool), FEED);
         registry.setDefiInsurance(address(defi));
-        defi.addInsuredToken(IERC20(address(lp)), 8000, 1e18, FEED, address(0), "");
+        defi.editInsuredToken(IERC20(address(lp)), 8000, FEED, address(0), "");
         defi.setTeeSigner(vm.addr(TEE_PK), true);
         vm.stopPrank();
 
@@ -116,7 +116,7 @@ contract SettlementIntegrationTest is Test {
     ///      on-chain unresolved count, claim-set hash, and committed per-pool
     ///      payouts (mirrors settleIncident).
     function _teeSign(uint256 incidentId, bytes32 root, uint256[] memory pp) internal view returns (bytes memory) {
-        (,,, uint256 unresolved,,,,,, bytes32 claimSetHash) = defi.incidents(incidentId);
+        (,,,,,, uint256 unresolved, bytes32 claimSetHash,,) = defi.incidents(incidentId);
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -130,7 +130,7 @@ contract SettlementIntegrationTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolvedClaims,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
                 ),
                 incidentId,
                 root,
@@ -186,15 +186,15 @@ contract SettlementIntegrationTest is Test {
         bytes32[] memory proofCarol = abi.decode(_ffi("proof", rootPayload, vm.toString(cc)), (bytes32[]));
 
         // ── 3) Settle with the off-chain root, finalize each claim with its proof. ──
-        (, uint64 wEnd,,,,,,,,) = defi.incidents(incidentId);
+        (,,,, uint64 wEnd,,,,,) = defi.incidents(incidentId);
         vm.warp(wEnd + 1);
         _settle(incidentId, root);
-        vm.warp(block.timestamp + defi.DISPUTE_PERIOD() + 1); // past DISPUTE_PERIOD
+        vm.warp(block.timestamp + registry.incidentTimingConfig().phaseWindow + 1); // past CORRECTION_WINDOW
 
         vm.prank(bob);
-        defi.finalizeClaim(_u256(bobPay), 60, 60, 100e18, proofBob);
+        defi.finalizeClaim(cb, true, _u256(bobPay), 60, 60, 100e18, proofBob);
         vm.prank(carol);
-        defi.finalizeClaim(_u256(carolPay), 40, 40, 100e18, proofCarol);
+        defi.finalizeClaim(cc, true, _u256(carolPay), 40, 40, 100e18, proofCarol);
 
         // ── Payouts match the off-chain amounts and only raw score is recorded. ──
         assertEq(usdc.balanceOf(bob), bobPay, "bob payout != off-chain amount");
@@ -207,8 +207,7 @@ contract SettlementIntegrationTest is Test {
     ///      equal the contract's _hashTypedDataV4 digest byte-for-byte, over 0/1/N
     ///      pools. Covers the whole digest — domain separator, typehash,
     ///      poolPayouts array encoding, and the `pools` packed-address hash — not
-    ///      just the Merkle root. `solc` is the authority; both Rust and the
-    ///      TypeScript oracle must reproduce it.
+    ///      just the Merkle root. `solc` is the authority; Rust must reproduce it.
     function test_OffchainDigestMatchesOnchain() public {
         if (!vm.envOr("RUN_INTEGRATION", false)) {
             vm.skip(true);
@@ -232,7 +231,7 @@ contract SettlementIntegrationTest is Test {
             );
             bytes32 offchain = abi.decode(_ffi("digest", payload, ""), (bytes32));
             bytes32 onchain = _settlementDigest(incidentId, root, unresolved, pp, poolAddrs, claimSet);
-            assertEq(offchain, onchain, "EIP-712 settlement digest mismatch (viem != solc)");
+            assertEq(offchain, onchain, "EIP-712 settlement digest mismatch (Rust != solc)");
         }
     }
 
@@ -267,7 +266,7 @@ contract SettlementIntegrationTest is Test {
 
         bytes memory payload = abi.encode(kinds, ids, users3, escrows, scores, boosters);
         bytes32 offchain = abi.decode(_ffi("claimset", payload, ""), (bytes32));
-        (,,,,,,,,, bytes32 onchain) = defi.incidents(incidentId);
+        (,,,,,,, bytes32 onchain,,) = defi.incidents(incidentId);
         assertEq(offchain, onchain, "claim-set accumulator mismatch (offchain replay != contract)");
     }
 
@@ -293,7 +292,7 @@ contract SettlementIntegrationTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
+                    "Settlement(uint256 incidentId,bytes32 root,uint256 unresolvedClaims,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
                 ),
                 incidentId,
                 root,
@@ -311,22 +310,20 @@ contract SettlementIntegrationTest is Test {
 
     function _join(address who, uint128 amount, uint256 score) internal returns (uint256 claimId) {
         lp.mint(who, amount);
+        vm.prank(admin);
+        usd8.mint(who, 10e18);
         vm.startPrank(who);
         lp.approve(address(defi), amount);
-        claimId = defi.joinClaim(IERC20(address(lp)), amount, score, 0, 0, "");
+        usd8.approve(address(defi), 10e18);
+        claimId = defi.fileClaim(IERC20(address(lp)), amount, score, 0, 0, "");
         vm.stopPrank();
     }
 
     function _ffi(string memory cmd, bytes memory payload, string memory arg) internal returns (bytes memory) {
         uint256 n = bytes(arg).length == 0 ? 4 : 5;
         string[] memory c = new string[](n);
-        if (vm.envOr("USE_RUST_FFI", true)) {
-            c[0] = RUST_FFI;
-            c[1] = "ffi";
-        } else {
-            c[0] = "node";
-            c[1] = FFI;
-        }
+        c[0] = RUST_FFI;
+        c[1] = "ffi";
         c[2] = cmd;
         c[3] = vm.toString(payload);
         if (n == 5) c[4] = arg;

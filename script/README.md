@@ -1,3 +1,32 @@
+## Cross-language ABI closure
+
+After a fresh `forge build`, run:
+
+```bash
+python3 script/check_offchain_abi.py --self-test
+python3 script/check_offchain_abi.py --artifacts out
+```
+
+The checker parses the first-party interfaces consumed by
+`offchain-rust/src/abi.rs` and compares function inputs/outputs, mutability,
+event indexing, anonymity, and tuple components with current Foundry artifacts.
+CI runs both commands; selector-only checks are not sufficient because return
+and indexed-field drift do not change selectors or event signature hashes.
+
+## Sepolia source publication closure
+
+The canonical staging manifest points to a self-contained copy of the exact
+Solidity sources used for deployment. Verify every file hash, byte count, and
+the aggregate source root with:
+
+```bash
+python3 script/check_sepolia_source_freeze.py
+```
+
+CI runs this check. It does not compare the deployment against the moving
+`src/` tree; later source edits are expected and must not rewrite historical
+deployment evidence.
+
 ## Deployment configuration
 
 Both deployment scripts select [`config/DeploymentConfig.sol`](config/DeploymentConfig.sol) from `block.chainid`:
@@ -51,36 +80,13 @@ Do not substitute ETH/USD for a wstETH/USD feed or reuse unrelated token address
 
 The prepared public staging deployment uses the canonical Sepolia USDC and Morpho Vault V2 factory plus the deployed USD8Booster. Dependencies without compatible canonical Sepolia deployments are explicit admin-controlled mocks from [`testnet/SepoliaDependencies.sol`](testnet/SepoliaDependencies.sol). They are suitable for signer, governance, frontend, indexing and claims workflow tests, but they are not evidence of production Aave, Sky, Lido or Chainlink integration; retain mainnet-fork coverage for those integrations.
 
-The prepared Safe 7 plans are nonce-locked to `0xB2E999D531D45a9115dA7706adFc651999f3c1F1`:
+The tracked [`deployment.json`](../deployments/sepolia/deployment.json) is the
+canonical public staging record. Its referenced source freeze and public
+receipt/journal artifacts are publication evidence. Generated transaction
+plans, progress state, local configuration, and signer material remain ignored
+operator state and must not be committed.
 
-1. [`00-dependencies-plan.json`](../deployments/sepolia/00-dependencies-plan.json): nonce `1`;
-2. [`01-timelock-plan.json`](../deployments/sepolia/01-timelock-plan.json): nonce `2`; and
-3. [`02-system-plan.json`](../deployments/sepolia/02-system-plan.json): nonces `3` through `39`.
-
-Do not send unrelated transactions from that account between stages: CREATE addresses and every later call are nonce-dependent. Source the generated public configuration with `source deployments/sepolia/config.env`. The account must retain at least 10 Sepolia USDC for the permanent sUSD8 seed.
-
-Foundry's Rust Trezor backend does not yet support Safe 7 THP. Execute the reviewed plans through official `trezorctl` instead:
-
-```bash
-python3 script/testnet/trezor_deploy.py deployments/sepolia/00-dependencies-plan.json
-python3 script/testnet/trezor_deploy.py deployments/sepolia/01-timelock-plan.json
-python3 script/testnet/trezor_deploy.py deployments/sepolia/02-system-plan.json
-```
-
-The runner verifies Sepolia, the derivation-path address, plan checksums, exact nonce progression, receipts and deterministic CREATE addresses. It writes ignored `*.state.json` progress files so a confirmed batch can resume safely. The full-system plan requires 37 separate hardware confirmations because the deployment is deliberately a sequence of EOA transactions rather than one atomic transaction.
-
-For one reviewed post-deployment call, use the fileless Safe 7 sender instead of creating a nonce-locked plan. It reads the live nonce, encodes a Solidity signature or accepts exact calldata, estimates gas, previews the full transaction, obtains one Trezor confirmation, canonicalizes the legacy signature and broadcasts it:
-
-```bash
-python3 script/testnet/trezor_send.py \
-  --label 'Mint 20 USD8' \
-  --to 0x5B5e52b7E603cA71C7dc37134924855cc45864c1 \
-  --sig 'mintUSD8(uint256)' 20000000
-```
-
-It refuses to sign while the account has a pending transaction. One physical confirmation per transaction cannot be removed without changing custody; retain plan files for reviewed multi-transaction or deterministic-nonce sequences.
-
-After all three plans complete, run the read-only topology and funding verifier:
+Run the read-only topology and funding verifier against the canonical manifest:
 
 ```bash
 source deployments/sepolia/config.env

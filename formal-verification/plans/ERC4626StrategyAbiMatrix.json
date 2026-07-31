@@ -1,0 +1,196 @@
+{
+  "snapshot": {
+    "contract": "ERC4626Strategy",
+    "compiledAbiSha256": "070db212ad57d4c52f35f9541fc7851c8cff61bf5cb414d999845e3f0dd5f729",
+    "eventCount": 6,
+    "errorCount": 21,
+    "solverRun": false,
+    "formalCandidateCount": 124,
+    "foundryOnlyRegressionCount": 7,
+    "forgePassedFormalCandidates": 124,
+    "forgePassedFoundryOnly": 7
+  },
+  "events": [
+    {
+      "signature": "RegistryChanged(address,address)",
+      "classification": "formal-first-log",
+      "evidence": "ERC4626StrategyConstructionViewsKontrolTest.test_constructorRegistryChangedIsExactFirstLogUnderSilentDependencies()"
+    },
+    {
+      "signature": "ETHSwept(address,uint256)",
+      "classification": "formal-first-log",
+      "evidence": "ERC4626StrategySweepKontrolTest.test_ethSweepExactEventIsFirstLogForSilentReceiver()"
+    },
+    {
+      "signature": "Deployed(uint256)",
+      "classification": "foundry-later-log",
+      "evidence": "ERC4626StrategyFoundryEventOrderTest.testFoundry_deployStandardPrefixThenExactStrategyEvent()"
+    },
+    {
+      "signature": "Withdrawn(uint256)",
+      "classification": "foundry-later-log",
+      "evidence": "ERC4626StrategyFoundryEventOrderTest.testFoundry_withdrawStandardPrefixThenExactStrategyEvent(); ERC4626StrategyFoundryEventOrderTest.testFoundry_withdrawOverdeliveryEmitsMeasuredAmountAfterVaultLogs()"
+    },
+    {
+      "signature": "TokenSwapped(address,address,address,uint256,uint256)",
+      "classification": "foundry-later-log",
+      "evidence": "ERC4626StrategyFoundryEventOrderTest.testFoundry_swapApprovalRouterResetTransferThenExactMeasuredEvent()"
+    },
+    {
+      "signature": "TokenSwept(address,address,uint256)",
+      "classification": "structural-non-emission",
+      "preemption": "SharedBase._sweepable returns zero for every token, so NothingToSweep(token) precedes token code and emission",
+      "evidence": "ERC4626StrategySweepKontrolTest.test_everySymbolicTokenIsStructurallyUnsweepableWithExactPayload(address); ERC4626StrategyFoundryEventOrderTest.testFoundry_failedSymbolicTokenSweepEmitsNoLogs(address)"
+    }
+  ],
+  "errors": [
+    {
+      "signature": "AddressEmptyCode(address)",
+      "selector": "0x9996b315",
+      "bytes": "4-byte selector + 32-byte address",
+      "classification": "reachable-external-model",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_noCodeAndMalformedRouteUseExactAddressErrors()"
+    },
+    {
+      "signature": "DepositValueShort(uint256,uint256)",
+      "selector": "0xfd5b59ab",
+      "bytes": "4 + 2x32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategyExternalModesKontrolTest.test_deployPositiveReturnWithoutSharesOnePastBoundaryRevertsAndRollsBack(); ERC4626StrategyDeployWithdrawKontrolTest.test_valueShortDepositRevertsAndRollsBackVaultAndTokenState()"
+    },
+    {
+      "signature": "EthTransferFailed()",
+      "selector": "0x6d963f88",
+      "bytes": "exactly 4",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySweepKontrolTest.test_rejectingEthReceiverUsesExactErrorAndRollsBackFundedState()"
+    },
+    {
+      "signature": "FailedCall()",
+      "selector": "0xd6bda275",
+      "bytes": "exactly 4",
+      "classification": "reachable-external-model",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_noCodeAndMalformedRouteUseExactAddressErrors(); ERC4626StrategySwapModesKontrolTest.test_inputTransferFromNoReturnYieldsExactFailedCallAndRollsBack(); ERC4626StrategySwapModesKontrolTest.test_inputTransferFromMalformedReturnYieldsExactFailedCallAndRollsBack()"
+    },
+    {
+      "signature": "InsufficientBalance(uint256,uint256)",
+      "selector": "0xcf479181",
+      "bytes": "4 + 2x32",
+      "classification": "structural-unreachable",
+      "preemption": "StrategyBase invokes Address.functionCall without value; functionCallWithValue balance guard has no path"
+    },
+    {
+      "signature": "InsufficientSwapOutput(uint256,uint256)",
+      "selector": "0xa4e2ee73",
+      "bytes": "4 + 2x32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_lowOutputRevertsAllRouterTokenAndAllowanceEffects()"
+    },
+    {
+      "signature": "InvalidSweepRecipient(address)",
+      "selector": "0x346931c5",
+      "bytes": "4 + 32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySweepKontrolTest.test_ethSweepRecipientChecksPrecedeEmptyBalance(); ERC4626StrategySweepKontrolTest.test_tokenSweepRecipientChecksPrecedeStructuralNothingToSweep()"
+    },
+    {
+      "signature": "NotBetaMode()",
+      "selector": "0xc8e83e9c",
+      "bytes": "exactly 4",
+      "classification": "structural-unreachable",
+      "preemption": "inherited ABI declaration has no ERC4626Strategy external selector that calls a beta-only guard"
+    },
+    {
+      "signature": "NothingToSweep(address)",
+      "selector": "0x0180603d",
+      "bytes": "4 + 32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySweepKontrolTest.test_everySymbolicTokenIsStructurallyUnsweepableWithExactPayload(address); ERC4626StrategySweepKontrolTest.test_emptyEthUsesExactErrorAndPreservesFundedTokenState()"
+    },
+    {
+      "signature": "PrincipalDecreased(uint256,uint256)",
+      "selector": "0xc596e6f1",
+      "bytes": "4 + 2x32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_principalDecreaseRevertsAndRollsBackPositionAndOutput(); ERC4626StrategySwapModesKontrolTest.test_routerTreasuryWithdrawCallbackHitsPrincipalCheckAndRollsBack()"
+    },
+    {
+      "signature": "ProtectedSwapAsset(address)",
+      "selector": "0xeb0af8e9",
+      "bytes": "4 + 32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_vaultInputProtectionIsExactAndRollsBackFundedState(); ERC4626StrategySwapKontrolTest.test_protectedTargetAndSpenderAreCheckedSeparatelyAfterPair()"
+    },
+    {
+      "signature": "ReentrancyGuardReentrantCall()",
+      "selector": "0x3ee5aeb5",
+      "bytes": "exactly 4",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySwapModesKontrolTest.test_reentrantSwapBubblesExactFourBytesAndGuardClearsAfterRevert()"
+    },
+    {
+      "signature": "SafeERC20FailedOperation(address)",
+      "selector": "0x5274afe7",
+      "bytes": "4 + 32",
+      "classification": "reachable-external-model",
+      "evidence": "ERC4626StrategySwapModesKontrolTest.test_usdtRetryFailureRestoresPriorAllowance(); ERC4626StrategySwapModesKontrolTest.test_approvalInitialFalseReturnsExactSafeERC20BytesBeforeRouter(); ERC4626StrategySwapModesKontrolTest.test_approvalInitialMalformedReturnsExactSafeERC20BytesBeforeRouter(); ERC4626StrategySwapKontrolTest.test_zeroTokenInputReachesExactNoCodeFailureAndRollsBack()"
+    },
+    {
+      "signature": "SwapRouteNotApproved(address,address)",
+      "selector": "0xcb0792f9",
+      "bytes": "4 + 2x32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_routeApprovalUsesExactTargetSpenderPairAndPrecedesPairChecks()"
+    },
+    {
+      "signature": "UnauthorizedTreasury(address)",
+      "selector": "0xeaf71619",
+      "bytes": "4 + 32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategyDeployWithdrawKontrolTest.test_outsiderCannotDeployOrWithdrawBeforeExternalStateChanges()"
+    },
+    {
+      "signature": "UnsupportedSwapPair(address,address)",
+      "selector": "0x9eb09498",
+      "bytes": "4 + 2x32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_sameTokenPairRejectionIsExactAndRollsBackFundedState(); ERC4626StrategySwapKontrolTest.test_nonUsdcOutputPairRejectionIsExactAndRollsBackFundedState()"
+    },
+    {
+      "signature": "VaultAssetMismatch(address,address)",
+      "selector": "0xdd723603",
+      "bytes": "4 + 2x32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategyConstructionViewsKontrolTest.test_vaultAssetMismatchRevertsWithExactPayload()"
+    },
+    {
+      "signature": "WithdrawShort(uint256,uint256)",
+      "selector": "0xc995e4f2",
+      "bytes": "4 + 2x32",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategyDeployWithdrawKontrolTest.test_shortRedeemReachesExactWithdrawShortAndRollsBackAllVaultState(); ERC4626StrategyDeployWithdrawKontrolTest.test_zeroDeliveryReachesExactWithdrawShortAndRollsBackAllVaultState(); ERC4626StrategyExternalModesKontrolTest.test_withdrawPostBalanceShortReportDriftRevertsExactlyAndRollsBack()"
+    },
+    {
+      "signature": "ZeroAddress()",
+      "selector": "0xd92e233d",
+      "bytes": "exactly 4",
+      "classification": "reachable-formal-and-preempted",
+      "preemption": "zero/no-code Treasury is preempted by derived base-argument USDC() decode; Registry/vault/recipient zero reach ZeroAddress",
+      "evidence": "ERC4626StrategyConstructionViewsKontrolTest.test_zeroRegistryAndZeroVaultUseExactZeroAddressGuard(); ERC4626StrategySweepKontrolTest.test_ethSweepRecipientChecksPrecedeEmptyBalance(); ERC4626StrategySweepKontrolTest.test_tokenSweepRecipientChecksPrecedeStructuralNothingToSweep()"
+    },
+    {
+      "signature": "ZeroAmount()",
+      "selector": "0x1f2a2005",
+      "bytes": "exactly 4",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategySwapKontrolTest.test_zeroAmountPrecedesRouteAndPairChecksAndRollsBackFundedState(); ERC4626StrategySwapKontrolTest.test_zeroMinimumPrecedesRouteAndPairChecksAndRollsBackFundedState()"
+    },
+    {
+      "signature": "ZeroSharesMinted()",
+      "selector": "0xd6a0a041",
+      "bytes": "exactly 4",
+      "classification": "reachable-formal",
+      "evidence": "ERC4626StrategyDeployWithdrawKontrolTest.test_zeroShareDepositRevertsAndRollsBackTokenTransfer()"
+    }
+  ]
+}

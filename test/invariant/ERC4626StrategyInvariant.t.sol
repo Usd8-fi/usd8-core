@@ -94,8 +94,9 @@ contract ERC4626StrategyHandler is Test {
         uint256 available = vault.maxWithdraw(address(strategy));
         if (available == 0) return;
         uint256 amount = bound(amountSeed, 1, available);
+        uint256 treasuryBefore = usdc.balanceOf(address(treasury));
         treasury.withdrawFrom(strategy, amount);
-        ghostWithdrawn += amount;
+        ghostWithdrawn += usdc.balanceOf(address(treasury)) - treasuryBefore;
         successfulWithdrawals++;
     }
 

@@ -109,18 +109,6 @@ contract USD8PriceOracleTest is Test {
         assertEq(surplusAnswer, 99_900_000);
     }
 
-    function test_UsesCurrentRegistryTreasury() public {
-        usd8.mint(address(this), 100e18);
-        treasury.setReserve(100e6);
-
-        OracleMockTreasury replacement = new OracleMockTreasury(usd8);
-        replacement.setReserve(25e6);
-        registry.setTreasury(address(replacement));
-
-        (, int256 answer,,,) = oracle.latestRoundData();
-        assertEq(answer, 24_975_000);
-    }
-
     function test_DistressMultipliesUsdcPriceByRedemptionRatio() public {
         usd8.mint(address(this), 100e18);
         treasury.setReserve(40e6);

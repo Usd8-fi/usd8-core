@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
+
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
-//  \:\ \:\ \\:\/___/\\:\ \ \ \\:\_\:\ \
+//  \:\ \:\ \\: \/___/\\:\ \ \ \\:\_\:\ \
 //   \:\ \:\ \\_::._\:\\:\ \ \ \\::__:\ \
-//    \:\_\:\ \ /____\:\\:\/.:| |\:\_\:\ \
+//    \:\_\:\ \ /____\:\\:\\/.:| |\:\_\:\ \
 //     \_____\/ \_____\/ \____/_/ \_____\/
 
 pragma solidity 0.8.28;
@@ -21,42 +22,18 @@ interface IDefiInsurance {
     function isInsuredToken(IERC20 token) external view returns (bool);
 }
 
-/// @notice Minimal view of a cover pool — its stake asset. {addPool}/{removePool}
+/// @notice Minimal view of a cover pool and its underlying asset. {addPool}/{removePool}
 ///         read this so a pool is always registered under its own asset.
 interface ICoverPool {
     function asset() external view returns (IERC20);
 }
 
-/// @title  Registry
-/// @notice The single access + pause + topology hub for the whole
-///         USD8 system. Every core contract inherits {SharedBase}, holds this address,
-///         and asks it "may this caller act?" / "am I paused?" / "is the system
-///         frozen for an incident?" instead of tracking that itself — one audited
-///         source of truth, one console to govern and to halt the system.
-///
-///         Two tiers of authority:
-///         - TIMELOCK: a single root address. Sole manager of the role set and of
-///           all topology (pools, payout module, scored tokens, booster). Gates the
-///           heavy powers via {requireTimelock}.
-///         - ADMIN: a SET (any number of keys/bots), curated only by the timelock.
-///           Admins + the timelock share the fast operational powers (pause) via
-///           {requireAdminOrTimelock}.
-///
-///         Pause is PER-CONTRACT, keyed by the target's address. Topology state
-///         (pool set, payout module, scored tokens, booster) is frozen while an
-///         incident is in flight ({frozen}), so a product's settlement runs against
-///         a deterministic, unchanging system.
-/// @dev    UUPS-upgradeable (timelock-only {_authorizeUpgrade}). It is the ONE
-///         upgradeable hub: every {SharedBase} contract holds a fixed pointer to
-///         this proxy and has no setRegistry, so the system evolves by upgrading this
-///         contract in place — not by redeploy + re-point. Upgradeable because it now
-///         carries durable per-user state (e.g. {scoreSpent}) that a fresh redeploy
-///         could not preserve, and because forward features (multiple payout modules,
-///         richer scoring) extend it. Storage is APPEND-ONLY: never reorder or insert
-///         existing fields across an upgrade — only append new ones at the end (OZ v5
-///         Initializable/UUPS state lives in its own ERC-7201 namespace, so it does
-///         not collide with these sequential slots). Upgrades carry the same
-///         timelock-gated discipline as USD8/Treasury.
+/// @title Registry
+/// @notice Shared access, pause, configuration, and topology registry for USD8.
+///         The timelock manages roles and protocol topology. Admins share limited
+///         operational powers such as per-contract pause controls.
+/// @dev Topology and settlement-critical settings are frozen during incidents, except
+///      the timelock may clear a stuck insurance module. UUPS upgrades require beta mode.
 /// @custom:security-contact rick@usd8.fi
 contract Registry is Initializable, UUPSUpgradeable {
     /// @notice The single root governance address (expected: a TimelockController).
@@ -72,48 +49,49 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     // ─────────────────────────── Topology (pools + payout module) ───────────────────────────
 
-    /// @notice Registered stake pools, one per asset, in add order. Settlement
+    /// @notice Registered cover pools, one per asset, in current array order. Settlement
     ///         payout rows align to this list; it is frozen while an incident is
     ///         active so a product's settlement reads a stable pool set.
     IERC20[] public coverPoolAssets;
 
-    /// @notice Stake pool address for an asset (0 if none).
+    /// @notice Cover pool address for an asset (zero if none).
     mapping(IERC20 asset => address pool) public coverPool;
 
-    /// @notice The single insurance product allowed to freeze the system and pay
-    ///         claims. Set by the timelock; never swapped mid-incident.
+    /// @notice Insurance module allowed to freeze pools and pay claims. A nonzero
+    ///         replacement is blocked during incidents; timelock may clear it to zero.
     address public defiInsurance;
 
-    /// @notice Universal cap, in basis points, on how much of a cover pool's balance
-    ///         a single incident may pay out — so LPs never lose everything at once.
-    ///         Each pool exposes {SingleAssetCoverPool.maxPayoutPerIncident} =
-    ///         balance × this / 10_000; the settlement's per-pool totals are checked
-    ///         against it at settle time. Defaults to 5000 (50%) at deploy;
-    ///         {setMaxCoverPoolPayoutBps} (timelock) retunes it, strictly between 0
-    ///         and 10_000 (100% would let a pool drain fully; 0 would block payouts).
+    /// @notice Maximum share of each pool's active `totalAssets()` committed per incident.
     uint256 public maxCoverPoolPayoutBps;
 
     /// @notice Basis-point denominator for {maxCoverPoolPayoutBps}.
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
-    // ─────────────────────────── Insurance-score topology ───────────────────────────
+    /// @notice Maximum protocol share of gross claim settlements or reserve revenue.
+    uint256 public constant MAX_PROTOCOL_FEE_BPS = 2_000;
 
-    /// @notice One segment of a scored token's rate timeline: `rate` (score per whole
-    ///         token per block, 1e18-scaled) applies from `fromBlock` until the next
-    ///         segment's `fromBlock` (or forever if last). `rate == 0` turns scoring
-    ///         off from that block onward. Segments are append-only and effective at
-    ///         the block they're set in, so a rate change NEVER re-prices already-
-    ///         accrued score (the settler integrates each segment at its own rate).
+    /// @notice Shared protocol revenue destination and fee policy.
+    /// @param receiver Address receiving claim and reserve-yield protocol fees.
+    /// @param claimProtocolFeeShareBps Protocol share of each gross claim settlement.
+    /// @param reserveYieldFeeBps Protocol share of Treasury revenue distributions.
+    struct ProtocolFeeConfig {
+        address receiver;
+        uint16 claimProtocolFeeShareBps;
+        uint16 reserveYieldFeeBps;
+    }
+
+    ProtocolFeeConfig private _protocolFeeConfig;
+
+    // ─────────────────────────── USD8 Insurance-score topology ───────────────────────────
+
+    /// @notice One append-only scoring-rate segment. It applies from `fromBlock`
+    ///         until the next segment; a zero rate disables future accrual.
     struct RatePoint {
         uint64 fromBlock;
         uint128 rate;
     }
 
-    /// @notice Every token that has EVER been scored — never pruned. A token whose
-    ///         rate is now 0 still earned score during its active windows, so the
-    ///         settler must still see it. Enumerable set (mappings aren't iterable);
-    ///         products snapshot it at the incident's openBlock. Read via
-    ///         {getScoredTokens}; per-token timeline via {getScoredRateHistory}.
+    /// @notice Every token ever scored, including tokens whose current rate is zero.
     IERC20[] internal scoredTokenList;
 
     /// @notice Append-only rate timeline per token (see {RatePoint}). Frozen while
@@ -121,36 +99,27 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         gated on its history being non-empty.
     mapping(IERC20 token => RatePoint[]) internal scoredRates;
 
-    /// @notice Canonical ERC-1155 booster collection (USD8Booster) address.
-    ///         Committing boosters on a claim boosts a claimant's insurance score.
-    ///         Timelock-settable; zero disables booster commits.
-    address public boosterNFT;
+    /// @notice Permanent ERC-1155 booster policy. The three values are configured
+    ///         atomically once, before claims can use boosters, and cannot be changed.
+    struct BoosterConfig {
+        address collection;
+        uint64 tokenId;
+        uint16 boostBps;
+    }
 
-    /// @notice Cumulative insurance score each account has spent across all incidents,
-    ///         recorded by the payout module at claim finalize via {recordScoreSpent}.
-    ///         Kept here — one central total across all (current and future) payout
-    ///         modules — so frontends and on-chain consumers read a running total with
-    ///         a single view, instead of summing per-module {DefiInsurance.ScoreSpent}
-    ///         logs. Off-chain settlement still uses those incident-tagged logs for
-    ///         per-incident budgeting; this mirror is the convenience total.
+    BoosterConfig public boosterConfig;
+
+    /// @notice Cumulative score spent by each account, recorded by the payout module.
     mapping(address account => uint256) public scoreSpent;
 
-    /// @notice Beta launch mode. While true, functions gated by
-    ///         {SharedBase.onlyBetaMode} let a trusted admin stand in for the
-    ///         timelock on specific operational shortcuts (currently only
-    ///         {DefiInsurance.adminCorrectSettlement} — direct admin root
-    ///         correction without the two-step timelock dance). ONE-WAY: starts
-    ///         true at {initialize}, the timelock flips it off permanently via
-    ///         {endBetaMode}, and there is deliberately no re-enable — so the
-    ///         centralization can be removed before real volume but never secretly
-    ///         restored. It also gates every UUPS upgrade: ending beta permanently
-    ///         disables Registry, USD8, Treasury, and DefiInsurance upgrades. The
-    ///         pool beacon is separate Ownable infrastructure; governance must
-    ///         renounce its ownership separately if pool upgrades should also end.
+    // ─────────────────────────── System settings ───────────────────────────
+    /// @notice Enables UUPS upgrades and the direct admin settlement correction path.
+    /// @dev The timelock may disable beta mode once, permanently. Pool-beacon
+    ///      ownership is separate and must be renounced independently.
     bool public betaMode;
 
-    /// @notice Governance-approved commitment to the exact Nitro PCR0/PCR1/PCR2
-    ///         measurements allowed to sign settlements. Appended for upgrade safety.
+    /// @notice Governance-approved Nitro PCR commitment bound into incident-open
+    ///         and settlement signatures.
     bytes32 public teePcrHash;
 
     /// @notice Canonical USD8 token used throughout the protocol.
@@ -179,6 +148,33 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         contract while pulling tokens through another.
     mapping(address target => mapping(address spender => bool allowed)) public approvedSwapRoute;
 
+    /// @notice Global timing used by future insurance incidents.
+    struct IncidentTimingConfig {
+        uint64 phaseWindow;
+        uint64 maxReferenceBlockAge;
+    }
+
+    /// @notice Global timing used by future cover-pool exit requests.
+    struct ExitTimingConfig {
+        uint64 unstakeCooldown;
+        uint64 exitBatchInterval;
+    }
+
+    /// @notice Price-ratio policy used by the TEE before authorizing an incident open.
+    /// @dev The same TWAP duration is sampled immediately before and after the
+    ///      reference block. Ratios are insured-token units in the configured
+    ///      immediate underlying, never insured-token/USD.
+    struct IncidentOpenPriceConfig {
+        uint64 twapBlocks;
+        uint64 sampleStepBlocks;
+        uint16 minimumDropBps;
+    }
+
+    /// @dev Mutable protocol timing and incident-open configuration.
+    IncidentTimingConfig private _incidentTimingConfig;
+    ExitTimingConfig private _exitTimingConfig;
+    IncidentOpenPriceConfig private _incidentOpenPriceConfig;
+
     // ─────────────────────────── Errors / events ───────────────────────────
 
     error UnauthorizedTimelock(address caller);
@@ -197,6 +193,15 @@ contract Registry is Initializable, UUPSUpgradeable {
     error InvalidOracleStaleness();
     error InvalidAssetUsdFeed(address feed);
     error UpgradesPermanentlyDisabled();
+    error InvalidIncidentTimingConfig();
+    error InvalidExitTimingConfig();
+    error InvalidIncidentOpenPriceConfig();
+    error BoosterConfigAlreadySet();
+    error InvalidBoosterBoostBps();
+    error Usd8AlreadySet();
+    error TreasuryAlreadySet();
+    error SavingsVaultAlreadySet();
+    error InvalidProtocolFeeBps(uint256 bps);
 
     event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
     event MaxCoverPoolPayoutBpsSet(uint256 oldBps, uint256 newBps);
@@ -206,7 +211,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     event PoolRemoved(IERC20 indexed asset);
     event DefiInsuranceSet(address indexed oldModule, address indexed newModule);
     event ScoredTokenSet(IERC20 indexed token, uint128 rate, uint64 fromBlock);
-    event BoosterNFTSet(address indexed oldBooster, address indexed newBooster);
+    event BoosterConfigSet(address indexed collection, uint64 tokenId, uint16 boostBps);
     event ScoreSpentRecorded(address indexed account, uint256 amount, uint256 newTotal);
     event BetaModeEnded();
     event TeePcrHashSet(bytes32 indexed oldHash, bytes32 indexed newHash);
@@ -217,22 +222,15 @@ contract Registry is Initializable, UUPSUpgradeable {
     event AssetUsdFeedSet(IERC20 indexed asset, address indexed oldFeed, address indexed newFeed);
     event MaxOracleStalenessSet(uint64 oldStaleness, uint64 newStaleness);
     event SwapRouteSet(address indexed target, address indexed spender, bool allowed);
-
-    modifier onlyTimelock() {
-        _requireTimelock(msg.sender);
-        _;
-    }
-
-    modifier onlyAdminOrTimelock() {
-        _requireAdminOrTimelock(msg.sender);
-        _;
-    }
+    event IncidentTimingConfigSet(IncidentTimingConfig config);
+    event ExitTimingConfigSet(ExitTimingConfig config);
+    event IncidentOpenPriceConfigSet(IncidentOpenPriceConfig config);
+    event ProtocolFeeConfigSet(ProtocolFeeConfig config);
 
     /// @dev Reverts while an incident is active — topology must be stable for the
     ///      whole settlement, mirroring the old pool asset-list/curation freeze.
-    modifier notFrozen() {
+    function _requireNotFrozen() internal view {
         if (payoutIncidentActive()) revert Frozen();
-        _;
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -254,22 +252,98 @@ contract Registry is Initializable, UUPSUpgradeable {
         emit AdminSet(_admin, true);
         maxCoverPoolPayoutBps = 5000; // 50% default; timelock-tunable
         emit MaxCoverPoolPayoutBpsSet(0, 5000);
+        _protocolFeeConfig =
+            ProtocolFeeConfig({receiver: _admin, claimProtocolFeeShareBps: 2_000, reserveYieldFeeBps: 2_000});
         maxOracleStaleness = 36 hours;
         emit MaxOracleStalenessSet(0, 36 hours);
+        _incidentTimingConfig = IncidentTimingConfig({phaseWindow: 3 days, maxReferenceBlockAge: 43_200});
+        _exitTimingConfig = ExitTimingConfig({unstakeCooldown: 7 days, exitBatchInterval: 3 days});
+        _incidentOpenPriceConfig =
+            IncidentOpenPriceConfig({twapBlocks: 7_200, sampleStepBlocks: 300, minimumDropBps: 2_000});
         betaMode = true; // launch in beta; timelock ends it via {endBetaMode}
     }
 
-    /// @notice Permanently leave beta: admin shortcuts gated by
-    ///         {SharedBase.onlyBetaMode} stop working and those operations
-    ///         become timelock-only and every UUPS upgrade path is permanently
-    ///         disabled. Timelock only, ONE-WAY, and blocked during an incident.
-    function endBetaMode() external onlyTimelock notFrozen {
+    /// @notice Current timing for the next insurance incident.
+    function incidentTimingConfig() public view returns (IncidentTimingConfig memory config) {
+        config = _incidentTimingConfig;
+    }
+
+    /// @notice Current shared protocol fee destination and rates.
+    function protocolFeeConfig() public view returns (ProtocolFeeConfig memory config) {
+        config = _protocolFeeConfig;
+    }
+
+    /// @notice Atomically update the shared protocol fee destination and rates.
+    function setProtocolFeeConfig(ProtocolFeeConfig calldata config) external {
+        _requireAdminOrTimelock(msg.sender);
+        if (config.receiver == address(0)) revert ZeroAddress();
+        if (config.claimProtocolFeeShareBps > MAX_PROTOCOL_FEE_BPS) {
+            revert InvalidProtocolFeeBps(config.claimProtocolFeeShareBps);
+        }
+        if (config.reserveYieldFeeBps > MAX_PROTOCOL_FEE_BPS) {
+            revert InvalidProtocolFeeBps(config.reserveYieldFeeBps);
+        }
+        _protocolFeeConfig = config;
+        emit ProtocolFeeConfigSet(config);
+    }
+
+    /// @notice Current timing for future cover-pool exit requests.
+    function exitTimingConfig() public view returns (ExitTimingConfig memory config) {
+        config = _exitTimingConfig;
+    }
+
+    /// @notice Current insured-token/immediate-underlying price policy for incident opening.
+    function incidentOpenPriceConfig() public view returns (IncidentOpenPriceConfig memory config) {
+        config = _incidentOpenPriceConfig;
+    }
+
+    /// @notice Atomically update timing for future incidents.
+    function setIncidentTimingConfig(IncidentTimingConfig calldata config) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
+        if (
+            config.phaseWindow == 0 || config.maxReferenceBlockAge == 0
+                || config.maxReferenceBlockAge <= incidentOpenPriceConfig().twapBlocks
+        ) revert InvalidIncidentTimingConfig();
+        _incidentTimingConfig = config;
+        emit IncidentTimingConfigSet(config);
+    }
+
+    /// @notice Atomically update timing for future exit requests.
+    function setExitTimingConfig(ExitTimingConfig calldata config) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
+        if (config.unstakeCooldown == 0 || config.exitBatchInterval == 0) revert InvalidExitTimingConfig();
+        _exitTimingConfig = config;
+        emit ExitTimingConfigSet(config);
+    }
+
+    /// @notice Atomically update the TEE incident-opening price policy.
+    function setIncidentOpenPriceConfig(IncidentOpenPriceConfig calldata config) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
+        if (
+            config.twapBlocks == 0 || config.sampleStepBlocks == 0 || config.sampleStepBlocks > config.twapBlocks
+                || config.twapBlocks % config.sampleStepBlocks != 0 || config.twapBlocks / config.sampleStepBlocks < 2
+                || config.minimumDropBps == 0 || config.minimumDropBps >= BPS_DENOMINATOR
+                || config.twapBlocks >= incidentTimingConfig().maxReferenceBlockAge
+        ) revert InvalidIncidentOpenPriceConfig();
+        _incidentOpenPriceConfig = config;
+        emit IncidentOpenPriceConfigSet(config);
+    }
+
+    /// @notice Permanently disable UUPS upgrades and beta-only admin actions.
+    ///         Timelock only; blocked during an incident.
+    function endBetaMode() external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         betaMode = false;
         emit BetaModeEnded();
     }
 
     /// @dev Only the timelock can upgrade the Registry, and only during beta.
-    function _authorizeUpgrade(address) internal view override onlyTimelock {
+    function _authorizeUpgrade(address) internal view override {
+        _requireTimelock(msg.sender);
         if (!betaMode) revert UpgradesPermanentlyDisabled();
     }
 
@@ -277,14 +351,16 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     /// @notice Transfer the root timelock. Timelock only, single-step — verify the
     ///         address; a wrong one permanently loses governance of the system.
-    function setTimelock(address newTimelock) external onlyTimelock {
+    function setTimelock(address newTimelock) external {
+        _requireTimelock(msg.sender);
         if (newTimelock == address(0)) revert ZeroAddress();
         emit TimelockChanged(timelock, newTimelock);
         timelock = newTimelock;
     }
 
     /// @notice Add or remove an admin. Timelock only.
-    function setAdmin(address account, bool allowed) external onlyTimelock {
+    function setAdmin(address account, bool allowed) external {
+        _requireTimelock(msg.sender);
         if (account == address(0)) revert ZeroAddress();
         isAdmin[account] = allowed;
         emit AdminSet(account, allowed);
@@ -293,7 +369,8 @@ contract Registry is Initializable, UUPSUpgradeable {
     /// @notice Approve or revoke an aggregator execution-target / allowance-
     ///         spender pair used by strategies. Timelock only; admins may execute
     ///         swaps but cannot widen the contracts that receive calls or approvals.
-    function setSwapRoute(address target, address spender, bool allowed) external onlyTimelock {
+    function setSwapRoute(address target, address spender, bool allowed) external {
+        _requireTimelock(msg.sender);
         if (target == address(0) || spender == address(0)) revert ZeroAddress();
         approvedSwapRoute[target][spender] = allowed;
         emit SwapRouteSet(target, spender, allowed);
@@ -301,7 +378,9 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     /// @notice Set the exact enclave-code PCR commitment accepted by settlement.
     ///         Timelock-only and immutable while an incident is active.
-    function setTeePcrHash(bytes32 newHash) external onlyTimelock notFrozen {
+    function setTeePcrHash(bytes32 newHash) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         if (newHash == bytes32(0)) revert InvalidTeePcrHash();
         emit TeePcrHashSet(teePcrHash, newHash);
         teePcrHash = newHash;
@@ -309,29 +388,36 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     // ─────────────────────────── Canonical topology (timelock only) ───────────────────────────
 
-    /// @notice Set the canonical USD8 token. Timelock only.
-    function setUsd8(address newUsd8) external onlyTimelock {
+    /// @notice Permanently register the canonical USD8 token. Timelock only.
+    function setUsd8(address newUsd8) external {
+        _requireTimelock(msg.sender);
+        if (usd8 != address(0)) revert Usd8AlreadySet();
         if (newUsd8 == address(0)) revert ZeroAddress();
         emit Usd8Set(usd8, newUsd8);
         usd8 = newUsd8;
     }
 
-    /// @notice Set the active Treasury. Timelock only.
-    function setTreasury(address newTreasury) external onlyTimelock {
+    /// @notice Permanently register the canonical Treasury proxy. Timelock only.
+    function setTreasury(address newTreasury) external {
+        _requireTimelock(msg.sender);
+        if (treasury != address(0)) revert TreasuryAlreadySet();
         if (newTreasury == address(0)) revert ZeroAddress();
         emit TreasurySet(treasury, newTreasury);
         treasury = newTreasury;
     }
 
-    /// @notice Set the canonical sUSD8 savings vault. Timelock only.
-    function setSavingsVault(address newSavingsVault) external onlyTimelock {
+    /// @notice Permanently register the canonical sUSD8 savings vault. Timelock only.
+    function setSavingsVault(address newSavingsVault) external {
+        _requireTimelock(msg.sender);
+        if (savingsVault != address(0)) revert SavingsVaultAlreadySet();
         if (newSavingsVault == address(0)) revert ZeroAddress();
         emit SavingsVaultSet(savingsVault, newSavingsVault);
         savingsVault = newSavingsVault;
     }
 
     /// @notice Set the canonical USD8/USD price oracle. Timelock only.
-    function setUsd8PriceOracle(address newOracle) external onlyTimelock {
+    function setUsd8PriceOracle(address newOracle) external {
+        _requireTimelock(msg.sender);
         if (newOracle == address(0)) revert ZeroAddress();
         emit Usd8PriceOracleSet(usd8PriceOracle, newOracle);
         usd8PriceOracle = newOracle;
@@ -341,7 +427,9 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     /// @notice Set the canonical USD feed for a pool asset. Timelock only and
     ///         frozen during incidents so the open-block value is authoritative.
-    function setAssetUsdFeed(IERC20 asset, address newFeed) external onlyTimelock notFrozen {
+    function setAssetUsdFeed(IERC20 asset, address newFeed) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         if (address(asset) == address(0) || newFeed == address(0)) revert ZeroAddress();
         _validateAssetUsdFeed(newFeed);
         emit AssetUsdFeedSet(asset, assetUsdFeed[asset], newFeed);
@@ -350,7 +438,9 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     /// @notice Set the global maximum oracle age accepted by settlement. Timelock
     ///         only and frozen during incidents; zero would make every feed unusable.
-    function setMaxOracleStaleness(uint64 newStaleness) external onlyTimelock notFrozen {
+    function setMaxOracleStaleness(uint64 newStaleness) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         if (newStaleness == 0) revert InvalidOracleStaleness();
         emit MaxOracleStalenessSet(maxOracleStaleness, newStaleness);
         maxOracleStaleness = newStaleness;
@@ -358,7 +448,9 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     /// @notice Register a cover pool and its canonical USD feed atomically. Timelock
     ///         only; blocked while frozen. The asset is read from the pool itself.
-    function addPool(address pool, address usdFeed) external onlyTimelock notFrozen {
+    function addPool(address pool, address usdFeed) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         if (pool == address(0) || usdFeed == address(0)) revert ZeroAddress();
         _validateAssetUsdFeed(usdFeed);
         IERC20 asset = ICoverPool(pool).asset();
@@ -378,7 +470,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     function _validateAssetUsdFeed(address feed) internal view {
         if (feed.code.length == 0) revert InvalidAssetUsdFeed(feed);
         (bool decimalsOk, bytes memory decimalsData) = feed.staticcall(abi.encodeWithSignature("decimals()"));
-        if (!decimalsOk || decimalsData.length != 32 || abi.decode(decimalsData, (uint256)) > 77) {
+        if (!decimalsOk || decimalsData.length != 32 || abi.decode(decimalsData, (uint256)) > 18) {
             revert InvalidAssetUsdFeed(feed);
         }
         (bool roundOk, bytes memory roundData) = feed.staticcall(abi.encodeWithSignature("latestRoundData()"));
@@ -388,10 +480,11 @@ contract Registry is Initializable, UUPSUpgradeable {
         if (answer <= 0 || updatedAt == 0 || answeredInRound < roundId) revert InvalidAssetUsdFeed(feed);
     }
 
-    /// @notice Deregister a cover pool by its address (asset read from the pool).
-    ///         Timelock only; blocked while frozen. Swap-and-pop — payout rows
-    ///         realign off the openBlock snapshot, not live order.
-    function removePool(address pool) external onlyTimelock notFrozen {
+    /// @notice Remove a cover pool with swap-and-pop. Timelock only; blocked during
+    ///         incidents. Existing incidents retain their stored pool order.
+    function removePool(address pool) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         IERC20 asset = ICoverPool(pool).asset();
         if (coverPool[asset] != pool) revert PoolNotFound(asset);
         coverPool[asset] = address(0);
@@ -409,22 +502,14 @@ contract Registry is Initializable, UUPSUpgradeable {
         emit PoolRemoved(asset);
     }
 
-    /// @notice Set the single insurance payout module. Timelock only; blocked while
-    ///         frozen (never swap the module mid-incident). A nonzero candidate must
-    ///         also report no active incident, so installation cannot unexpectedly
-    ///         freeze the system. Setting it to zero clears the module, which also
-    ///         unfreezes the system — the emergency brake for a module stuck reporting
-    ///         an incident forever.
-    /// @dev    Accepted side-effect (L7): because {frozen} is delegated to the
-    ///         module, clearing it to zero mid-incident flips payoutIncidentActive() false and
-    ///         reopens stake/completeUnstake — it can interrupt a live settlement.
-    ///         This is intentional and unavoidable: the freeze state lives inside
-    ///         the module, so a stuck/compromised module could otherwise lock every
-    ///         pool forever with no escape. It is a trusted, timelock-delayed,
-    ///         transparent emergency lever, not a routine control.
-    function setDefiInsurance(address newModule) external onlyTimelock {
-        // Clearing to zero is the emergency brake and MUST work even if the
-        // current module reverts (or is stuck non-zero) in activeIncidentId().
+    /// @notice Set the insurance payout module. Timelock only.
+    /// @dev A nonzero module must report no active incident and cannot replace an
+    ///      active module. Setting zero is an emergency escape that removes the
+    ///      module's system freeze and blocks further settlement, correction, payout,
+    ///      score writes, and finalization. Unresolved claimants retain recovery exits.
+    function setDefiInsurance(address newModule) external {
+        _requireTimelock(msg.sender);
+        // Clearing must work even if the current module's activeIncidentId() reverts.
         if (newModule != address(0)) {
             if (payoutIncidentActive()) revert Frozen();
             uint256 candidateIncidentId = IDefiInsurance(newModule).activeIncidentId();
@@ -434,21 +519,15 @@ contract Registry is Initializable, UUPSUpgradeable {
         defiInsurance = newModule;
     }
 
-    /// @notice Set a token's insurance-score `rate` (score per whole token per block,
-    ///         1e18-scaled), effective from THIS block onward. Timelock only; frozen
-    ///         while an incident is active. APPEND-ONLY: each call adds a segment at a
-    ///         block strictly after that token's latest point, so a rate change never
-    ///         rewrites already-accrued score — the settler integrates each historical
-    ///         segment at its own rate. The FIRST call for a token starts its scoring
-    ///         (and registers it in {scoredTokenList} permanently); a call with
-    ///         `rate == 0` turns scoring off from here — there is no separate remove.
-    /// @dev Token-curation requirement (audit L-02): generic historical replay supports
-    ///      only non-rebasing ERC-20s whose every balance change is represented by a
-    ///      canonical `Transfer` event with the actual balance delta. Use a reviewed
-    ///      token-specific snapshot/adapter instead for any other balance semantics.
+    /// @notice Append a token scoring rate effective from the current block. Timelock only.
+    ///         A zero rate stops future accrual; history and token enumeration remain.
+    /// @dev Generic replay supports only non-rebasing ERC-20s whose balance changes
+    ///      are fully represented by standard `Transfer` events.
     /// @param token  Scored ERC20 (e.g. USD8, sUSD8).
     /// @param rate   New score-per-whole-token-per-block, 1e18-scaled (0 = off).
-    function setScoredToken(IERC20 token, uint128 rate) external onlyTimelock notFrozen {
+    function setScoredToken(IERC20 token, uint128 rate) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         if (address(token) == address(0)) revert ZeroAddress();
         RatePoint[] storage pts = scoredRates[token];
         uint64 fromBlock = uint64(block.number);
@@ -464,22 +543,23 @@ contract Registry is Initializable, UUPSUpgradeable {
         emit ScoredTokenSet(token, rate, fromBlock);
     }
 
-    /// @notice Set the canonical booster NFT collection. Timelock only; frozen-gated.
-    ///         Zero disables future commits.
-    function setBoosterNFT(address newBooster) external onlyTimelock notFrozen {
-        emit BoosterNFTSet(boosterNFT, newBooster);
-        boosterNFT = newBooster;
+    /// @notice Permanently configure the canonical booster collection, token id, and
+    ///         score boost per unit. This can succeed exactly once.
+    function setBoosterConfig(address collection, uint64 tokenId, uint16 boostBps) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
+        if (collection == address(0)) revert ZeroAddress();
+        if (boostBps == 0) revert InvalidBoosterBoostBps();
+        if (boosterConfig.collection != address(0)) revert BoosterConfigAlreadySet();
+        boosterConfig = BoosterConfig({collection: collection, tokenId: tokenId, boostBps: boostBps});
+        emit BoosterConfigSet(collection, tokenId, boostBps);
     }
 
-    /// @notice Update the per-incident payout cap. Timelock only — it governs how
-    ///         much of a pool a single incident may drain, a risk parameter rather
-    ///         than a fast operational lever (and unlike pause it has no deny-only
-    ///         safe direction: lowering suppresses legitimate payouts, raising
-    ///         weakens LP protection), so it is timelock-gated like every other
-    ///         economic setter. Blocked while an incident is active so the cap a
-    ///         settlement is checked against can't shift mid-flight. Strictly
-    ///         between 0 and {BPS_DENOMINATOR}.
-    function setMaxCoverPoolPayoutBps(uint256 newBps) external onlyTimelock notFrozen {
+    /// @notice Set the per-incident pool payout cap. Timelock only; blocked during
+    ///         an incident. Must be above zero and below {BPS_DENOMINATOR}.
+    function setMaxCoverPoolPayoutBps(uint256 newBps) external {
+        _requireTimelock(msg.sender);
+        _requireNotFrozen();
         if (newBps == 0 || newBps >= BPS_DENOMINATOR) revert InvalidMaxCoverPoolPayoutBps(newBps);
         emit MaxCoverPoolPayoutBpsSet(maxCoverPoolPayoutBps, newBps);
         maxCoverPoolPayoutBps = newBps;
@@ -487,12 +567,8 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     // ─────────────────────────── Insurance-score recording (payout module) ───────────────────────────
 
-    /// @notice Record insurance score `account` consumed on a finalized claim. Only
-    ///         the registered payout module ({defiInsurance}) may call — it passes the
-    ///         TEE-committed spend from {DefiInsurance.finalizeClaim}. Kept as a single
-    ///         cumulative total here so the figure survives a module swap and is read
-    ///         with one view. NOT validated against earned score (which is off-chain);
-    ///         this mirrors the module's authoritative number, it doesn't gate on it.
+    /// @notice Add finalized score spending to an account's cumulative total.
+    /// @dev Only the registered payout module may call. Earned score is not checked on-chain.
     function recordScoreSpent(address account, uint256 amount) external {
         if (msg.sender != defiInsurance) revert UnauthorizedModule(msg.sender);
         uint256 newTotal = scoreSpent[account] + amount;
@@ -502,24 +578,19 @@ contract Registry is Initializable, UUPSUpgradeable {
 
     // ─────────────────────────── Pause (admin or timelock) ───────────────────────────
 
-    /// @notice Set the pause flag for one target contract. Admin or timelock.
-    /// @dev    INTENTIONALLY NOT frozen-gated (unlike topology setters): pause is
-    ///         the fast admin emergency lever and MUST work during an active
-    ///         incident — e.g. to halt a pool or the payout module if something
-    ///         goes wrong mid-settlement. The accepted trade-off (audit C4) is that
-    ///         this same power can pause a pool mid-incident and thereby deny an
-    ///         already-validated, dispute-survived payout (payClaim is whenNotPaused);
-    ///         claimants then recover escrow via withdrawNonFinalizedClaim, and an
-    ///         admin can unpause to let finalization resume. It requires a trusted
-    ///         admin key — griefing at worst, never theft. See {SingleAssetCoverPool.payClaim}.
-    function setPaused(address target, bool p) external onlyAdminOrTimelock {
+    /// @notice Set one contract's pause flag. Admin or timelock.
+    /// @dev Pause remains available during incidents. Pausing a pool can delay payouts;
+    ///      after the payout window, claims can resolve without payment.
+    function setPaused(address target, bool p) external {
+        _requireAdminOrTimelock(msg.sender);
         paused[target] = p;
         emit PausedSet(target, p);
     }
 
     /// @notice Set the pause flag for many targets at once — a one-tx system-wide
     ///         halt (or unhalt). Admin or timelock.
-    function setPausedBatch(address[] calldata targets, bool p) external onlyAdminOrTimelock {
+    function setPausedBatch(address[] calldata targets, bool p) external {
+        _requireAdminOrTimelock(msg.sender);
         for (uint256 i = 0; i < targets.length; i++) {
             paused[targets[i]] = p;
             emit PausedSet(targets[i], p);
@@ -586,9 +657,7 @@ contract Registry is Initializable, UUPSUpgradeable {
         if (paused[target]) revert Paused();
     }
 
-    // Single source of truth for each check: the {onlyTimelock}/{onlyAdminOrTimelock}
-    // modifiers (used by Registry's own functions) and the external require*
-    // (called cross-contract by {SharedBase} in the other contracts) both route here.
+    // Registry setters and SharedBase's external checks share these helpers.
     function _requireTimelock(address caller) internal view {
         if (caller != timelock) revert UnauthorizedTimelock(caller);
     }

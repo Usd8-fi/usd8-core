@@ -74,7 +74,7 @@ contract RegistryTopologyHandler is Test {
     uint256 public ghostMaxPayoutBps = 5_000;
     uint64 public ghostMaxOracleStaleness = 36 hours;
     bytes32 public ghostPcrHash;
-    address public ghostBooster;
+
     address public ghostUsd8;
     address public ghostTreasury;
     address public ghostSavingsVault;
@@ -162,7 +162,7 @@ contract RegistryTopologyHandler is Test {
         successfulModuleTransitions++;
     }
 
-    function setRiskConfig(uint256 bpsSeed, uint64 stalenessSeed, bytes32 pcrSeed, address boosterSeed) external {
+    function setRiskConfig(uint256 bpsSeed, uint64 stalenessSeed, bytes32 pcrSeed) external {
         if (registry.payoutIncidentActive()) return;
         uint256 bps = bound(bpsSeed, 1, 9_999);
         uint64 staleness = uint64(bound(stalenessSeed, 1, type(uint64).max));
@@ -171,12 +171,10 @@ contract RegistryTopologyHandler is Test {
         registry.setMaxCoverPoolPayoutBps(bps);
         registry.setMaxOracleStaleness(staleness);
         registry.setTeePcrHash(pcr);
-        registry.setBoosterNFT(boosterSeed);
         vm.stopPrank();
         ghostMaxPayoutBps = bps;
         ghostMaxOracleStaleness = staleness;
         ghostPcrHash = pcr;
-        ghostBooster = boosterSeed;
     }
 
     function setCanonicalTopology(address usd8Seed, address treasurySeed, address savingsSeed, address oracleSeed)
@@ -187,14 +185,16 @@ contract RegistryTopologyHandler is Test {
         address s = _nonzero(savingsSeed, 0x1003);
         address o = _nonzero(oracleSeed, 0x1004);
         vm.startPrank(currentTimelock);
-        registry.setUsd8(u);
-        registry.setTreasury(t);
-        registry.setSavingsVault(s);
+        if (ghostUsd8 == address(0)) {
+            registry.setUsd8(u);
+            registry.setTreasury(t);
+            registry.setSavingsVault(s);
+            ghostUsd8 = u;
+            ghostTreasury = t;
+            ghostSavingsVault = s;
+        }
         registry.setUsd8PriceOracle(o);
         vm.stopPrank();
-        ghostUsd8 = u;
-        ghostTreasury = t;
-        ghostSavingsVault = s;
         ghostPriceOracle = o;
     }
 
@@ -256,7 +256,7 @@ contract RegistryTopologyHandler is Test {
         uint256 bpsBefore = registry.maxCoverPoolPayoutBps();
         uint64 stalenessBefore = registry.maxOracleStaleness();
         bytes32 pcrBefore = registry.teePcrHash();
-        address boosterBefore = registry.boosterNFT();
+
         Registry.RatePoint[] memory history = registry.getScoredRateHistory(tokens[0]);
         uint256 historyBefore = history.length;
         bool betaBefore = registry.betaMode();
@@ -268,8 +268,7 @@ contract RegistryTopologyHandler is Test {
         registry.setMaxOracleStaleness(stalenessBefore == 1 ? 2 : 1);
         vm.expectRevert(Registry.Frozen.selector);
         registry.setTeePcrHash(pcrBefore == bytes32(uint256(1)) ? bytes32(uint256(2)) : bytes32(uint256(1)));
-        vm.expectRevert(Registry.Frozen.selector);
-        registry.setBoosterNFT(address(0xF002));
+
         vm.expectRevert(Registry.Frozen.selector);
         registry.setScoredToken(tokens[0], 123);
         if (betaBefore) {
@@ -281,7 +280,7 @@ contract RegistryTopologyHandler is Test {
         assertEq(registry.maxCoverPoolPayoutBps(), bpsBefore, "frozen cap mutation");
         assertEq(registry.maxOracleStaleness(), stalenessBefore, "frozen staleness mutation");
         assertEq(registry.teePcrHash(), pcrBefore, "frozen PCR mutation");
-        assertEq(registry.boosterNFT(), boosterBefore, "frozen booster mutation");
+
         Registry.RatePoint[] memory historyAfter = registry.getScoredRateHistory(tokens[0]);
         assertEq(historyAfter.length, historyBefore, "frozen score mutation");
         assertEq(registry.betaMode(), betaBefore, "frozen beta mutation");
@@ -333,8 +332,10 @@ contract RegistryTopologyInvariantTest is StdInvariant, Test {
             feeds[i] = new RegistryInvariantFeed();
         }
 
-        vm.prank(TIMELOCK);
+        vm.startPrank(TIMELOCK);
+        registry.setBoosterConfig(address(0xB0057), 1, 100);
         registry.setDefiInsurance(address(module));
+        vm.stopPrank();
 
         handler = new RegistryTopologyHandler(registry, module, TIMELOCK, ADMIN, MANAGED_ADMIN, tokens, pools, feeds);
 
@@ -433,7 +434,10 @@ contract RegistryTopologyInvariantTest is StdInvariant, Test {
         assertEq(registry.maxOracleStaleness(), handler.ghostMaxOracleStaleness());
         assertGt(registry.maxOracleStaleness(), 0);
         assertEq(registry.teePcrHash(), handler.ghostPcrHash());
-        assertEq(registry.boosterNFT(), handler.ghostBooster());
+        (address boosterCollection, uint64 boosterId, uint16 boosterBoostBps) = registry.boosterConfig();
+        assertEq(boosterCollection, address(0xB0057));
+        assertEq(boosterId, 1);
+        assertEq(boosterBoostBps, 100);
     }
 
     function invariant_pauseStateMatchesGhost() public view {

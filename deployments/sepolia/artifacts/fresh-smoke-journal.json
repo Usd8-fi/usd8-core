@@ -1,0 +1,60 @@
+{
+  "artifactSha256": "e964b0431681a1316c66eabdbaff5642300f1f7c75cc252c1f1492fb94390cb8",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 92,
+      "label": "approve(address,uint256)",
+      "transactionHash": "0x02dd9cc4bd07955399dc7a6b2ce1914127b04d37d78c535448cfd7f2f516d41f",
+      "status": "confirmed",
+      "blockNumber": 11377248,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 93,
+      "label": "mintUSD8(uint256)",
+      "transactionHash": "0x99d69213e76385291af6e76deea2bf2e7e70cb7e29c781387c96995cc0046b34",
+      "status": "confirmed",
+      "blockNumber": 11377251,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 94,
+      "label": "approve(address,uint256)",
+      "transactionHash": "0xe869ee039978f446c4a9535e94b962d9ebb1927e091359d6d6b4411102593c9c",
+      "status": "confirmed",
+      "blockNumber": 11377252,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 95,
+      "label": "deposit(uint256,address)",
+      "transactionHash": "0xeff289364889c4b886993c9bbd00fd2a76a9ea6f2d52a963970c858a2870cc67",
+      "status": "confirmed",
+      "blockNumber": 11377254,
+      "contractAddress": null
+    },
+    {
+      "index": 4,
+      "nonce": 96,
+      "label": "redeem(uint256,address,address)",
+      "transactionHash": "0x7629e6a505d559a6a6e2a9ec9b4f50f9b396e45a6e36612489f3226cc10d9943",
+      "status": "confirmed",
+      "blockNumber": 11377255,
+      "contractAddress": null
+    },
+    {
+      "index": 5,
+      "nonce": 97,
+      "label": "redeemUSD8(uint256,uint256)",
+      "transactionHash": "0x26526329f270ed65e15decb7a525bee1cd0512b82ed4c98a36d929477de759ad",
+      "status": "confirmed",
+      "blockNumber": 11377257,
+      "contractAddress": null
+    }
+  ]
+}

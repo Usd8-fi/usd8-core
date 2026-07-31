@@ -68,6 +68,21 @@ contract FeeSkimVault is ERC20, ERC4626 {
     }
 }
 
+/// @dev Vault whose asset-denominated withdrawal burns one extra share while
+///      share-denominated redemption follows standard ERC-4626 semantics.
+contract WithdrawalFeeVault is ERC20, ERC4626 {
+    constructor(IERC20 asset_) ERC20("Withdrawal Fee Vault", "WFEE") ERC4626(asset_) {}
+
+    function decimals() public view override(ERC20, ERC4626) returns (uint8) {
+        return super.decimals();
+    }
+
+    function withdraw(uint256 assets, address receiver, address owner) public override returns (uint256 shares) {
+        shares = previewWithdraw(assets);
+        _withdraw(msg.sender, receiver, owner, assets, shares + 1);
+    }
+}
+
 contract MockSwapRouter {
     using SafeERC20 for IERC20;
 
@@ -147,6 +162,25 @@ contract ERC4626StrategyTest is Test {
         vm.prank(TREASURY);
         vm.expectRevert(abi.encodeWithSelector(ERC4626Strategy.DepositValueShort.selector, 100e6, 90e6));
         strategy.deploy(100e6);
+    }
+
+    function test_WithdrawBurnsExactlyPreviewedShares() public {
+        WithdrawalFeeVault vault = new WithdrawalFeeVault(IERC20(MAINNET_USDC));
+        ERC4626Strategy strategy = new ERC4626Strategy(TREASURY, registry, vault);
+
+        usdc.mint(address(strategy), 100e6);
+        vm.prank(TREASURY);
+        strategy.deploy(100e6);
+
+        uint256 amount = 50e6;
+        uint256 expectedShares = vault.previewWithdraw(amount);
+        uint256 sharesBefore = vault.balanceOf(address(strategy));
+
+        vm.prank(TREASURY);
+        strategy.withdraw(amount);
+
+        assertEq(sharesBefore - vault.balanceOf(address(strategy)), expectedShares);
+        assertGe(usdc.balanceOf(TREASURY), amount);
     }
 
     function test_AdminCanSwapRewardToUSDCAndSendItToTreasury() public {

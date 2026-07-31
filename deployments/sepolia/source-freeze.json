@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "algorithm": "sha256(concat(u32be(pathLen),path,u64be(fileLen),fileBytes)) over lexicographically sorted src/**/*.sol",
+  "sourceRoot": "deployments/sepolia/source",
+  "recoveredSources": [
+    {
+      "path": "src/DefiInsurance.sol",
+      "sourcifyAddress": "0x0fF406C9FE9359A0F0C1343625E8A160b0aE0d15",
+      "match": "exact_match",
+      "verifiedAt": "2026-07-29T18:39:20Z"
+    },
+    {
+      "path": "src/Registry.sol",
+      "sourcifyAddress": "0x3928643211920936330be418F9573a2485004B49",
+      "match": "exact_match",
+      "verifiedAt": "2026-07-29T18:38:51Z"
+    },
+    {
+      "path": "src/Treasury.sol",
+      "sourcifyAddress": "0xAf4fF0C92bee40299723643534Cd1e8D89F50087",
+      "match": "exact_match",
+      "verifiedAt": "2026-07-29T18:39:05Z"
+    }
+  ],
+  "files": [
+    {
+      "path": "src/DefiInsurance.sol",
+      "sha256": "e3aba12a089b174ac06f21ddf33bb2c8a3b00668cf698cbb08a72dba8419a662",
+      "bytes": 45155
+    },
+    {
+      "path": "src/Registry.sol",
+      "sha256": "d9c33c5d917ba2cad9c6016e9f5684a9dc50723a7be16ff8031a6ae39486612f",
+      "bytes": 30920
+    },
+    {
+      "path": "src/SharedBase.sol",
+      "sha256": "a916198847e8340da12555ee1430f8bc6328630435b1cb4dd27b7d7e839b00ce",
+      "bytes": 6370
+    },
+    {
+      "path": "src/SingleAssetCoverPool.sol",
+      "sha256": "9524efa4e4f59401722affef256b1ea051e586cde11f7ca7a53a743db684518b",
+      "bytes": 28253
+    },
+    {
+      "path": "src/Treasury.sol",
+      "sha256": "645a70359def2a9637e95abf6c4ffd874ce85b0d91ec6a1bd06a258fe3022731",
+      "bytes": 29852
+    },
+    {
+      "path": "src/USD8.sol",
+      "sha256": "cdfa06a4b87b8b7f5b8374911c7d7315aa5f9cfb806f9250288e53067dbe77a6",
+      "bytes": 3989
+    },
+    {
+      "path": "src/adapters/USD8SavingsAdapter.sol",
+      "sha256": "4459666927f6ebc945bbffa0bc81557d35d3be664e75936603c759a315204f63",
+      "bytes": 6305
+    },
+    {
+      "path": "src/deployment/USD8SavingsBootstrap.sol",
+      "sha256": "40eff36da3a8e8559c7176720af5a63e16eb59b67f34a249a9b8109b412e2383",
+      "bytes": 4044
+    },
+    {
+      "path": "src/interfaces/IProfitDistributionReceiver.sol",
+      "sha256": "8cb4ea2e10e424d1130b363cc065794de22533060ee6b08b330c620cf8ac518a",
+      "bytes": 706
+    },
+    {
+      "path": "src/interfaces/IStrategy.sol",
+      "sha256": "9cfa5f71c9ac3635d474d928533c54df5ab5aaed93aeb0d23991c3ea39f9e0fb",
+      "bytes": 1266
+    },
+    {
+      "path": "src/oracles/USD8PriceOracle.sol",
+      "sha256": "9e40f29b58ced4a9887a33e6d6fcc865881e8d9f9451661d928d61e6ae6c2dda",
+      "bytes": 4756
+    },
+    {
+      "path": "src/strategies/ERC4626Strategy.sol",
+      "sha256": "7e51d6fe0acbdf3704f6676b54b6ad30b976d89fea673e31435c71ba23cf490c",
+      "bytes": 5596
+    },
+    {
+      "path": "src/strategies/StrategyBase.sol",
+      "sha256": "91db1df08ca5de9978a2196e05fb60534e6da61d49be7233c23b7f0bbda8c84a",
+      "bytes": 6878
+    }
+  ],
+  "rootDigest": "e631449474aebbd21c9a9d5018b3ab7e9de53729a91cceb27fe1c873a53027ea"
+}

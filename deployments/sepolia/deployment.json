@@ -1,59 +1,594 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "status": "canonical-public-staging",
   "network": "sepolia",
   "chainId": 11155111,
-  "environment": "public-staging",
-  "deployer": "0xB2E999D531D45a9115dA7706adFc651999f3c1F1",
-  "completedAt": "2026-07-22T18:03:48Z",
-  "completedAtBlock": 11328318,
-  "completedAtBlockHash": "0x30538541a2fd0e7dcab6ce0f34f92a81b7e9e19085cadcaeb2cb4cc38f4ee9c5",
-  "transactions": {
-    "dependencies": "0xd8a190103fdb275fb95a0632fae2cc3349d26dda401551cf8b01e44cca01c744",
-    "timelock": "0x8181586cb92df4089f84656adca31ea546a9a9966ef2f038d3fea028145aa6b9",
-    "systemFirst": "0xad5a22048149afe5ae4bbe06bd3fedaa340ed5b86d2c6b934bb3b7b1190be28e",
-    "systemFinal": "0x3282512ec6d7bfae294f486b8f5239d8e53253dbe7734700732d95eef645c4ad"
+  "deploymentKind": "fresh-core-stack",
+  "deployer": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+  "governanceAdmin": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+  "completedAt": "2026-07-29T18:30:48Z",
+  "completedAtBlock": 11377257,
+  "completedAtBlockHash": "0xe09054f3a85b23f59f1c4753c76af610dde80db6d2d76518bb9be9f2982dadd4",
+  "sourceFreeze": {
+    "manifest": "deployments/sepolia/source-freeze.json",
+    "rootDigest": "e631449474aebbd21c9a9d5018b3ab7e9de53729a91cceb27fe1c873a53027ea",
+    "files": 13
+  },
+  "artifacts": {
+    "deployment": {
+      "path": "deployments/sepolia/artifacts/fresh-system.json",
+      "sha256": "b44f9a10658ea3cfccc7287f799740a4d00b53bafd0e37ce8824c409cb770fe4",
+      "nonceRange": [
+        53,
+        91
+      ],
+      "receipts": [
+        {
+          "index": 0,
+          "nonce": 53,
+          "label": "Registry",
+          "transactionHash": "0xcdeb5219a2b79c2a8d16a8d1fb2b87e25fd432ffa0bab59648704a1764e1b007",
+          "status": "confirmed",
+          "blockNumber": 11377179,
+          "contractAddress": "0x3928643211920936330be418f9573a2485004b49"
+        },
+        {
+          "index": 1,
+          "nonce": 54,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x5fc7c8cd662a8ba0b55507abbf67cbc076800d03da37443a8acbb3580da7f726",
+          "status": "confirmed",
+          "blockNumber": 11377180,
+          "contractAddress": "0xe2a18c8327e684f66cb5532a11e7dd4a26776f87"
+        },
+        {
+          "index": 2,
+          "nonce": 55,
+          "label": "USD8",
+          "transactionHash": "0x6b6277e0ff661782c0a2f9ea74d039dc369840f5858258baac4c9ab55224c750",
+          "status": "confirmed",
+          "blockNumber": 11377181,
+          "contractAddress": "0x9f234eda223dc3014722578576d8fb2c54dd01d2"
+        },
+        {
+          "index": 3,
+          "nonce": 56,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xabc90d26980e0eadfc03a4e4c2621db695b7e81c42dcabdcbd7fa25a2f3391ca",
+          "status": "confirmed",
+          "blockNumber": 11377183,
+          "contractAddress": "0x5dd83050355646b8d24c99942a615cbbd2957a3d"
+        },
+        {
+          "index": 4,
+          "nonce": 57,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x702291a0aad00e60b794a39ef4c2e6883e17899ac67f4b2c2bcf09df9ec46526",
+          "status": "confirmed",
+          "blockNumber": 11377184,
+          "contractAddress": null
+        },
+        {
+          "index": 5,
+          "nonce": 58,
+          "label": "Treasury",
+          "transactionHash": "0xa590ee2de756d37ad7582a3c1fcf858178481185e2a5b7008380bb0e1acc0ef7",
+          "status": "confirmed",
+          "blockNumber": 11377186,
+          "contractAddress": "0xaf4ff0c92bee40299723643534cd1e8d89f50087"
+        },
+        {
+          "index": 6,
+          "nonce": 59,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x995e077235a986d127ccb862b5be1e57902e99688b61fd9d97e9e11c7eb49bb9",
+          "status": "confirmed",
+          "blockNumber": 11377187,
+          "contractAddress": "0x71e5fde1aba9d252526f531d74d107e8dc6d6d3a"
+        },
+        {
+          "index": 7,
+          "nonce": 60,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xa15c3f3ea978c56fb9253cbbb7a513cbe6d70549463becd467f35d7b006bfa94",
+          "status": "confirmed",
+          "blockNumber": 11377188,
+          "contractAddress": null
+        },
+        {
+          "index": 8,
+          "nonce": 61,
+          "label": "USD8SavingsBootstrap",
+          "transactionHash": "0x25a9f81f8d237b04d061f591353332d82a24c6bfcf5d8b9150e738507922903a",
+          "status": "confirmed",
+          "blockNumber": 11377190,
+          "contractAddress": "0xe39c6b96c41177ec9ecd37a0515ad78554a504ae"
+        },
+        {
+          "index": 9,
+          "nonce": 62,
+          "label": "transfer(address,uint256)",
+          "transactionHash": "0x673addedbec229d15b079385e82ff6aea0baae37fea1fa6a25fd6f8121ef967a",
+          "status": "confirmed",
+          "blockNumber": 11377191,
+          "contractAddress": null
+        },
+        {
+          "index": 10,
+          "nonce": 63,
+          "label": "USD8SavingsBootstrap",
+          "transactionHash": "0x0631c3f14f1fad655c5a1dc3c4d66dc77114fa2a4247298b4235e3f5a503f7a9",
+          "status": "confirmed",
+          "blockNumber": 11377192,
+          "contractAddress": null
+        },
+        {
+          "index": 11,
+          "nonce": 64,
+          "label": "SingleAssetCoverPool",
+          "transactionHash": "0xe9fd077d41fcfe43d4653aca0129a0dd605f515b4fb9107f7479952cd08d9858",
+          "status": "confirmed",
+          "blockNumber": 11377193,
+          "contractAddress": "0x2a1f0c53172a46faf41b7034dd6001922dca3f43"
+        },
+        {
+          "index": 12,
+          "nonce": 65,
+          "label": "UpgradeableBeacon",
+          "transactionHash": "0x68544a131d57b726ff4ac6cda887e03d71b122b3f9d14c12727bc2f34eb2f7e7",
+          "status": "confirmed",
+          "blockNumber": 11377195,
+          "contractAddress": "0x8c1a8522d5c5b40db64e41b1cebf7f3ea40b7d48"
+        },
+        {
+          "index": 13,
+          "nonce": 66,
+          "label": "BeaconProxy",
+          "transactionHash": "0x18fb962df11b026151eae5ca49746d51be38b13dad0b9360df196405d1c8ac12",
+          "status": "confirmed",
+          "blockNumber": 11377200,
+          "contractAddress": "0xca1db96b39c9c8748e59ab167cf6e7ad5bad1d54"
+        },
+        {
+          "index": 14,
+          "nonce": 67,
+          "label": "approve(address,uint256)",
+          "transactionHash": "0x5a0718cd7195c728eae7abe0518ae98e3dba4c03daee49db3d5dcdc4eb3eb785",
+          "status": "confirmed",
+          "blockNumber": 11377201,
+          "contractAddress": null
+        },
+        {
+          "index": 15,
+          "nonce": 68,
+          "label": "BeaconProxy",
+          "transactionHash": "0x2b159af14c9b65a023fd281d85854824eb829ec2cb9563dc3e7efb4da7fce426",
+          "status": "confirmed",
+          "blockNumber": 11377202,
+          "contractAddress": null
+        },
+        {
+          "index": 16,
+          "nonce": 69,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x222b6d99ce370bdefa32752d5eeb506b7c5056273a1befd921a45f967920e3e0",
+          "status": "confirmed",
+          "blockNumber": 11377203,
+          "contractAddress": null
+        },
+        {
+          "index": 17,
+          "nonce": 70,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xa6f1bfbc4bb1181dff4dbc6314e4e6a4da98b9c3820b7a8039f1b6e2c688a3c2",
+          "status": "confirmed",
+          "blockNumber": 11377204,
+          "contractAddress": null
+        },
+        {
+          "index": 18,
+          "nonce": 71,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xa5598fe09f7d85e86fdd40824da512dd46db621515f3d97f6fe0fa6044343747",
+          "status": "confirmed",
+          "blockNumber": 11377206,
+          "contractAddress": null
+        },
+        {
+          "index": 19,
+          "nonce": 72,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xf2de76066ec04feb584c3ff71bcb07c45458caf7fce131a0d80bb7521d1df0f3",
+          "status": "confirmed",
+          "blockNumber": 11377207,
+          "contractAddress": null
+        },
+        {
+          "index": 20,
+          "nonce": 73,
+          "label": "DefiInsurance",
+          "transactionHash": "0xfb2df34a722292abf0203154c00e5e5de2a327e604656806cc060afee354f675",
+          "status": "confirmed",
+          "blockNumber": 11377209,
+          "contractAddress": "0x0ff406c9fe9359a0f0c1343625e8a160b0ae0d15"
+        },
+        {
+          "index": 21,
+          "nonce": 74,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x68d6e1f3bc0cb2e05333ab2a1937957ecdc01d0edba5e4061de3ec287f741e10",
+          "status": "confirmed",
+          "blockNumber": 11377210,
+          "contractAddress": "0xb19108345ef9fe1e6ad65bbbce2318d384e085c5"
+        },
+        {
+          "index": 22,
+          "nonce": 75,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xde5a023c40e653d5f8e2da080bdffa79411f93df53dbff84ae39726475d8b714",
+          "status": "confirmed",
+          "blockNumber": 11377211,
+          "contractAddress": null
+        },
+        {
+          "index": 23,
+          "nonce": 76,
+          "label": "USD8PriceOracle",
+          "transactionHash": "0x67050ba1c0d53385f67b9d51b897e8ab95e7064b2ec29d261bfecf31a410c8e9",
+          "status": "confirmed",
+          "blockNumber": 11377213,
+          "contractAddress": "0x4c6ddbef1ace44b1a4a46d2199652c5c26abb9f5"
+        },
+        {
+          "index": 24,
+          "nonce": 77,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xb6d2b96390299aa50008b420960d0326e099eb7c106217ddfdbd98494cf86db5",
+          "status": "confirmed",
+          "blockNumber": 11377214,
+          "contractAddress": null
+        },
+        {
+          "index": 25,
+          "nonce": 78,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x7f1158352e589e4f045d60609b089cac4b7f15608241751d348556858e8876bd",
+          "status": "confirmed",
+          "blockNumber": 11377215,
+          "contractAddress": null
+        },
+        {
+          "index": 26,
+          "nonce": 79,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x3f800b7e3c1eb3b6d180828551fceb002fda383fe55b7559c0f724f32148e0c0",
+          "status": "confirmed",
+          "blockNumber": 11377217,
+          "contractAddress": null
+        },
+        {
+          "index": 27,
+          "nonce": 80,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x14843af5a2ca93f7e87f6eba1536d5a0b30e91ca13303975044b65995e5a9c2f",
+          "status": "confirmed",
+          "blockNumber": 11377218,
+          "contractAddress": null
+        },
+        {
+          "index": 28,
+          "nonce": 81,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xf667038fcafcc9ea8e8c47baadd20b16dd7c4896883f79463271f356419b10c7",
+          "status": "confirmed",
+          "blockNumber": 11377219,
+          "contractAddress": null
+        },
+        {
+          "index": 29,
+          "nonce": 82,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x9ac17fbead9fec6cff57311250f4e2002884564dfb5066499fb0060fcd5bc34c",
+          "status": "confirmed",
+          "blockNumber": 11377220,
+          "contractAddress": null
+        },
+        {
+          "index": 30,
+          "nonce": 83,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x070e6e906074eb3bc5d9e50d6be23a94be0fcf999961a4c24a346975aed3f4f6",
+          "status": "confirmed",
+          "blockNumber": 11377221,
+          "contractAddress": null
+        },
+        {
+          "index": 31,
+          "nonce": 84,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0xb24836cf6bd740448e6c2c4e7faff9bbd9ccccbc1b33646037965d03c8c02189",
+          "status": "confirmed",
+          "blockNumber": 11377222,
+          "contractAddress": null
+        },
+        {
+          "index": 32,
+          "nonce": 85,
+          "label": "ERC4626Strategy",
+          "transactionHash": "0x3e5e2165fd39bca2be06b0ae3972f5dd9a7b01506c14d2730d83b060e2f5fb2f",
+          "status": "confirmed",
+          "blockNumber": 11377224,
+          "contractAddress": "0xa892d12d07f83ba41e1b38536b2dc13aa48b2392"
+        },
+        {
+          "index": 33,
+          "nonce": 86,
+          "label": "ERC4626Strategy",
+          "transactionHash": "0x754af71369e8ea74db82c1cfc4bdaf2dabfc3ac81585a78730bec6f0797daacc",
+          "status": "confirmed",
+          "blockNumber": 11377225,
+          "contractAddress": "0xc173e0e8c27af8fe3473d78aaa950d31938def07"
+        },
+        {
+          "index": 34,
+          "nonce": 87,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x6786ba41ee911df43d8e32b8d385c07789411e1b3684440bb0a5b09137d35be0",
+          "status": "confirmed",
+          "blockNumber": 11377227,
+          "contractAddress": null
+        },
+        {
+          "index": 35,
+          "nonce": 88,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x28aac9484f17208afcf3594216af1164447002042cb4ddeb335138ce8691331f",
+          "status": "confirmed",
+          "blockNumber": 11377229,
+          "contractAddress": null
+        },
+        {
+          "index": 36,
+          "nonce": 89,
+          "label": "UpgradeableBeacon",
+          "transactionHash": "0x815c02256b6197435460d2166f37feb057e9a672e611618ae5848b2560889d65",
+          "status": "confirmed",
+          "blockNumber": 11377230,
+          "contractAddress": null
+        },
+        {
+          "index": 37,
+          "nonce": 90,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x9b851bab056cdc57ef28964f1a95119a035965b07a193f6847d3035d1b55a33d",
+          "status": "confirmed",
+          "blockNumber": 11377231,
+          "contractAddress": null
+        },
+        {
+          "index": 38,
+          "nonce": 91,
+          "label": "ERC1967Proxy",
+          "transactionHash": "0x567fbfe4f938158a1fdbcd43f730c933da8d28bdeee7e9685f41d3a0c29ddd1e",
+          "status": "confirmed",
+          "blockNumber": 11377232,
+          "contractAddress": null
+        }
+      ],
+      "journal": "deployments/sepolia/artifacts/fresh-system-journal.json",
+      "journalSha256": "eaa4f77a1ba30bf785afe57dc3bc3300100b6748acb362e58b9c30e4569df9cd"
+    },
+    "smoke": {
+      "path": "deployments/sepolia/artifacts/fresh-smoke.json",
+      "sha256": "e964b0431681a1316c66eabdbaff5642300f1f7c75cc252c1f1492fb94390cb8",
+      "nonceRange": [
+        92,
+        97
+      ],
+      "receipts": [
+        {
+          "index": 0,
+          "nonce": 92,
+          "label": "approve(address,uint256)",
+          "transactionHash": "0x02dd9cc4bd07955399dc7a6b2ce1914127b04d37d78c535448cfd7f2f516d41f",
+          "status": "confirmed",
+          "blockNumber": 11377248,
+          "contractAddress": null
+        },
+        {
+          "index": 1,
+          "nonce": 93,
+          "label": "mintUSD8(uint256)",
+          "transactionHash": "0x99d69213e76385291af6e76deea2bf2e7e70cb7e29c781387c96995cc0046b34",
+          "status": "confirmed",
+          "blockNumber": 11377251,
+          "contractAddress": null
+        },
+        {
+          "index": 2,
+          "nonce": 94,
+          "label": "approve(address,uint256)",
+          "transactionHash": "0xe869ee039978f446c4a9535e94b962d9ebb1927e091359d6d6b4411102593c9c",
+          "status": "confirmed",
+          "blockNumber": 11377252,
+          "contractAddress": null
+        },
+        {
+          "index": 3,
+          "nonce": 95,
+          "label": "deposit(uint256,address)",
+          "transactionHash": "0xeff289364889c4b886993c9bbd00fd2a76a9ea6f2d52a963970c858a2870cc67",
+          "status": "confirmed",
+          "blockNumber": 11377254,
+          "contractAddress": null
+        },
+        {
+          "index": 4,
+          "nonce": 96,
+          "label": "redeem(uint256,address,address)",
+          "transactionHash": "0x7629e6a505d559a6a6e2a9ec9b4f50f9b396e45a6e36612489f3226cc10d9943",
+          "status": "confirmed",
+          "blockNumber": 11377255,
+          "contractAddress": null
+        },
+        {
+          "index": 5,
+          "nonce": 97,
+          "label": "redeemUSD8(uint256,uint256)",
+          "transactionHash": "0x26526329f270ed65e15decb7a525bee1cd0512b82ed4c98a36d929477de759ad",
+          "status": "confirmed",
+          "blockNumber": 11377257,
+          "contractAddress": null
+        }
+      ],
+      "journal": "deployments/sepolia/artifacts/fresh-smoke-journal.json",
+      "journalSha256": "8402fd5e92382e15607cd6879c26a64ed92510fcc2a9738147321ef43021a10a"
+    }
   },
   "contracts": {
-    "timelock": "0x8d10C99dDE0E91Dba85896ce65Daa861B972b330",
-    "registryImplementation": "0x64eD1200269F80719c319D580576DDc58E54b0Ec",
-    "registry": "0x3Fa82eC1842f72c36580D84E03377b10B5E2F590",
-    "usd8Implementation": "0x508af51cEf48797BE1482937384dcDeEfe8Bad34",
-    "usd8": "0x12C7b483C164C648b4F7b72Af4b93250bED623CE",
-    "treasuryImplementation": "0x4fCEA728e17828E1AB5a424272469b5D9c89B9Ce",
-    "treasury": "0x5B5e52b7E603cA71C7dc37134924855cc45864c1",
-    "coverPoolImplementation": "0xC5341Ba9b601eF83D5c05C2fD06Bb27Ac51cb066",
-    "coverPoolBeacon": "0x02051110D30CD5087a3cE0f03F2d419d0415640E",
-    "coverPool": "0xd54ce4989Bf30A1d28864f0892e8211e4A28AF30",
-    "aaveStrategy": "0x9c8a4d149Af4AFEcAb45E82dB5265975dd12040a",
-    "morphoStrategy": "0xCdb5Aa1f50F3b19C12FC1d50E482e93FBaBc39eC",
-    "savingsBootstrap": "0x74d50cCb1a473CC1503Da26b0e8c3d2ea4Bd6184",
-    "savingsVault": "0x64E64eAdD9817e5F97266D34FF057ba4777c395B",
-    "savingsAdapter": "0xfe00128D3376d23cB803552F83112622192A0224",
-    "defiInsuranceImplementation": "0x41966d3e53118aF180DFC4C94822d24Aa9aC6b2e",
-    "defiInsurance": "0x250CeBDD9d6997fFD45C60D6E713f42e44E383ec",
-    "usd8PriceOracle": "0xc316AC5A8fa0D6961c2BCd26EA2d9F9e657626f5",
-    "booster": "0xC0012770848FCD350AB11906e93ba9fdfDA19f4c"
+    "timelock": "0x158494e7b95c0e5f87e8db4ad1be5c32de99f645",
+    "registryImplementation": "0x3928643211920936330be418f9573a2485004b49",
+    "registry": "0xe2a18c8327e684f66cb5532a11e7dd4a26776f87",
+    "usd8Implementation": "0x9f234eda223dc3014722578576d8fb2c54dd01d2",
+    "usd8": "0x5dd83050355646b8d24c99942a615cbbd2957a3d",
+    "treasuryImplementation": "0xaf4ff0c92bee40299723643534cd1e8d89f50087",
+    "treasury": "0x71e5fde1aba9d252526f531d74d107e8dc6d6d3a",
+    "coverPoolImplementation": "0x2a1f0c53172a46faf41b7034dd6001922dca3f43",
+    "coverPoolBeacon": "0x8c1a8522d5c5b40db64e41b1cebf7f3ea40b7d48",
+    "coverPool": "0xca1db96b39c9c8748e59ab167cf6e7ad5bad1d54",
+    "aaveStrategy": "0xa892d12d07f83ba41e1b38536b2dc13aa48b2392",
+    "morphoStrategy": "0xc173e0e8c27af8fe3473d78aaa950d31938def07",
+    "savingsBootstrap": "0xe39c6b96c41177ec9ecd37a0515ad78554a504ae",
+    "savingsVault": "0x758816383fe8d51389201eafcfc44d37b80a2ae1",
+    "savingsAdapter": "0xe125db748310af700aa906bd11041acbe68cfdc4",
+    "defiInsuranceImplementation": "0x0ff406c9fe9359a0f0c1343625e8a160b0ae0d15",
+    "defiInsurance": "0xb19108345ef9fe1e6ad65bbbce2318d384e085c5",
+    "usd8PriceOracle": "0x4c6ddbef1ace44b1a4a46d2199652c5c26abb9f5",
+    "booster": "0xc0012770848fcd350ab11906e93ba9fdfda19f4c"
   },
   "dependencies": {
-    "usdc": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-    "coverAsset": "0x0539fcd774c5351da3C1d8Efd64d4511F46662df",
-    "coverAssetUsdOracle": "0x6AE3bb0897F0b15e175BA96BA0aaA55CCB719a05",
-    "aaveUsdcVault": "0xe54b2Fe33Fe4Fe60910ac91861e7AEF26de9f2D7",
-    "morphoUsdcVault": "0xF5564291F859f47fd813492d8c9852619F328973",
-    "gho": "0x1Cf0C611608A4d2E2d92FF65f8fE994eB5E250C0",
-    "aaveSgho": "0xe872eC93fe8728ea522d1024dc8A41028C43338F",
-    "ghoUsdOracle": "0x25b66809E99bACE57f7A89c4509DeA64C1ea4B11",
-    "usds": "0x08E4Aa1657290B50aB7cb13b1E7f155580a0Be0a",
-    "skySusds": "0x6313e1f725F6ce1410c6b5312b854c4737cCeA9C",
-    "usdsUsdOracle": "0x6b27162f197a03103f3C5b840bbA3f09597ac08A",
-    "usdcUsdOracle": "0x7390eb8E43951DBd2EBB1767982CC91449A459b2"
+    "usdc": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+    "morphoVaultV2Factory": "0xb3fe2d5f8af90f194b01db546397058fcebb85d1",
+    "coverAsset": "0xdfaf9c1ce55f18ab7850edd84f2175ce734985fa",
+    "coverAssetUsdOracle": "0x00e79afb10a84d153803f00e73900803179d594e",
+    "aaveUsdcVault": "0x88c67f6429b4048f3904be2526bf43a07bc21b7a",
+    "morphoUsdcVault": "0xa6584efbabefb026cde771087474945a7134cd27",
+    "aaveSgho": "0x6e5eb99a5923bea10eb3990ec8da84e70007e668",
+    "ghoUsdOracle": "0xa1bea76bd8fb29bcec20ad6f97e541283ab82275",
+    "skySusds": "0x5279e60d104110db53b9d00a54f323e978be3757",
+    "usdsUsdOracle": "0x9951918957c4466a223e7e8d00c6a326be61018c",
+    "usdcUsdOracle": "0x9989a6bb00c1737a9a0175408053a04a6f3ed74b"
   },
   "verification": {
-    "status": "passed",
-    "command": "forge script script/testnet/VerifySepolia.s.sol:VerifySepolia --rpc-url https://ethereum-sepolia-rpc.publicnode.com"
+    "trackedVerifier": "passed on publicnode and dRPC",
+    "deploymentReceipts": "39/39 successful",
+    "smokeReceipts": "6/6 successful",
+    "runtimeBytecode": "all implementations match current output excluding compiler-declared immutable references",
+    "smoke": "1 USDC mint -> sUSD8 deposit/redeem -> USD8 redemption; final USDC/USD8/sUSD8 balances restored",
+    "sourcify": {
+      "status": "mixed",
+      "contracts": {
+        "TimelockController": {
+          "address": "0x158494e7b95c0e5f87e8db4ad1be5c32de99f645",
+          "jobId": "c0fe6742-4dac-4343-9d64-e05c3c9870c2",
+          "status": "match"
+        },
+        "RegistryImplementation": {
+          "address": "0x3928643211920936330be418f9573a2485004b49",
+          "jobId": "03082f58-1fdb-4640-b57e-bf05babe8d3b",
+          "status": "exact_match"
+        },
+        "RegistryProxy": {
+          "address": "0xe2a18c8327e684f66cb5532a11e7dd4a26776f87",
+          "jobId": "dc357626-5610-4d96-88ab-b82bed514cff",
+          "status": "exact_match"
+        },
+        "USD8Implementation": {
+          "address": "0x9f234eda223dc3014722578576d8fb2c54dd01d2",
+          "jobId": "919885ef-0e56-4d31-bd5f-ecd6259fd23a",
+          "status": "exact_match"
+        },
+        "USD8Proxy": {
+          "address": "0x5dd83050355646b8d24c99942a615cbbd2957a3d",
+          "jobId": "14e30e3a-38f0-4afe-b245-eefddf0ea106",
+          "status": "exact_match"
+        },
+        "TreasuryImplementation": {
+          "address": "0xaf4ff0c92bee40299723643534cd1e8d89f50087",
+          "jobId": "7dd76417-059e-4aa1-bb79-8ffd44c5a246",
+          "status": "exact_match"
+        },
+        "TreasuryProxy": {
+          "address": "0x71e5fde1aba9d252526f531d74d107e8dc6d6d3a",
+          "jobId": "946e5df3-9fc6-4b47-9ecf-6ddd1548d789",
+          "status": "exact_match"
+        },
+        "CoverPoolImplementation": {
+          "address": "0x2a1f0c53172a46faf41b7034dd6001922dca3f43",
+          "jobId": "fb8102d2-536d-4571-81ca-aa42ae7cf94e",
+          "status": "exact_match"
+        },
+        "CoverPoolBeacon": {
+          "address": "0x8c1a8522d5c5b40db64e41b1cebf7f3ea40b7d48",
+          "jobId": "d4902b5c-0ad0-497a-95b5-3284723ecda1",
+          "status": "exact_match"
+        },
+        "CoverPoolProxy": {
+          "address": "0xca1db96b39c9c8748e59ab167cf6e7ad5bad1d54",
+          "jobId": "d1f3c98f-55ca-445b-afb7-e57791c23958",
+          "status": "exact_match"
+        },
+        "DefiInsuranceImplementation": {
+          "address": "0x0ff406c9fe9359a0f0c1343625e8a160b0ae0d15",
+          "jobId": "cd228c9c-37df-439b-819c-55fb835ca40e",
+          "status": "exact_match"
+        },
+        "DefiInsuranceProxy": {
+          "address": "0xb19108345ef9fe1e6ad65bbbce2318d384e085c5",
+          "jobId": "fca74f66-bde3-4eb8-8cd0-67f67ec92769",
+          "status": "exact_match"
+        },
+        "USD8SavingsBootstrap": {
+          "address": "0xe39c6b96c41177ec9ecd37a0515ad78554a504ae",
+          "jobId": "052683c2-fa38-4e9e-8714-b53518a5616c",
+          "status": "exact_match"
+        },
+        "USD8SavingsAdapter": {
+          "address": "0xe125db748310af700aa906bd11041acbe68cfdc4",
+          "jobId": "0ad574b0-d978-4a63-a9e9-876ae54f6af3",
+          "status": "exact_match"
+        },
+        "USD8PriceOracle": {
+          "address": "0x4c6ddbef1ace44b1a4a46d2199652c5c26abb9f5",
+          "jobId": "c4dc0e0d-9eff-4036-adc3-af7388a83ef2",
+          "status": "exact_match"
+        },
+        "AaveERC4626Strategy": {
+          "address": "0xa892d12d07f83ba41e1b38536b2dc13aa48b2392",
+          "jobId": "3df88759-1a89-428b-8712-b42d5b6c29f1",
+          "status": "exact_match"
+        },
+        "MorphoERC4626Strategy": {
+          "address": "0xc173e0e8c27af8fe3473d78aaa950d31938def07",
+          "jobId": "d0ec9cd4-2be0-4fb2-bb3f-9e609acea68b",
+          "status": "exact_match"
+        }
+      },
+      "summary": {
+        "exactMatch": 16,
+        "match": 1
+      }
+    }
+  },
+  "retired": {
+    "previousCanonicalManifest": "deployments/sepolia/deployment-retired-20260729.json",
+    "previousStackReason": "storage-incompatible with frozen current implementations",
+    "partialNonce45Artifact": "abandoned; core addresses are non-canonical",
+    "partialNonce45Manifest": "deployments/sepolia/deployment-partial-retired-20260729.json"
   },
   "notes": [
-    "This is a public staging deployment, not a production deployment.",
-    "The non-USDC protocol dependencies are explicit Sepolia staging mocks."
+    "Public staging only; not production.",
+    "Non-USDC protocol dependencies are explicit Sepolia staging fixtures.",
+    "The reusable timelock has a 24-hour delay; proposer/canceller is the agent EOA and execution is open after delay."
   ]
 }

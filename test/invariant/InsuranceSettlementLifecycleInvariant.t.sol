@@ -39,6 +39,8 @@ abstract contract InsuranceSettlementBase is StdInvariant, Test {
     address internal constant BOB = address(0xB0B);
     address internal constant LP = address(0x1F00D);
     uint128 internal constant MIN_CLAIM = 10e18;
+    uint64 internal constant BOOSTER_ID = 1;
+    uint16 internal constant BOOSTER_BOOST_BPS = 100;
     uint256 internal constant TEE_PK = 0x7EE;
     bytes32 internal constant TEE_PCR_HASH = keccak256("settlement-invariant-pcr");
 
@@ -82,9 +84,9 @@ abstract contract InsuranceSettlementBase is StdInvariant, Test {
         vm.startPrank(ADMIN);
         registry.setMaxCoverPoolPayoutBps(8_000);
         registry.addPool(address(pool), address(feed));
-        registry.setBoosterNFT(address(booster));
+        registry.setBoosterConfig(address(booster), BOOSTER_ID, BOOSTER_BOOST_BPS);
         registry.setDefiInsurance(address(defi));
-        defi.addInsuredToken(IERC20(address(insuredToken)), 8_000, MIN_CLAIM, address(feed), address(0), "");
+        defi.editInsuredToken(IERC20(address(insuredToken)), 8_000, address(feed), address(0), "");
         defi.setTeeSigner(vm.addr(TEE_PK), true);
         vm.stopPrank();
     }
@@ -97,9 +99,26 @@ abstract contract InsuranceSettlementBase is StdInvariant, Test {
         vm.stopPrank();
     }
 
+    function _fundBond(address user) internal {
+        vm.prank(ADMIN);
+        usd8.mint(user, 10e18);
+        vm.prank(user);
+        usd8.approve(address(defi), 10e18);
+    }
+
+    function _finalizeUnboosted(address user, uint256 claimId, uint256 payout, uint256 eligible) internal {
+        vm.prank(user);
+        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, eligible, new bytes32[](0));
+    }
+
     function _amounts(uint256 payout) internal pure returns (uint256[] memory values) {
         values = new uint256[](1);
         values[0] = payout;
+    }
+
+    function _grossPayout(uint256 incidentId, uint256 claimantPayout) internal view returns (uint256) {
+        (,,,,,,,,, uint16 protocolFeeShareBps) = defi.incidents(incidentId);
+        return Math.mulDiv(claimantPayout, 10_000, 10_000 - protocolFeeShareBps);
     }
 
     function _leaf(
@@ -139,14 +158,13 @@ abstract contract InsuranceSettlementBase is StdInvariant, Test {
         view
         returns (bytes32)
     {
-        (,,, uint256 unresolved,,,,,, bytes32 claimSetHash) = defi.incidents(incidentId);
+        (,,,,,, uint256 unresolved, bytes32 claimSetHash, bytes32 pcrHash,) = defi.incidents(incidentId);
         (, address[] memory pools) = registry.coverPools();
         bytes32 settlementTypeHash = keccak256(
-            "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
+            "Settlement(uint256 incidentId,bytes32 root,uint256 unresolvedClaims,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
         );
         bytes32 payoutsHash = keccak256(abi.encodePacked(payouts));
         bytes32 poolsHash = keccak256(abi.encodePacked(pools));
-        bytes32 pcrHash = defi.incidentTeePcrHash(incidentId);
         return keccak256(
             abi.encode(settlementTypeHash, incidentId, root, unresolved, payoutsHash, poolsHash, claimSetHash, pcrHash)
         );
@@ -174,7 +192,7 @@ abstract contract InsuranceSettlementBase is StdInvariant, Test {
     function _openIncident() internal returns (uint256 incidentId) {
         if (!defi.isInsuredToken(IERC20(address(insuredToken)))) {
             vm.prank(ADMIN);
-            defi.addInsuredToken(IERC20(address(insuredToken)), 8_000, MIN_CLAIM, address(feed), address(0), "");
+            defi.editInsuredToken(IERC20(address(insuredToken)), 8_000, address(feed), address(0), "");
         }
         vm.roll(block.number + 1);
         vm.prank(ADMIN);
@@ -193,27 +211,28 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
         _stake(ALICE, 1_000e6);
         uint256 incidentId = _openIncident();
         insuredToken.mint(BOB, escrow);
+        _fundBond(BOB);
         vm.startPrank(BOB);
         insuredToken.approve(address(defi), escrow);
-        uint256 claimId = defi.joinClaim(IERC20(address(insuredToken)), escrow, 0, 0, 0, "");
+        uint256 claimId = defi.fileClaim(IERC20(address(insuredToken)), escrow, 1, 0, 0, "");
         vm.stopPrank();
 
-        uint256 payout = bound(payoutSeed, 0, pool.maxPayoutPerIncident());
+        uint256 payout = bound(payoutSeed, 0, pool.maxPayoutPerIncident() * 8_000 / 10_000);
         uint256 eligible = uint256(escrow) / 2;
-        bytes32 root = _leaf(incidentId, claimId, BOB, payout, 0, 0, eligible);
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
-        vm.warp(claimWindowEndTime + 1);
-        uint256[] memory budget = _amounts(payout);
+        bytes32 root = _leaf(incidentId, claimId, BOB, payout, 1, 1, eligible);
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(claimDeadline + 1);
+        uint256[] memory budget = _amounts(_grossPayout(incidentId, payout));
         defi.settleIncident(root, budget, _signSettlement(incidentId, root, budget));
-        (,,,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
-        vm.warp(rootSubmittedAt + defi.DISPUTE_PERIOD() + 1);
+        (,,,, uint64 phaseDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(phaseDeadline + 1);
 
         uint256 poolAssetsBefore = pool.totalAssets();
         uint256 bobUsdcBefore = usdc.balanceOf(BOB);
         vm.prank(BOB);
-        defi.finalizeClaim(_amounts(payout), 0, 0, eligible, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, eligible, new bytes32[](0));
 
-        assertEq(poolAssetsBefore - pool.totalAssets(), payout, "pool payout conservation");
+        assertEq(poolAssetsBefore - pool.totalAssets(), _grossPayout(incidentId, payout), "pool payout conservation");
         assertEq(usdc.balanceOf(BOB) - bobUsdcBefore, payout, "claimant payout");
         assertEq(insuredToken.balanceOf(BOB), uint256(escrow) - eligible, "escrow refund");
         assertEq(defi.escrowedInsuredTokens(IERC20(address(insuredToken))), 0, "escrow ledger");
@@ -225,33 +244,36 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
         _stake(ALICE, 1_000e6);
         uint256 incidentId = _openIncident();
         insuredToken.mint(BOB, escrow);
+        _fundBond(BOB);
         vm.startPrank(BOB);
         insuredToken.approve(address(defi), escrow);
-        uint256 claimId = defi.joinClaim(IERC20(address(insuredToken)), escrow, 0, 0, 0, "");
+        uint256 claimId = defi.fileClaim(IERC20(address(insuredToken)), escrow, 1, 0, 0, "");
         vm.stopPrank();
 
-        uint256 payout = bound(payoutSeed, 0, pool.maxPayoutPerIncident());
-        uint256[] memory budget = _amounts(payout);
-        bytes32 root = _leaf(incidentId, claimId, BOB, payout, 0, 0, escrow);
+        uint256 payout = bound(payoutSeed, 0, pool.maxPayoutPerIncident() * 8_000 / 10_000);
+        uint256[] memory budget = _amounts(_grossPayout(incidentId, payout));
+        bytes32 root = _leaf(incidentId, claimId, BOB, payout, 1, 1, escrow);
         bytes memory signature = _signSettlement(incidentId, root, budget);
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
 
-        vm.warp(claimWindowEndTime);
+        vm.warp(claimDeadline);
         vm.expectRevert();
         defi.settleIncident(root, budget, signature);
 
-        vm.warp(claimWindowEndTime + defi.SUBMIT_DEADLINE());
+        vm.warp(claimDeadline + registry.incidentTimingConfig().phaseWindow);
         defi.settleIncident(root, budget, signature);
-        (,,,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
+        {
+            (,,,, uint64 phaseDeadline,,,,,) = defi.incidents(incidentId);
+            vm.warp(phaseDeadline);
+            vm.prank(BOB);
+            vm.expectRevert();
+            defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, escrow, new bytes32[](0));
+        }
 
-        vm.warp(rootSubmittedAt + defi.DISPUTE_PERIOD());
+        (,,,, uint64 phaseDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(uint256(phaseDeadline) + registry.incidentTimingConfig().phaseWindow);
         vm.prank(BOB);
-        vm.expectRevert();
-        defi.finalizeClaim(_amounts(payout), 0, 0, escrow, new bytes32[](0));
-
-        vm.warp(rootSubmittedAt + defi.DISPUTE_PERIOD() + defi.FINALIZE_WINDOW());
-        vm.prank(BOB);
-        defi.finalizeClaim(_amounts(payout), 0, 0, escrow, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, escrow, new bytes32[](0));
         assertEq(defi.activeIncidentId(), 0, "boundary-finalized incident remained active");
     }
 
@@ -264,43 +286,47 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
         _stake(ALICE, 1_000e6);
         uint256 incidentId = _openIncident();
         insuredToken.mint(BOB, escrow);
+        _fundBond(BOB);
         vm.startPrank(BOB);
         insuredToken.approve(address(defi), escrow);
-        uint256 claimId = defi.joinClaim(IERC20(address(insuredToken)), escrow, 0, 0, 0, "");
+        uint256 claimId = defi.fileClaim(IERC20(address(insuredToken)), escrow, 1, 0, 0, "");
         vm.stopPrank();
 
-        uint256 cap = pool.maxPayoutPerIncident();
-        uint256 oldPayout = bound(oldPayoutSeed, 0, cap);
-        uint256 newPayout = bound(newPayoutSeed, 0, cap);
+        uint256 oldPayout = bound(oldPayoutSeed, 0, pool.maxPayoutPerIncident() * 8_000 / 10_000);
+        uint256 newPayout = bound(newPayoutSeed, 0, pool.maxPayoutPerIncident() * 8_000 / 10_000);
         uint256 oldEligible = uint256(escrow) / 2;
         uint256 newEligible = uint256(escrow) / 3;
-        bytes32 oldRoot = _leaf(incidentId, claimId, BOB, oldPayout, 0, 0, oldEligible);
-        bytes32 newRoot = _leaf(incidentId, claimId, BOB, newPayout, 0, 0, newEligible);
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
-        vm.warp(claimWindowEndTime + 1);
-        uint256[] memory oldBudget = _amounts(oldPayout);
-        defi.settleIncident(oldRoot, oldBudget, _signSettlement(incidentId, oldRoot, oldBudget));
-        (,,,, uint64 oldSubmittedAt,,,,,) = defi.incidents(incidentId);
 
-        vm.warp(oldSubmittedAt + 1 days);
-        vm.prank(ADMIN);
-        defi.adminCorrectSettlement(newRoot, _amounts(newPayout));
-        (,, bytes32 committedRoot,, uint64 newSubmittedAt,,,,,) = defi.incidents(incidentId);
-        assertEq(committedRoot, newRoot, "corrected root not installed");
-        assertGt(newSubmittedAt, oldSubmittedAt, "correction did not reset dispute clock");
+        {
+            bytes32 oldRoot = _leaf(incidentId, claimId, BOB, oldPayout, 1, 1, oldEligible);
+            (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
+            vm.warp(claimDeadline + 1);
+            uint256[] memory oldBudget = _amounts(_grossPayout(incidentId, oldPayout));
+            defi.settleIncident(oldRoot, oldBudget, _signSettlement(incidentId, oldRoot, oldBudget));
+            (,,,, uint64 oldPhaseDeadline,,,,,) = defi.incidents(incidentId);
+            vm.warp(oldPhaseDeadline - registry.incidentTimingConfig().phaseWindow + 1 days);
 
-        vm.warp(newSubmittedAt + defi.DISPUTE_PERIOD() + 1);
+            bytes32 newRoot = _leaf(incidentId, claimId, BOB, newPayout, 1, 1, newEligible);
+            uint256[] memory newBudget = _amounts(_grossPayout(incidentId, newPayout));
+            vm.prank(ADMIN);
+            defi.adminCorrectSettlement(newRoot, newBudget);
+            (,,,, uint64 newPhaseDeadline, bytes32 committedRoot,,,,) = defi.incidents(incidentId);
+            assertEq(committedRoot, newRoot, "corrected root not installed");
+            assertGt(newPhaseDeadline, oldPhaseDeadline, "correction did not reset correction clock");
+            vm.warp(newPhaseDeadline + 1);
+        }
+
         uint256 poolBefore = pool.totalAssets();
         uint256 escrowBefore = defi.escrowedInsuredTokens(IERC20(address(insuredToken)));
-        vm.prank(BOB);
         vm.expectRevert();
-        defi.finalizeClaim(_amounts(oldPayout), 0, 0, oldEligible, new bytes32[](0));
+        _finalizeUnboosted(BOB, claimId, oldPayout, oldEligible);
         assertEq(pool.totalAssets(), poolBefore, "old proof changed pool assets");
         assertEq(defi.escrowedInsuredTokens(IERC20(address(insuredToken))), escrowBefore, "old proof changed escrow");
 
-        vm.prank(BOB);
-        defi.finalizeClaim(_amounts(newPayout), 0, 0, newEligible, new bytes32[](0));
-        assertEq(poolBefore - pool.totalAssets(), newPayout, "corrected payout budget not used");
+        _finalizeUnboosted(BOB, claimId, newPayout, newEligible);
+        assertEq(
+            poolBefore - pool.totalAssets(), _grossPayout(incidentId, newPayout), "corrected payout budget not used"
+        );
     }
 
     function test_TwoClaimMerkleFinalizesInReverseOrder() public {
@@ -316,14 +342,14 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
 
         bytes32[] memory proof = new bytes32[](1);
         proof[0] = leafA;
-        _finalizeTraceClaim(BOB, 200e6, 456e18, boostedB, 20e18, proof);
+        _finalizeTraceClaim(claimB, BOB, 200e6, 456e18, boostedB, 20e18, proof);
         proof[0] = leafB;
-        _finalizeTraceClaim(ALICE, 100e6, 123e18, boostedA, 40e18, proof);
+        _finalizeTraceClaim(claimA, ALICE, 100e6, 123e18, boostedA, 40e18, proof);
 
-        assertEq(pool.totalAssets(), 700e6, "two-claim pool conservation");
+        assertEq(pool.totalAssets(), 625e6, "two-claim gross pool conservation");
         assertEq(registry.scoreSpent(ALICE), 123e18, "alice raw score");
         assertEq(registry.scoreSpent(BOB), 456e18, "bob raw score");
-        assertEq(booster.totalSupply(defi.BOOSTER_ID()), 0, "boosters not burned");
+        assertEq(booster.totalSupply(BOOSTER_ID), 0, "boosters not burned");
         assertEq(defi.escrowedInsuredTokens(IERC20(address(insuredToken))), 0, "escrow not cleared");
         assertEq(insuredToken.balanceOf(address(defi)), 60e18, "eligible escrow conservation");
     }
@@ -333,25 +359,27 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
         returns (uint256 claimId)
     {
         insuredToken.mint(user, escrow);
-        booster.mint(user, defi.BOOSTER_ID(), boosterAmount);
+        _fundBond(user);
+        booster.mint(user, BOOSTER_ID, boosterAmount);
         vm.startPrank(user);
         booster.setApprovalForAll(address(defi), true);
         insuredToken.approve(address(defi), escrow);
-        claimId = defi.joinClaim(IERC20(address(insuredToken)), escrow, score, boosterAmount, 0, "");
+        claimId = defi.fileClaim(IERC20(address(insuredToken)), escrow, score, boosterAmount, 0, "");
         vm.stopPrank();
-        assertEq(defi.activeClaimId(incidentId, user), claimId, "active claim index");
+        assertEq(defi.claimIdByIncidentAndUser(incidentId, user), claimId, "incident/user claim index");
     }
 
     function _settleTraceIncident(uint256 incidentId, bytes32 root, uint256 payout) internal {
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
-        vm.warp(claimWindowEndTime + 1);
-        uint256[] memory budget = _amounts(payout);
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(claimDeadline + 1);
+        uint256[] memory budget = _amounts(_grossPayout(incidentId, payout));
         defi.settleIncident(root, budget, _signSettlement(incidentId, root, budget));
-        (,,,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
-        vm.warp(rootSubmittedAt + defi.DISPUTE_PERIOD() + 1);
+        (,,,, uint64 phaseDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(phaseDeadline + 1);
     }
 
     function _finalizeTraceClaim(
+        uint256 claimId,
         address user,
         uint256 payout,
         uint256 score,
@@ -360,7 +388,7 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
         bytes32[] memory proof
     ) internal {
         vm.prank(user);
-        defi.finalizeClaim(_amounts(payout), score, boostedScore, eligible, proof);
+        defi.finalizeClaim(claimId, true, _amounts(payout), score, boostedScore, eligible, proof);
     }
 }
 
@@ -404,32 +432,36 @@ contract InsuranceSettlementMultiPoolTracerTest is InsuranceSettlementBase {
 
         uint256 incidentId = _openIncident();
         insuredToken.mint(BOB, escrow);
+        _fundBond(BOB);
         vm.startPrank(BOB);
         insuredToken.approve(address(defi), escrow);
-        uint256 claimId = defi.joinClaim(IERC20(address(insuredToken)), escrow, 0, 0, 0, "");
+        uint256 claimId = defi.fileClaim(IERC20(address(insuredToken)), escrow, 1, 0, 0, "");
         vm.stopPrank();
 
-        uint256 payoutA = bound(firstPayoutSeed, 0, pool.maxPayoutPerIncident());
-        uint256 payoutB = bound(secondPayoutSeed, 0, secondPool.maxPayoutPerIncident());
+        uint256 payoutA = bound(firstPayoutSeed, 0, pool.maxPayoutPerIncident() * 8_000 / 10_000);
+        uint256 payoutB = bound(secondPayoutSeed, 0, secondPool.maxPayoutPerIncident() * 8_000 / 10_000);
         uint256[] memory payouts = new uint256[](2);
         payouts[0] = payoutA;
         payouts[1] = payoutB;
         uint256 eligible = uint256(escrow) / 2;
-        bytes32 root = keccak256(bytes.concat(keccak256(abi.encode(incidentId, claimId, BOB, payouts, 0, 0, eligible))));
+        bytes32 root = keccak256(bytes.concat(keccak256(abi.encode(incidentId, claimId, BOB, payouts, 1, 1, eligible))));
 
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
-        vm.warp(claimWindowEndTime + 1);
-        defi.settleIncident(root, payouts, _signSettlement(incidentId, root, payouts));
-        (,,,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
-        vm.warp(rootSubmittedAt + defi.DISPUTE_PERIOD() + 1);
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(claimDeadline + 1);
+        uint256[] memory grossPayouts = new uint256[](2);
+        grossPayouts[0] = _grossPayout(incidentId, payoutA);
+        grossPayouts[1] = _grossPayout(incidentId, payoutB);
+        defi.settleIncident(root, grossPayouts, _signSettlement(incidentId, root, grossPayouts));
+        (,,,, uint64 phaseDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(phaseDeadline + 1);
 
         uint256 firstBefore = pool.totalAssets();
         uint256 secondBefore = secondPool.totalAssets();
         vm.prank(BOB);
-        defi.finalizeClaim(payouts, 0, 0, eligible, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, payouts, 1, 1, eligible, new bytes32[](0));
 
-        assertEq(firstBefore - pool.totalAssets(), payoutA, "first pool conservation");
-        assertEq(secondBefore - secondPool.totalAssets(), payoutB, "second pool conservation");
+        assertEq(firstBefore - pool.totalAssets(), grossPayouts[0], "first pool conservation");
+        assertEq(secondBefore - secondPool.totalAssets(), grossPayouts[1], "second pool conservation");
         assertEq(usdc.balanceOf(BOB), payoutA, "first asset recipient delta");
         assertEq(secondAsset.balanceOf(BOB), payoutB, "second asset recipient delta");
         assertEq(defi.activeIncidentId(), 0, "incident not resolved");
@@ -512,8 +544,8 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     function joinSecond(uint256 actorSeed, uint128 escrowSeed, uint256 scoreSeed, uint128 boosterSeed) external {
         uint256 incidentId = defi.activeIncidentId();
         if (incidentId == 0 || incidentClaims[incidentId].length != 1) return;
-        (, uint64 claimWindowEndTime, bytes32 root,,,,,,,) = defi.incidents(incidentId);
-        if (root != bytes32(0) || block.timestamp > claimWindowEndTime) return;
+        (,,,, uint64 claimDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        if (root != bytes32(0) || block.timestamp > claimDeadline) return;
 
         address first = rows[incidentClaims[incidentId][0]].user;
         address candidate = claimants[actorSeed % claimants.length];
@@ -524,14 +556,15 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     function _join(uint256 incidentId, address user, uint128 escrowSeed, uint256 scoreSeed, uint128 boosterSeed)
         internal
     {
-        if (defi.activeClaimId(incidentId, user) != 0) return;
+        if (defi.claimIdByIncidentAndUser(incidentId, user) != 0) return;
         uint128 escrow = uint128(bound(escrowSeed, MIN_CLAIM, 1_000e18));
         uint256 scoreToSpend = bound(scoreSeed, 0, 1_000_000e18);
         uint128 boosterAmount = uint128(bound(boosterSeed, 0, 5));
 
         insuredToken.mint(user, escrow);
+        _fundBond(user);
         if (boosterAmount != 0) {
-            booster.mint(user, defi.BOOSTER_ID(), boosterAmount);
+            booster.mint(user, BOOSTER_ID, boosterAmount);
             vm.prank(user);
             booster.setApprovalForAll(address(defi), true);
             ghostOutstandingBoosters += boosterAmount;
@@ -540,7 +573,7 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
 
         vm.startPrank(user);
         insuredToken.approve(address(defi), escrow);
-        uint256 claimId = defi.joinClaim(IERC20(address(insuredToken)), escrow, scoreToSpend, boosterAmount, 0, "");
+        uint256 claimId = defi.fileClaim(IERC20(address(insuredToken)), escrow, scoreToSpend, boosterAmount, 0, "");
         vm.stopPrank();
 
         incidentClaims[incidentId].push(claimId);
@@ -554,23 +587,23 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     function advanceToSettlement() external {
         uint256 incidentId = defi.activeIncidentId();
         if (incidentId == 0) return;
-        (, uint64 claimWindowEndTime, bytes32 root,,,,,,,) = defi.incidents(incidentId);
-        if (root == bytes32(0) && block.timestamp <= claimWindowEndTime) vm.warp(claimWindowEndTime + 1);
+        (,,,, uint64 claimDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        if (root == bytes32(0) && block.timestamp <= claimDeadline) vm.warp(claimDeadline + 1);
     }
 
     function settle(uint256 payoutSeed0, uint256 payoutSeed1, uint128 eligibleSeed0, uint128 eligibleSeed1) external {
         uint256 incidentId = defi.activeIncidentId();
         if (incidentId == 0) return;
-        (, uint64 claimWindowEndTime, bytes32 standingRoot,,,,,,,) = defi.incidents(incidentId);
+        (,,,, uint64 claimDeadline, bytes32 standingRoot,,,,) = defi.incidents(incidentId);
         if (
-            standingRoot != bytes32(0) || block.timestamp <= claimWindowEndTime
-                || block.timestamp > claimWindowEndTime + defi.SUBMIT_DEADLINE()
+            standingRoot != bytes32(0) || block.timestamp <= claimDeadline
+                || block.timestamp > claimDeadline + registry.incidentTimingConfig().phaseWindow
         ) return;
 
         uint256[] storage claimsForIncident = incidentClaims[incidentId];
         uint256 count = claimsForIncident.length;
         if (count == 0 || count > 2) return;
-        uint256 budgetCap = pool.maxPayoutPerIncident();
+        uint256 budgetCap = pool.maxPayoutPerIncident() * 8_000 / 10_000;
         uint256 payout0 = bound(payoutSeed0, 0, budgetCap);
         uint256 payout1 = count == 2 ? bound(payoutSeed1, 0, budgetCap - payout0) : 0;
 
@@ -578,25 +611,31 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
         bytes32 root = firstLeaf;
         if (count == 2) root = _hashPair(firstLeaf, _commitRow(claimsForIncident[1], payout1, eligibleSeed1));
 
-        uint256 committed = payout0 + payout1;
-        _submitSettlement(incidentId, root, committed);
+        uint256 committed = rows[claimsForIncident[0]].payout;
+        if (count == 2) committed += rows[claimsForIncident[1]].payout;
+        _commitSettlement(incidentId, root, committed);
     }
 
-    function _submitSettlement(uint256 incidentId, bytes32 root, uint256 committed) internal {
-        uint256[] memory poolPayouts = _amounts(committed);
+    function _commitSettlement(uint256 incidentId, bytes32 root, uint256) internal {
+        uint256 grossCommitted;
+        uint256[] storage claimsForIncident = incidentClaims[incidentId];
+        for (uint256 i; i < claimsForIncident.length; i++) {
+            grossCommitted += _grossPayout(incidentId, rows[claimsForIncident[i]].payout);
+        }
+        uint256[] memory poolPayouts = _amounts(grossCommitted);
         bytes memory signature = _signSettlement(incidentId, root, poolPayouts);
         ghostPoolAssetsAtSettlement[incidentId] = pool.totalAssets();
         defi.settleIncident(root, poolPayouts, signature);
         successfulSettlements += 1;
-        ghostCommittedPayout[incidentId] = committed;
+        ghostCommittedPayout[incidentId] = grossCommitted;
     }
 
     function _commitRow(uint256 claimId, uint256 payout, uint128 eligibleSeed) internal returns (bytes32 leaf) {
         (address user, uint256 incidentId, uint128 escrow, uint128 boosterAmount,,) = defi.claims(claimId);
         uint256 scoreSpent = requestedScore[claimId];
-        uint256 boostedScore =
-            Math.mulDiv(scoreSpent, 10_000 + uint256(boosterAmount) * defi.BOOSTER_BOOST_BPS(), 10_000);
+        uint256 boostedScore = Math.mulDiv(scoreSpent, 10_000 + uint256(boosterAmount) * BOOSTER_BOOST_BPS, 10_000);
         uint256 eligible = bound(eligibleSeed, 0, escrow);
+        if (scoreSpent == 0 || eligible == 0) payout = 0;
         leaf = _leaf(incidentId, claimId, user, payout, scoreSpent, boostedScore, eligible);
         rows[claimId] = SettlementRow({
             user: user,
@@ -613,26 +652,27 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     function advanceToFinalization() external {
         uint256 incidentId = defi.activeIncidentId();
         if (incidentId == 0) return;
-        (,, bytes32 root,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
-        if (root != bytes32(0) && block.timestamp <= rootSubmittedAt + defi.DISPUTE_PERIOD()) {
-            vm.warp(rootSubmittedAt + defi.DISPUTE_PERIOD() + 1);
+        (,,,, uint64 phaseDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        if (root != bytes32(0) && block.timestamp <= phaseDeadline) {
+            vm.warp(phaseDeadline + 1);
         }
+    }
+
+    function _canFinalize(uint256 incidentId) internal view returns (bool) {
+        (,,,, uint64 phaseDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        uint256 finalizeDeadline = uint256(phaseDeadline) + registry.incidentTimingConfig().phaseWindow;
+        return root != bytes32(0) && block.timestamp > phaseDeadline && block.timestamp <= finalizeDeadline;
     }
 
     function finalize(uint256 actorSeed) external {
         uint256 incidentId = defi.activeIncidentId();
-        if (incidentId == 0) return;
-        (,, bytes32 root,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
-        if (
-            root == bytes32(0) || block.timestamp <= rootSubmittedAt + defi.DISPUTE_PERIOD()
-                || block.timestamp > rootSubmittedAt + defi.DISPUTE_PERIOD() + defi.FINALIZE_WINDOW()
-        ) return;
+        if (incidentId == 0 || !_canFinalize(incidentId)) return;
 
         uint256[] storage claimsForIncident = incidentClaims[incidentId];
         if (claimsForIncident.length == 0) return;
         uint256 claimId = claimsForIncident[actorSeed % claimsForIncident.length];
         SettlementRow storage row = rows[claimId];
-        (,, uint128 escrow, uint128 boosterAmount, bool resolved,) = defi.claims(claimId);
+        (,, uint128 escrow, uint128 boosterAmount,, bool resolved) = defi.claims(claimId);
         if (!row.committed || row.finalized || resolved) return;
 
         bytes32[] memory proof;
@@ -648,34 +688,41 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
         uint256 payoutBefore = usdc.balanceOf(row.user);
         uint256 insuredBefore = insuredToken.balanceOf(row.user);
         vm.prank(row.user);
-        defi.finalizeClaim(_amounts(row.payout), row.scoreSpent, row.boostedScore, row.eligible, proof);
+        defi.finalizeClaim(claimId, true, _amounts(row.payout), row.scoreSpent, row.boostedScore, row.eligible, proof);
 
         row.finalized = true;
         successfulFinalizations += 1;
+        bool claimEligible = row.scoreSpent != 0 && row.eligible != 0;
         ghostOutstandingEscrow -= escrow;
-        ghostForfeitedEscrow += row.eligible;
-        ghostPoolPaid += row.payout;
-        ghostPaidByIncident[incidentId] += row.payout;
-        ghostScoreSpent[row.user] += row.scoreSpent;
+        ghostForfeitedEscrow += claimEligible ? row.eligible : 0;
+        uint256 grossPayout = _grossPayout(incidentId, row.payout);
+        ghostPoolPaid += grossPayout;
+        ghostPaidByIncident[incidentId] += grossPayout;
+        ghostScoreSpent[row.user] += claimEligible ? row.scoreSpent : 0;
         ghostOutstandingBoosters -= boosterAmount;
-        ghostBurnedBoosters += boosterAmount;
+        if (claimEligible) ghostBurnedBoosters += boosterAmount;
+        else ghostReturnedBoosters += boosterAmount;
 
-        assertEq(poolBefore - pool.totalAssets(), row.payout, "pool payout delta");
+        assertEq(poolBefore - pool.totalAssets(), grossPayout, "pool payout delta");
         assertEq(usdc.balanceOf(row.user) - payoutBefore, row.payout, "claimant payout delta");
-        assertEq(insuredToken.balanceOf(row.user) - insuredBefore, uint256(escrow) - row.eligible, "refund delta");
+        assertEq(
+            insuredToken.balanceOf(row.user) - insuredBefore,
+            uint256(escrow) - (claimEligible ? row.eligible : 0),
+            "refund delta"
+        );
         _assertFinalResolutionTimestamp(incidentId);
     }
 
     function _assertFinalResolutionTimestamp(uint256 incidentId) internal view {
-        (,,, uint256 unresolved,,,,,,) = defi.incidents(incidentId);
-        if (unresolved == 0) assertGt(defi.incidentResolvedAt(incidentId), 0, "final claim missing timestamp");
+        (, uint64 resolvedAt,,,,, uint256 unresolved,,,) = defi.incidents(incidentId);
+        if (unresolved == 0) assertGt(resolvedAt, 0, "final claim missing timestamp");
     }
 
     function voidDuringDispute() external {
         uint256 incidentId = defi.activeIncidentId();
         if (incidentId == 0) return;
-        (,, bytes32 root,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
-        if (root == bytes32(0) || block.timestamp > rootSubmittedAt + defi.DISPUTE_PERIOD()) return;
+        (,,,, uint64 phaseDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        if (root == bytes32(0) || block.timestamp > phaseDeadline) return;
         vm.prank(ADMIN);
         defi.adminCorrectSettlement(bytes32(0), new uint256[](0));
         successfulVoids += 1;
@@ -684,38 +731,58 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     function advancePastFinalizationExpiry() external {
         uint256 incidentId = defi.activeIncidentId();
         if (incidentId == 0) return;
-        (,, bytes32 root,, uint64 rootSubmittedAt,,,,,) = defi.incidents(incidentId);
+        (,,,, uint64 phaseDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        uint256 finalizeDeadline = uint256(phaseDeadline) + registry.incidentTimingConfig().phaseWindow;
         if (root != bytes32(0)) {
-            uint256 expiry = rootSubmittedAt + defi.DISPUTE_PERIOD() + defi.FINALIZE_WINDOW();
-            if (block.timestamp <= expiry) vm.warp(expiry + 1);
+            if (block.timestamp <= finalizeDeadline) vm.warp(finalizeDeadline + 1);
         }
+    }
+
+    function _declineClaim(uint256 claimId, uint256 incidentId, address user, bool hasRoot) internal returns (bool) {
+        if (!hasRoot) {
+            vm.prank(user);
+            defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+            return true;
+        }
+
+        SettlementRow storage row = rows[claimId];
+        if (!row.committed) return false;
+        bytes32[] memory proof;
+        uint256[] storage claimsForIncident = incidentClaims[incidentId];
+        if (claimsForIncident.length == 2) {
+            proof = new bytes32[](1);
+            uint256 other = claimsForIncident[0] == claimId ? claimsForIncident[1] : claimsForIncident[0];
+            proof[0] = rows[other].leaf;
+        } else {
+            proof = new bytes32[](0);
+        }
+        vm.prank(user);
+        defi.finalizeClaim(claimId, false, _amounts(row.payout), row.scoreSpent, row.boostedScore, row.eligible, proof);
+        return true;
     }
 
     function withdrawNonFinalized(uint256 claimSeed) external {
         uint256 next = defi.nextClaimId();
         if (next <= 1) return;
         uint256 claimId = bound(claimSeed, 1, next - 1);
-        (address user, uint256 incidentId, uint128 escrow, uint128 boosterAmount, bool resolved,) = defi.claims(claimId);
+        (address user, uint256 incidentId, uint128 escrow, uint128 boosterAmount,, bool resolved) = defi.claims(claimId);
         if (resolved) return;
-        (, uint64 claimWindowEndTime, bytes32 root,, uint64 rootSubmittedAt,,, DefiInsurance.Status status,,) =
-            defi.incidents(incidentId);
-        bool withdrawable = status == DefiInsurance.Status.Closed
-            || (root == bytes32(0) && block.timestamp > claimWindowEndTime + defi.SUBMIT_DEADLINE())
-            || (root != bytes32(0)
-                && block.timestamp > rootSubmittedAt + defi.DISPUTE_PERIOD() + defi.FINALIZE_WINDOW());
+        (,,,, uint64 phaseDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        Registry.IncidentTimingConfig memory timing = registry.incidentTimingConfig();
+        uint256 terminalDeadline = uint256(phaseDeadline) + timing.phaseWindow;
+        bool withdrawable = block.timestamp > terminalDeadline;
         if (!withdrawable) return;
 
         uint256 insuredBefore = insuredToken.balanceOf(user);
-        uint256 boosterBefore = booster.balanceOf(user, defi.BOOSTER_ID());
-        vm.prank(user);
-        defi.withdrawNonFinalizedClaim(claimId);
+        uint256 boosterBefore = booster.balanceOf(user, BOOSTER_ID);
+        if (!_declineClaim(claimId, incidentId, user, root != bytes32(0))) return;
         successfulWithdrawals += 1;
-        if (root != bytes32(0) && status == DefiInsurance.Status.Open) successfulExpiryWithdrawals += 1;
+        if (root != bytes32(0)) successfulExpiryWithdrawals += 1;
         ghostOutstandingEscrow -= escrow;
         ghostOutstandingBoosters -= boosterAmount;
         ghostReturnedBoosters += boosterAmount;
         assertEq(insuredToken.balanceOf(user) - insuredBefore, escrow, "withdraw refund delta");
-        assertEq(booster.balanceOf(user, defi.BOOSTER_ID()) - boosterBefore, boosterAmount, "booster return delta");
+        assertEq(booster.balanceOf(user, BOOSTER_ID) - boosterBefore, boosterAmount, "booster return delta");
     }
 
     function test_ProductiveHandlerBranchesAreReachable() public {
@@ -753,7 +820,7 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     function invariant_globalEscrowMatchesAllUnresolvedClaims() public view {
         uint256 unresolvedEscrow;
         for (uint256 claimId = 1; claimId < defi.nextClaimId(); claimId++) {
-            (,, uint128 escrow,, bool resolved,) = defi.claims(claimId);
+            (,, uint128 escrow,,, bool resolved) = defi.claims(claimId);
             if (!resolved) unresolvedEscrow += escrow;
         }
         assertEq(unresolvedEscrow, ghostOutstandingEscrow, "ghost escrow drift");
@@ -762,10 +829,10 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
 
     function invariant_eachIncidentUnresolvedCountIsExact() public view {
         for (uint256 incidentId = 1; incidentId < defi.nextIncidentId(); incidentId++) {
-            (,,, uint256 unresolved,,,,,,) = defi.incidents(incidentId);
+            (,,,,,, uint256 unresolved,,,) = defi.incidents(incidentId);
             uint256 counted;
             for (uint256 claimId = 1; claimId < defi.nextClaimId(); claimId++) {
-                (, uint256 claimIncident,,, bool resolved,) = defi.claims(claimId);
+                (, uint256 claimIncident,,,, bool resolved) = defi.claims(claimId);
                 if (claimIncident == incidentId && !resolved) counted += 1;
             }
             assertEq(unresolved, counted, "incident unresolved drift");
@@ -796,14 +863,11 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
 
     function invariant_resolvedIncidentsHaveResolutionTimestamp() public view {
         for (uint256 incidentId = 1; incidentId < defi.nextIncidentId(); incidentId++) {
-            (,, bytes32 root, uint256 unresolved,,,, DefiInsurance.Status status,,) = defi.incidents(incidentId);
-            if (status == DefiInsurance.Status.Closed) {
-                assertGt(defi.incidentResolvedAt(incidentId), 0, "resolved incident missing timestamp");
-                assertEq(root, bytes32(0), "closed incident keeps root");
-            }
-            if (defi.incidentResolvedAt(incidentId) != 0) {
-                assertTrue(status == DefiInsurance.Status.Closed || unresolved == 0, "early resolution timestamp");
-            }
+            (, uint64 resolvedAt,,, uint64 phaseDeadline, bytes32 root, uint256 unresolved,,,) =
+                defi.incidents(incidentId);
+            bool voided = root == bytes32(0) && phaseDeadline == 0;
+            if (voided) assertGt(resolvedAt, 0, "voided incident missing timestamp");
+            if (resolvedAt != 0) assertTrue(voided || unresolved == 0, "early resolution timestamp");
         }
     }
 
@@ -814,13 +878,13 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
             for (uint256 i; i < claimsForIncident.length; i++) {
                 committedRowSum += _assertClaimAndRowConsistency(claimsForIncident[i]);
             }
-            assertEq(committedRowSum, ghostCommittedPayout[incidentId], "committed row sum drift");
+            assertEq(committedRowSum, ghostCommittedPayout[incidentId], "committed gross row sum drift");
         }
     }
 
     function _assertClaimAndRowConsistency(uint256 claimId) internal view returns (uint256 payout) {
-        (address user, uint256 incidentId, uint128 escrow, uint128 boosterAmount, bool resolved,) = defi.claims(claimId);
-        if (!resolved) assertEq(defi.activeClaimId(incidentId, user), claimId, "live claim pointer drift");
+        (address user, uint256 incidentId, uint128 escrow, uint128 boosterAmount,, bool resolved) = defi.claims(claimId);
+        if (!resolved) assertEq(defi.claimIdByIncidentAndUser(incidentId, user), claimId, "live claim pointer drift");
 
         SettlementRow storage row = rows[claimId];
         if (!row.committed) return 0;
@@ -828,14 +892,14 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
         assertEq(row.scoreSpent, requestedScore[claimId], "committed raw score drift");
         assertLe(row.eligible, escrow, "committed eligible amount exceeds escrow");
         uint256 expectedBoosted =
-            Math.mulDiv(row.scoreSpent, 10_000 + uint256(boosterAmount) * defi.BOOSTER_BOOST_BPS(), 10_000);
+            Math.mulDiv(row.scoreSpent, 10_000 + uint256(boosterAmount) * BOOSTER_BOOST_BPS, 10_000);
         assertEq(row.boostedScore, expectedBoosted, "committed boosted score drift");
         assertEq(
             row.leaf,
             _leaf(incidentId, claimId, user, row.payout, row.scoreSpent, row.boostedScore, row.eligible),
             "committed leaf drift"
         );
-        return row.payout;
+        return _grossPayout(incidentId, row.payout);
     }
 
     function invariant_scoreLedgerUsesRawCommittedScore() public view {
@@ -844,10 +908,10 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     }
 
     function invariant_boosterEscrowBurnAndReturnConservation() public view {
-        uint256 supply = booster.totalSupply(defi.BOOSTER_ID());
+        uint256 supply = booster.totalSupply(BOOSTER_ID);
         assertEq(supply, ghostOutstandingBoosters + ghostReturnedBoosters, "booster supply drift");
         assertEq(ghostMintedBoosters, supply + ghostBurnedBoosters, "booster burn drift");
-        assertEq(booster.balanceOf(address(defi), defi.BOOSTER_ID()), ghostOutstandingBoosters, "booster escrow drift");
+        assertEq(booster.balanceOf(address(defi), BOOSTER_ID), ghostOutstandingBoosters, "booster escrow drift");
     }
 
     function invariant_claimAndIncidentIdsAreGapless() public view {
@@ -864,9 +928,11 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
         uint256 active = defi.activeIncidentId();
         assertEq(registry.payoutIncidentActive(), active != 0, "registry freeze mismatch");
         if (active != 0) {
-            (,,, uint256 unresolved,,,, DefiInsurance.Status status,,) = defi.incidents(active);
+            (,,,, uint64 phaseDeadline, bytes32 root, uint256 unresolved,,,) = defi.incidents(active);
             assertGt(unresolved, 0, "active incident without claims");
-            assertEq(uint256(status), uint256(DefiInsurance.Status.Open), "active incident not open");
+            Registry.IncidentTimingConfig memory timing = registry.incidentTimingConfig();
+            uint256 terminalDeadline = uint256(phaseDeadline) + timing.phaseWindow;
+            assertLe(block.timestamp, terminalDeadline, "active incident expired");
         }
     }
 }

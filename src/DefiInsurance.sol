@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
+
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
-//  \:\ \:\ \\:\/___/\\:\ \ \ \\:\_\:\ \
+//  \:\ \:\ \\: \/___/\\:\ \ \ \\:\_\:\ \
 //   \:\ \:\ \\_::._\:\\:\ \ \ \\::__:\ \
-//    \:\_\:\ \ /____\:\\:\/.:| |\:\_\:\ \
+//    \:\_\:\ \ /____\:\\:\\/.:| |\:\_\:\ \
 //     \_____\/ \_____\/ \____/_/ \_____\/
 
 pragma solidity 0.8.28;
@@ -19,6 +20,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Registry} from "./Registry.sol";
 import {SharedBase} from "./SharedBase.sol";
@@ -44,19 +46,14 @@ interface ISingleAssetCoverPool {
     function settleMaturedExitEpochs(uint256 maxEpochs) external returns (uint256);
 }
 
-/// @title  DefiInsurance v1
-/// @notice Depeg insurance backed by registered cover pools. A first TEE-attested
-///         {joinClaim}, or an admin fallback, opens the single active incident and
-///         freezes pending exit settlement and topology changes. Claims may join or cancel
-///         during {CLAIM_WINDOW}; anyone may relay one TEE-signed settlement root by
-///         {SUBMIT_DEADLINE}. During beta, governance may correct or void the root during
-///         {DISPUTE_PERIOD}; claimants then pull Merkle-proven payouts during
-///         {FINALIZE_WINDOW}. Missing and expired roots void automatically.
-/// @dev UUPS-upgradeable during Registry beta mode only. Once beta ends, upgrades
-///      are permanently disabled. Registry replacement is safe only between incidents. This
-///      contract escrows insured tokens and committed boosters. Boosters burn on
-///      finalization or return on cancellation/withdrawal. Consumed score is emitted
-///      and mirrored on the {Registry}.
+/// @title DefiInsurance
+/// @notice Handles one depeg incident at a time using registered cover pools.
+///         The first signed claim, or an admin fallback, opens an incident and
+///         freezes topology and matured exits. Each incident snapshots one phase
+///         duration used for claim filing, settlement, correction, and payouts.
+/// @dev Claims escrow the insured token, USD8 bond, and optional booster. A signed
+///      Merkle root sets per-pool payout budgets. Upgrades are allowed only during
+///      Registry beta mode and between incidents.
 contract DefiInsurance is
     Initializable,
     UUPSUpgradeable,
@@ -66,6 +63,7 @@ contract DefiInsurance is
     SharedBase
 {
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     // ─────────────────────────── State ───────────────────────────
 
@@ -80,6 +78,10 @@ contract DefiInsurance is
     ///         coverage factor κ ({InsuredToken.maxCoverageBps}): κ ∈ (0, 100%].
     uint256 internal constant BPS_DENOMINATOR = 10_000;
 
+    /// @notice Maximum claimant share of verified loss; the remaining 20% permits
+    ///         a full-loss gross settlement when the protocol fee is at its maximum.
+    uint256 public constant MAX_CLAIMANT_COVERAGE_BPS = 8_000;
+
     /// @notice Per-token coverage and historical valuation recipe; zero coverage means unlisted.
     /// @dev Coverage applies only to direct impairment versus the configured immediate
     ///      underlying. The TEE/admin determines incident eligibility; this recipe only
@@ -89,141 +91,108 @@ contract DefiInsurance is
     /// @param underlyingConversionAddress Historical token-to-underlying rate source;
     ///        zero means identity. Off-chain settlement expects a WAD-scaled uint256.
     /// @param underlyingConversionCallData Calldata for the conversion staticcall.
-    /// @param minClaimAmount Minimum escrow in insured-token base units.
     struct InsuredToken {
-        uint256 maxCoverageBps;
+        uint16 maxCoverageBps;
         address underlyingPriceOracle;
         address underlyingConversionAddress;
         bytes underlyingConversionCallData;
-        uint128 minClaimAmount;
     }
 
-    /// @notice Token config; zero coverage means unlisted. Confirmed incidents delist it.
+    /// @notice Token config; zero coverage means unlisted. Committing a root delists it.
     mapping(IERC20 insuredToken => InsuredToken) internal insuredTokens;
-
-    /// @notice Listed insured tokens in admin-determined order.
-    IERC20[] public insuredTokenList;
 
     // ─────────────────────────── State (claim lifecycle) ───────────────────────────
 
-    /// @notice Length of the CLAIM phase: the window in which claimants may
-    ///         {joinClaim} / {cancelClaim} after the first open locks the CoverPools.
-    uint64 public constant CLAIM_WINDOW = 5 days;
-
-    /// @notice Length of the SETTLE phase: the deadline to submit a settlement root,
-    ///         measured from the CLAIM phase end. No root by then ⇒ the claim voids and
-    ///         escrow is recoverable.
-    uint64 public constant SUBMIT_DEADLINE = 3 days;
-
-    /// @notice Length of the DISPUTE phase, measured from {Incident.rootSubmittedAt} —
-    ///         a fixed window so a late settlement can never compress it. No payout
-    ///         before it elapses; during beta, admin/timelock may correct or void the root.
-    uint64 public constant DISPUTE_PERIOD = 2 days;
-
-    /// @notice Length of the FINALIZE phase, after DISPUTE ends. Total CoverPool lock is
-    ///         CLAIM_WINDOW + [0, SUBMIT_DEADLINE] + DISPUTE_PERIOD + FINALIZE_WINDOW =
-    ///         11–14 days (8 days if the claim voids in SETTLE).
-    uint64 public constant FINALIZE_WINDOW = 4 days;
-
-    /// @notice Maximum reference-block age at open; about six days at 12-second blocks.
-    uint64 public constant MAX_REFERENCE_BLOCK_AGE = 43_200;
-
     /// @notice State for one insured-token incident.
     /// @param insuredToken Token covered by the incident.
-    /// @param claimWindowEndTime Last timestamp for joins and cancellations.
-    /// @param root Standing settlement Merkle root, or zero.
-    /// @param unresolved Number of live claims; zero resolves the incident.
-    /// @param rootSubmittedAt Start of the dispute period.
+    /// @param resolvedAt Timestamp when the incident became resolved.
     /// @param referenceBlock Pre-incident valuation block.
     /// @param openBlock Block used to archive-read settlement configuration.
-    /// @param status Open or beta-voided lifecycle state.
-    /// @param disputedAt Reserved zero value retained for getter ABI compatibility.
+    /// @param phaseDeadline Current phase deadline. It is the claim deadline while
+    ///        `root == 0`, then the correction deadline after settlement.
+
+    /// @param root Standing settlement Merkle root, or zero.
+    /// @param unresolvedClaims Number of live claims; zero resolves the incident.
     /// @param claimSetHash Ordered commitment to joins and cancellations.
+    /// @param teePcrHash Timelock-approved TEE PCR commitment snapshotted at incident open.
+    /// @param pools Pool snapshot defining payout-row order.
+    /// @param poolBudget Remaining payout budgets aligned to {pools}.
+    /// @param protocolFeeShareBps Protocol share of gross payouts, snapshotted at opening.
     struct Incident {
         IERC20 insuredToken;
-        uint64 claimWindowEndTime;
-        bytes32 root;
-        uint256 unresolved;
-        uint64 rootSubmittedAt;
+        uint64 resolvedAt;
         uint64 referenceBlock;
         uint64 openBlock;
-        Status status;
-        uint64 disputedAt;
+        uint64 phaseDeadline;
+        bytes32 root;
+        uint256 unresolvedClaims;
         bytes32 claimSetHash;
+        bytes32 teePcrHash;
+        address[] pools;
+        uint256[] poolBudget;
+        uint16 protocolFeeShareBps;
     }
 
-    /// @notice Mutually exclusive incident lifecycle state.
-    /// @custom:value Open Running normally.
-    /// @custom:value Disputed Reserved legacy value; no function enters this state.
-    /// @custom:value Closed Voided by beta correction; escrow is recoverable.
-    enum Status {
-        Open,
-        Disputed,
-        Closed
-    }
-
-    /// @notice All incidents by id. Id 0 is reserved.
+    /// @notice Incident scalar state by id. Dynamic arrays have dedicated getters.
     mapping(uint256 incidentId => Incident) public incidents;
 
-    /// @notice Pool snapshot defining each incident's payout-row order.
-    mapping(uint256 incidentId => address[]) internal incidentPools;
+    /// @notice Common phase duration snapshotted when each incident opens.
+    mapping(uint256 incidentId => uint64 phaseWindow) public incidentPhaseWindow;
 
-    /// @notice Remaining per-pool payout budgets, aligned to {incidentPools}.
-    ///         Finalization decrements them, hard-capping cumulative pool loss.
-    mapping(uint256 incidentId => uint256[]) internal incidentPoolBudget;
+    /// @notice Pool addresses snapshotted for an incident.
+    function incidentPools(uint256 incidentId) external view returns (address[] memory) {
+        return incidents[incidentId].pools;
+    }
 
-    /// @notice Actual timestamp for incidents resolved by beta void or final claim.
-    mapping(uint256 incidentId => uint64) public incidentResolvedAt;
+    /// @notice Remaining pool budgets aligned with {incidentPools} after settlement.
+    function incidentPoolBudget(uint256 incidentId) external view returns (uint256[] memory) {
+        return incidents[incidentId].poolBudget;
+    }
 
     /// @notice Next incident id to assign. Starts at 1.
-    uint256 public nextIncidentId;
+    uint64 public nextIncidentId;
 
     /// @notice Escrow registration for one claimant; economics are computed off-chain.
     /// @param user Claimant.
     /// @param incidentId Incident id.
     /// @param insuredTokenAmount Escrowed insured-token amount.
     /// @param boosterAmount Booster units escrowed when the claim is filed.
+    /// @param bondAmount USD8 bond posted with this claim.
     /// @param resolved Whether any resolution path has completed.
-    /// @param boosterCollection Booster collection snapshotted at registration.
     struct Claim {
         address user;
-        uint256 incidentId;
+        uint64 incidentId;
         uint128 insuredTokenAmount;
         uint128 boosterAmount;
+        uint128 bondAmount;
         bool resolved;
-        address boosterCollection;
     }
+
+    /// @notice Next claim id to assign. Starts at 1.
+    uint64 public nextClaimId;
+
+    /// @notice Configurable anti-spam bond posted in USD8 when filing a claim.
+    uint128 public claimBondAmount;
 
     /// @notice All claims by id. Id 0 is reserved.
     mapping(uint256 claimId => Claim) public claims;
 
-    /// @notice Next claim id to assign. Starts at 1.
-    uint256 public nextClaimId;
+    /// @notice Claim id for an account and incident. Cancellation clears it so the
+    ///         account may re-file; all other resolution paths retain it.
+    mapping(uint256 incidentId => mapping(address account => uint256 claimId)) public claimIdByIncidentAndUser;
 
-    /// @notice One live claim per account and incident; zero means none.
-    mapping(uint256 incidentId => mapping(address account => uint256 claimId)) public activeClaimId;
-
-    /// @notice Live escrow excluded from token sweeping.
+    /// @notice Live insured-token escrow excluded from token sweeping.
     mapping(IERC20 insuredToken => uint256) public escrowedInsuredTokens;
-
-    /// @notice The only booster token id in use. Claims commit units of this id;
-    ///         the collection address lives on the pool ({Registry.boosterNFT}).
-    uint256 public constant BOOSTER_ID = 1;
-
-    /// @notice Hard-coded booster policy: each escrowed unit of {BOOSTER_ID}
-    ///         adds 100 bps (+1%) to the claimant's insurance-score multiplier.
-    ///         Applied off-chain and verified on-chain at finalization.
-    uint256 public constant BOOSTER_BOOST_BPS = 100;
 
     // ─────────────────────────── State (settlement config) ───────────────────────────
 
     /// @notice Off-chain settlement windows, archive-read at {Incident.openBlock}.
     /// @param twapLookbackBlocks Pre-incident token-to-underlying TWAP lookback.
-    /// @param holdingMarginBlocks Window used to prove minimum pre-incident holdings.
+    /// @param minHoldingRequired Window used to prove minimum pre-incident holdings.
     /// @param sampleStepBlocks TWAP sampling stride; eligibility replay is exact.
     struct SettlementParams {
         uint64 twapLookbackBlocks;
-        uint64 holdingMarginBlocks;
+        uint64 minHoldingRequired;
         uint64 sampleStepBlocks;
     }
 
@@ -231,85 +200,55 @@ contract DefiInsurance is
     ///         incident's {Incident.openBlock}; changes apply to later incidents.
     SettlementParams public settlementParams;
 
-    /// @notice Timelock-approved TEE PCR commitment snapshotted at incident open.
-    mapping(uint256 incidentId => bytes32 pcrHash) public incidentTeePcrHash;
+    /// @notice Live claim bonds excluded from token sweeping.
+    uint256 internal _escrowedClaimBonds;
 
     /// @notice EIP-712 settlement schema binds the active incident, root, exact claim set,
     ///         ordered pools, per-pool budgets, and approved TEE PCR.
     bytes32 internal constant SETTLEMENT_TYPEHASH = keccak256(
-        "Settlement(uint256 incidentId,bytes32 root,uint256 unresolved,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
+        "Settlement(uint256 incidentId,bytes32 root,uint256 unresolvedClaims,uint256[] poolPayouts,bytes32 pools,bytes32 claimSet,bytes32 teePcrHash)"
     );
 
-    /// @notice EIP-712 open schema binds token, reference block, single-use incident id, and PCR.
-    bytes32 internal constant OPEN_TYPEHASH =
-        keccak256("IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId,bytes32 teePcrHash)");
+    /// @notice EIP-712 open schema binds token, reference block, single-use incident id,
+    ///         PCR, and the exact Registry price policy / conversion recipe.
+    bytes32 internal constant OPEN_TYPEHASH = keccak256(
+        "IncidentOpen(address insuredToken,uint64 referenceBlock,uint256 incidentId,bytes32 teePcrHash,bytes32 eligibilityHash)"
+    );
 
     // ─────────────────────────── Errors ──────────────────────────
 
-    /// @notice A required token or payout amount is zero.
     error ZeroAmount();
 
-    /// @notice Received claim escrow is below the token's configured minimum.
-    error ClaimBelowMinimum(IERC20 insuredToken, uint256 received, uint256 minimum);
-
-    /// @notice The configured minimum claim amount is zero.
-    error InvalidMinClaimAmount(uint256 given);
-
-    /// @notice The coverage factor is zero or exceeds the basis-point denominator.
     error InvalidMaxCoverageBps(uint256 given, uint256 max);
 
-    /// @notice The reference block is zero, future, or older than the permitted age.
     error InvalidReferenceBlock(uint64 referenceBlock);
 
-    /// @notice A token cannot be both insured and used as a cover-pool asset.
     error TokenConflict();
 
-    /// @notice The insured token is already listed.
-    error InsuredTokenAlreadyApproved(IERC20 insuredToken);
-
-    /// @notice The insured token is not listed.
     error InsuredTokenNotApproved(IERC20 insuredToken);
 
-    /// @notice Claims can no longer join or cancel for this token.
-    error ClaimWindowClosed(IERC20 insuredToken, uint64 claimWindowEndTime);
+    error ClaimWindowClosed(IERC20 insuredToken, uint64 claimDeadline);
 
-    /// @notice No booster collection is configured.
-    error BoosterNFTUnset();
-
-    /// @notice The caller does not own the referenced claim.
     error UnauthorizedClaim(uint256 claimId);
 
-    /// @notice The claim already completed a resolution path.
     error ClaimAlreadyResolved(uint256 claimId);
 
-    /// @notice The caller already has a live claim on this incident.
     error DuplicateClaim(uint256 incidentId);
 
-    /// @notice The caller has no live claim on the active incident.
     error NoActiveClaim();
 
-    /// @notice The referenced incident is not currently active.
     error NotActiveIncident(uint256 incidentId);
 
-    /// @notice Finalization has opened, so governance can no longer intervene.
     error IncidentFinalizing(uint256 incidentId);
 
-    /// @notice The incident is not in the Open lifecycle state.
-    error IncidentNotOpen(uint256 incidentId);
-
-    /// @notice A settlement was submitted outside its allowed phase.
     error OutsideSettlementPhase(uint256 incidentId);
 
-    /// @notice The incident has no usable settlement root.
     error NoStandingRoot(uint256 incidentId);
 
-    /// @notice The incident already has its one permitted TEE settlement.
     error AlreadySettled(uint256 incidentId);
 
-    /// @notice The incident is outside its claim-finalization phase.
     error FinalizeNotOpen(uint256 incidentId);
 
-    /// @notice The payout row or Merkle proof does not match the standing root.
     error InvalidProof(uint256 claimId);
 
     /// @notice Signed eligible escrow exceeds the amount actually escrowed.
@@ -318,31 +257,20 @@ contract DefiInsurance is
     /// @notice Merkle row's boosted score does not match its raw score and escrowed booster units.
     error InvalidBoostedScore(uint256 provided, uint256 expected);
 
-    /// @notice The claim still has a possible payout path and cannot be withdrawn.
-    error ClaimNotWithdrawable(uint256 claimId);
-
-    /// @notice Settlement-critical configuration cannot change during an incident.
     error IncidentsActive();
 
-    /// @notice Settlement sampling parameters are invalid.
+    error IncidentTokenMismatch(uint256 incidentId, IERC20 expectedToken, IERC20 suppliedToken);
+
     error InvalidSettlementParams();
 
-    /// @notice A later claimant supplied first-claim open-attestation data.
     error UnexpectedOpenAttestation();
 
-    /// @notice The recovered incident-open signer is unauthorized.
     error UnauthorizedOpenSigner(address recovered);
 
-    /// @notice The recovered settlement signer is unauthorized.
     error UnauthorizedSettlementSigner(address recovered);
 
-    /// @notice The booster commitment cannot fit in claim storage.
-    error BoosterAmountTooLarge(uint256 boosterAmount);
-
-    /// @notice The payout row length differs from the incident pool snapshot.
     error SettlementPoolMismatch(uint256 given, uint256 expected);
 
-    /// @notice A payout exceeds the pool's committed incident budget.
     error PayoutCapExceeded(uint256 poolIndex, uint256 requested, uint256 cap);
 
     /// @notice This contract is not the Registry's active insurance module.
@@ -350,37 +278,27 @@ contract DefiInsurance is
 
     // ─────────────────────────── Events ──────────────────────────
 
-    /// @notice Emitted when governance lists an insured token.
     event InsuredTokenAdded(IERC20 indexed insuredToken);
 
-    /// @notice Emitted when a token's coverage factor changes.
     event MaxCoverageBpsSet(IERC20 indexed insuredToken, uint256 maxCoverageBps);
 
-    /// @notice Emitted when a token's minimum claim escrow changes.
-    event MinClaimAmountSet(IERC20 indexed insuredToken, uint128 minClaimAmount);
-
-    /// @notice Emitted when a token's historical conversion recipe changes.
     event UnderlyingConversionSet(IERC20 indexed insuredToken, address conversionAddress, bytes conversionCallData);
 
-    /// @notice Emitted when a token's underlying price oracle changes.
     event UnderlyingPriceOracleSet(IERC20 indexed insuredToken, address underlyingPriceOracle);
 
-    /// @notice Emitted when governance delists an insured token.
     event InsuredTokenRemoved(IERC20 indexed insuredToken);
 
-    /// @notice Emitted when global settlement windows change.
     event SettlementParamsSet(SettlementParams params);
 
-    /// @notice Emitted when the sole active incident opens.
-    event IncidentOpened(uint256 indexed incidentId, IERC20 indexed insuredToken, uint64 claimWindowEndTime);
+    event IncidentOpened(
+        uint256 indexed incidentId, IERC20 indexed insuredToken, uint64 claimDeadline, uint16 protocolFeeShareBps
+    );
 
-    /// @notice Emitted when a TEE-signed settlement root is committed.
     event IncidentSettled(uint256 indexed incidentId, bytes32 root, bytes32 teePcrHash);
 
     /// @notice Emitted when beta governance corrects a root; zero means voided.
     event IncidentCorrected(uint256 indexed incidentId, bytes32 root);
 
-    /// @notice Emitted when a claimant escrows tokens and joins an incident.
     event ClaimRegistered(
         uint256 indexed claimId,
         uint256 indexed incidentId,
@@ -390,22 +308,19 @@ contract DefiInsurance is
         uint256 boosterAmount
     );
 
-    /// @notice Emitted when a claim successfully finalizes its payout.
     event ClaimFinalized(uint256 indexed claimId, address indexed user);
 
-    /// @notice Emitted when a claimant cancels during the claim window.
+    event ProtocolFeePaid(uint256 indexed incidentId, address indexed pool, address indexed receiver, uint256 amount);
+
     event ClaimCancelled(uint256 indexed claimId, address indexed user);
 
-    /// @notice Emitted when an unresolved claim recovers escrow after payout becomes impossible.
-    event ClaimWithdrawn(uint256 indexed claimId, address indexed user);
+    /// @notice Emitted when a claim resolves without accepting its offered payout.
+    event ClaimDeclined(uint256 indexed claimId, address indexed user, bool eligible);
 
-    /// @notice Emitted when timelock changes a TEE signer's authorization.
     event TeeSignerSet(address indexed signer, bool authorized);
 
-    /// @notice Emitted on {finalizeClaim} for the insurance score a claim consumed.
-    ///         The incident-tagged log the settler sums per user (pinned before an
-    ///         incident's openBlock) for the available budget; the cumulative total is
-    ///         also mirrored on-chain via {Registry.recordScoreSpent}.
+    /// @notice Emitted when an accepted payout consumes score. Off-chain settlement
+    ///         uses incident-tagged logs; Registry records the cumulative user total.
     event ScoreSpent(address indexed user, uint256 amount, uint256 indexed incidentId);
 
     // ─────────────────────────── Initialization ─────────────────────
@@ -416,155 +331,53 @@ contract DefiInsurance is
     }
 
     /// @notice Initialize the payout-module proxy. Callable once.
-    /// @param _registry Shared access and topology registry; its timelock delay must
-    ///        leave enough of {DISPUTE_PERIOD} to intervene on a bad root.
+    /// @param _registry Shared access, topology, and timing registry.
     function initialize(Registry _registry) external initializer {
         __EIP712_init("DefiInsurance", "1");
         _setRegistry(_registry);
         nextIncidentId = 1;
         nextClaimId = 1;
-        // Nonzero defaults keep settlement live before governance tunes the policy.
+        claimBondAmount = 10e18;
+        // Nonzero block-based defaults keep settlement live before governance tunes policy.
         settlementParams = SettlementParams({
-            twapLookbackBlocks: 50_400, // ~7d TWAP window before referenceBlock (anti-manipulation over recency)
-            holdingMarginBlocks: 50_400, // ~7d required pre-incident holding for eligibility before refBlock
-            sampleStepBlocks: 300 // ~1h TWAP sample stride (≈168 samples over a 7d window)
+            twapLookbackBlocks: 50_400, // TWAP lookback
+            minHoldingRequired: 50_400, // pre-incident holding window
+            sampleStepBlocks: 300 // TWAP sampling stride
         });
     }
 
     /// @dev Timelock-only during beta and blocked while an incident is active;
     ///      Registry.endBetaMode disables this forever.
-    function _authorizeUpgrade(address) internal view override onlyTimelock onlyBetaMode notDuringIncident {}
+    function _authorizeUpgrade(address) internal view override {
+        _requireTimelock();
+        _requireBetaMode();
+        _requireNoActiveIncident();
+    }
 
     /// @dev Freezes settlement-critical configuration from incident open through resolution.
-    modifier notDuringIncident() {
+    function _requireNoActiveIncident() internal view {
         if (_activeIncidentId() != 0) revert IncidentsActive();
-        _;
     }
 
-    /// @dev The token must be a listed insured token (maxCoverageBps != 0).
-    modifier onlyInsuredToken(IERC20 token) {
-        if (insuredTokens[token].maxCoverageBps == 0) revert InsuredTokenNotApproved(token);
-        _;
+    /// @dev A deregistered module is recovery-only: unresolved claimants may
+    ///      cancel or withdraw, but the stale module cannot advance settlement.
+    function _requireRegisteredDefiInsurance() internal view {
+        if (registry().defiInsurance() != address(this)) revert DefiInsuranceNotRegistered();
     }
 
-    // ─────────────────────────── Insured token management (timelock) ───────────────────────────
+    //--─────────────────────────── System related settings ───────────────────────────
 
-    /// @notice List an insured token and its settlement recipe. Timelock only.
-    /// @dev Generic history replay requires non-rebasing ERC-20s whose balance changes
-    ///      emit canonical `Transfer` events; other semantics need a reviewed adapter.
-    /// @param insuredToken Token to insure; must not be a pool asset.
-    /// @param _maxCoverageBps Buyout cap κ in bps.
-    /// @param _minClaimAmount Minimum nonzero escrow in token base units.
-    /// @param underlyingPriceOracle Underlying-to-USD oracle.
-    /// @param conversionAddress Token-to-underlying staticcall target; zero is identity.
-    /// @param conversionCallData Calldata for the conversion staticcall.
-    function addInsuredToken(
-        IERC20 insuredToken,
-        uint256 _maxCoverageBps,
-        uint128 _minClaimAmount,
-        address underlyingPriceOracle,
-        address conversionAddress,
-        bytes calldata conversionCallData
-    ) external onlyTimelock {
-        if (address(insuredToken) == address(0) || underlyingPriceOracle == address(0)) {
-            revert ZeroAddress();
-        }
-        if (registry().coverPool(insuredToken) != address(0)) revert TokenConflict();
-        if (insuredTokens[insuredToken].maxCoverageBps != 0) revert InsuredTokenAlreadyApproved(insuredToken);
-        if (_maxCoverageBps == 0 || _maxCoverageBps > BPS_DENOMINATOR) {
-            revert InvalidMaxCoverageBps(_maxCoverageBps, BPS_DENOMINATOR);
-        }
-        if (_minClaimAmount == 0) revert InvalidMinClaimAmount(_minClaimAmount);
-        insuredTokens[insuredToken] = InsuredToken({
-            maxCoverageBps: _maxCoverageBps,
-            underlyingPriceOracle: underlyingPriceOracle,
-            underlyingConversionAddress: conversionAddress,
-            underlyingConversionCallData: conversionCallData,
-            minClaimAmount: _minClaimAmount
-        });
-        insuredTokenList.push(insuredToken);
-        emit InsuredTokenAdded(insuredToken);
-        emit MaxCoverageBpsSet(insuredToken, _maxCoverageBps);
-        emit MinClaimAmountSet(insuredToken, _minClaimAmount);
-        emit UnderlyingPriceOracleSet(insuredToken, underlyingPriceOracle);
-        emit UnderlyingConversionSet(insuredToken, conversionAddress, conversionCallData);
-    }
-
-    /// @notice Update an insured token's coverage factor κ. Timelock only.
-    /// @param insuredToken  Listed insured token to update.
-    /// @param _maxCoverageBps  New κ in (0, 100%] (bps).
-    function setMaxCoverageBps(IERC20 insuredToken, uint256 _maxCoverageBps)
-        external
-        onlyTimelock
-        notDuringIncident
-        onlyInsuredToken(insuredToken)
-    {
-        if (_maxCoverageBps == 0 || _maxCoverageBps > BPS_DENOMINATOR) {
-            revert InvalidMaxCoverageBps(_maxCoverageBps, BPS_DENOMINATOR);
-        }
-        insuredTokens[insuredToken].maxCoverageBps = _maxCoverageBps;
-        emit MaxCoverageBpsSet(insuredToken, _maxCoverageBps);
-    }
-
-    /// @notice Update an insured token's minimum claim escrow. Timelock only.
-    /// @param insuredToken Listed insured token to update.
-    /// @param _minClaimAmount New non-zero minimum, in insured-token base units.
-    function setMinClaimAmount(IERC20 insuredToken, uint128 _minClaimAmount)
-        external
-        onlyTimelock
-        notDuringIncident
-        onlyInsuredToken(insuredToken)
-    {
-        if (_minClaimAmount == 0) revert InvalidMinClaimAmount(_minClaimAmount);
-        insuredTokens[insuredToken].minClaimAmount = _minClaimAmount;
-        emit MinClaimAmountSet(insuredToken, _minClaimAmount);
-    }
-
-    /// @notice Update an insured token's token→underlying conversion recipe.
-    ///         Timelock only. 0 = identity (ratio 1e18). See {InsuredToken}.
-    /// @param insuredToken       Listed insured token to update.
-    /// @param conversionAddress  New staticcall target (0 = identity).
-    /// @param conversionCallData New calldata for that staticcall.
-    function setUnderlyingConversion(IERC20 insuredToken, address conversionAddress, bytes calldata conversionCallData)
-        external
-        onlyTimelock
-        notDuringIncident
-        onlyInsuredToken(insuredToken)
-    {
-        InsuredToken storage t = insuredTokens[insuredToken];
-        t.underlyingConversionAddress = conversionAddress;
-        t.underlyingConversionCallData = conversionCallData;
-        emit UnderlyingConversionSet(insuredToken, conversionAddress, conversionCallData);
-    }
-
-    /// @notice Update an insured token's underlying→USD price oracle. Timelock only.
-    /// @param insuredToken  Listed insured token to update.
-    /// @param underlyingPriceOracle   New oracle address (non-zero).
-    function setUnderlyingPriceOracle(IERC20 insuredToken, address underlyingPriceOracle)
-        external
-        onlyTimelock
-        notDuringIncident
-        onlyInsuredToken(insuredToken)
-    {
-        if (underlyingPriceOracle == address(0)) revert ZeroAddress();
-        insuredTokens[insuredToken].underlyingPriceOracle = underlyingPriceOracle;
-        emit UnderlyingPriceOracleSet(insuredToken, underlyingPriceOracle);
-    }
-
-    /// @notice Delist an insured token without moving funds. Admin or timelock.
-    /// @param insuredToken  Approved insured token to delist.
-    function removeInsuredToken(IERC20 insuredToken)
-        external
-        onlyAdminOrTimelock
-        notDuringIncident
-        onlyInsuredToken(insuredToken)
-    {
-        _delistInsuredToken(insuredToken);
+    /// @notice Set the USD8 bond required for each new claim. Timelock only.
+    function setClaimBondAmount(uint128 amount) external {
+        _requireTimelock();
+        claimBondAmount = amount;
     }
 
     /// @notice Set archive-read settlement windows between incidents. Timelock only.
     /// @param p  New settlement windows. See {SettlementParams}.
-    function setSettlementParams(SettlementParams calldata p) external onlyTimelock notDuringIncident {
+    function setSettlementParams(SettlementParams calldata p) external {
+        _requireTimelock();
+        _requireNoActiveIncident();
         // sampleStepBlocks is the TWAP loop stride off-chain; 0 would never advance.
         if (p.sampleStepBlocks == 0) revert InvalidSettlementParams();
         settlementParams = p;
@@ -573,42 +386,91 @@ contract DefiInsurance is
 
     /// @dev Only token balance above live escrow is sweepable; payouts come from pools.
     function _sweepable(address token) internal view override returns (uint256) {
-        uint256 accounted = escrowedInsuredTokens[IERC20(token)];
-        uint256 bal = IERC20(token).balanceOf(address(this));
+        IERC20 erc20 = IERC20(token);
+        uint256 accounted = escrowedInsuredTokens[erc20];
+        if (token == registry().usd8()) accounted += _escrowedClaimBonds;
+        uint256 bal = erc20.balanceOf(address(this));
         return bal > accounted ? bal - accounted : 0;
+    }
+
+    // ─────────────────────────── Insured token management (timelock) ───────────────────────────
+
+    /// @notice Add, atomically update, or delist an insured token's settlement configuration.
+    /// @dev A zero maxCoverageBps delists an existing token. New tokens may be listed during
+    ///      an unrelated incident; updates and delisting remain frozen until it resolves.
+    function editInsuredToken(
+        IERC20 insuredToken,
+        uint256 maxCoverageBps,
+        address underlyingPriceOracle,
+        address conversionAddress,
+        bytes calldata conversionCallData
+    ) external {
+        _requireTimelock();
+        if (address(insuredToken) == address(0)) revert ZeroAddress();
+        bool isNew = insuredTokens[insuredToken].maxCoverageBps == 0;
+        if (maxCoverageBps == 0) {
+            // Delist an existing token.
+            if (isNew) revert InsuredTokenNotApproved(insuredToken);
+            if (_activeIncidentId() != 0) revert IncidentsActive();
+            _delistInsuredToken(insuredToken);
+            return;
+        }
+        if (underlyingPriceOracle == address(0)) revert ZeroAddress();
+        if (maxCoverageBps > MAX_CLAIMANT_COVERAGE_BPS) {
+            revert InvalidMaxCoverageBps(maxCoverageBps, MAX_CLAIMANT_COVERAGE_BPS);
+        }
+        if (isNew) {
+            // Add a new token.
+            if (registry().coverPool(insuredToken) != address(0)) revert TokenConflict();
+            emit InsuredTokenAdded(insuredToken);
+        } else if (_activeIncidentId() != 0) {
+            revert IncidentsActive();
+        }
+
+        insuredTokens[insuredToken] = InsuredToken({
+            maxCoverageBps: maxCoverageBps.toUint16(),
+            underlyingPriceOracle: underlyingPriceOracle,
+            underlyingConversionAddress: conversionAddress,
+            underlyingConversionCallData: conversionCallData
+        });
+        emit MaxCoverageBpsSet(insuredToken, maxCoverageBps);
+        emit UnderlyingPriceOracleSet(insuredToken, underlyingPriceOracle);
+        emit UnderlyingConversionSet(insuredToken, conversionAddress, conversionCallData);
     }
 
     // ─────────────────────────── Claim lifecycle ───────────────────────────
 
-    /// @notice Claim-less admin fallback when the TEE cannot open an incident.
+    /// @notice Open an incident without filing a claim or supplying a TEE signature.
+    ///         Admin or timelock only.
     /// @param insuredToken Covered token.
     /// @param referenceBlock Recent pre-incident valuation block.
     /// @return incidentId Newly opened incident id.
     function openClaimIncident(IERC20 insuredToken, uint64 referenceBlock)
         external
         nonReentrant
-        onlyAdminOrTimelock
         returns (uint256 incidentId)
     {
-        return _openIncident(insuredToken, referenceBlock);
+        _requireAdminOrTimelock();
+        return _openIncident(insuredToken, referenceBlock, registry().teePcrHash());
     }
 
-    /// @dev Opens the sole incident and snapshots its settlement inputs and pool order.
-    function _openIncident(IERC20 insuredToken, uint64 referenceBlock)
+    /// @dev Opens an incident with the supplied PCR commitment after caller-specific checks.
+    function _openIncident(IERC20 insuredToken, uint64 referenceBlock, bytes32 teePcrHash)
         internal
-        whenNotPaused
-        onlyInsuredToken(insuredToken)
         returns (uint256 incidentId)
     {
-        // One-at-a-time guard; token listing is enforced by onlyInsuredToken.
+        _requireNotPaused();
+        if (insuredTokens[insuredToken].maxCoverageBps == 0) revert InsuredTokenNotApproved(insuredToken);
+        // One-at-a-time guard; token listing is checked above.
         if (_activeIncidentId() != 0) revert IncidentsActive();
         // An unregistered module cannot activate the Registry-driven pool freeze.
         if (registry().defiInsurance() != address(this)) revert DefiInsuranceNotRegistered();
 
         // The reference block also expires signed open attestations.
+        Registry.IncidentTimingConfig memory timing = registry().incidentTimingConfig();
         if (
             referenceBlock == 0 || referenceBlock >= block.number
-                || block.number - referenceBlock > MAX_REFERENCE_BLOCK_AGE
+                || block.number - referenceBlock > timing.maxReferenceBlockAge
         ) revert InvalidReferenceBlock(referenceBlock);
 
         // Matured exits are no longer underwriting capital. Settle them before
@@ -621,112 +483,137 @@ contract DefiInsurance is
             }
         }
 
-        incidentId = nextIncidentId;
-        nextIncidentId = incidentId + 1;
-        uint64 wEnd = uint64(block.timestamp) + CLAIM_WINDOW;
-        incidents[incidentId] = Incident({
-            insuredToken: insuredToken,
-            claimWindowEndTime: wEnd,
-            root: bytes32(0),
-            unresolved: 0,
-            rootSubmittedAt: 0,
-            referenceBlock: referenceBlock,
-            openBlock: uint64(block.number),
-            status: Status.Open,
-            disputedAt: 0,
-            claimSetHash: bytes32(0)
-        });
-        incidentTeePcrHash[incidentId] = registry().teePcrHash();
-
+        incidentId = nextIncidentId++;
+        uint64 claimDeadline = uint64(block.timestamp) + timing.phaseWindow;
+        Incident storage inc = incidents[incidentId];
+        inc.insuredToken = insuredToken;
+        inc.referenceBlock = referenceBlock;
+        inc.openBlock = uint64(block.number);
+        inc.phaseDeadline = claimDeadline;
+        inc.protocolFeeShareBps = registry().protocolFeeConfig().claimProtocolFeeShareBps;
+        incidentPhaseWindow[incidentId] = timing.phaseWindow;
         // Pin payout-row ordering independently of later Registry topology.
-        incidentPools[incidentId] = poolAddrs;
+        inc.pools = poolAddrs;
+        inc.teePcrHash = teePcrHash;
 
-        emit IncidentOpened(incidentId, insuredToken, wEnd);
+        emit IncidentOpened(incidentId, insuredToken, claimDeadline, inc.protocolFeeShareBps);
     }
 
-    /// @notice Escrow a claim, opening an incident if none is active. The first claim
-    ///         requires a TEE open attestation; later claims must omit it.
+    /// @notice File a claim, atomically opening an incident when none is active.
     /// @param insuredToken Token being claimed.
-    /// @param insuredTokenAmount Requested escrow; received amount must meet the minimum.
+    /// @param insuredTokenAmount Amount to transfer; the claim records the nonzero amount received.
     /// @param scoreToSpend Requested score spend; settlement caps it to availability.
     /// @param boosterAmount Booster units transferred into escrow with the claim.
-    /// @param referenceBlock Pre-incident block for the first claim; otherwise zero.
+    /// @param referenceBlock TEE-selected block for the first claim; otherwise zero.
     /// @param signature TEE open signature for the first claim; otherwise empty.
     /// @return claimId The newly minted claim id.
-    function joinClaim(
+    function fileClaim(
         IERC20 insuredToken,
         uint128 insuredTokenAmount,
         uint256 scoreToSpend,
         uint256 boosterAmount,
         uint64 referenceBlock,
         bytes calldata signature
-    ) external nonReentrant whenNotPaused returns (uint256 claimId) {
+    ) external nonReentrant returns (uint256 claimId) {
+        _requireNotPaused();
+        _requireRegisteredDefiInsurance();
         if (insuredTokenAmount == 0) revert ZeroAmount();
 
         uint256 incidentId = _activeIncidentId();
-        if (incidentId != 0) {
-            // A claim is already live — just join it; no open attestation expected.
-            if (referenceBlock != 0 || signature.length != 0) revert UnexpectedOpenAttestation();
-            Incident storage cur = incidents[incidentId];
-            // Only an open incident accepts new claims.
-            if (cur.status != Status.Open) revert IncidentNotOpen(incidentId);
-            // A different token holding the system means one-at-a-time blocks us.
-            if (cur.insuredToken != insuredToken) revert IncidentsActive();
-            if (block.timestamp > cur.claimWindowEndTime) {
-                revert ClaimWindowClosed(insuredToken, cur.claimWindowEndTime);
-            }
-            // Prevent score-budget multiplication through claim splitting.
-            if (activeClaimId[incidentId][msg.sender] != 0) revert DuplicateClaim(incidentId);
-        } else {
-            // Preserve ECDSA's canonical malformed-signature errors before the
-            // open, then verify valid-length signatures against its PCR snapshot.
-            if (signature.length != 65) ECDSA.recover(bytes32(0), signature);
-            incidentId = _openIncident(insuredToken, referenceBlock);
-            bytes32 digest = _hashTypedDataV4(
-                keccak256(
-                    abi.encode(
-                        OPEN_TYPEHASH, address(insuredToken), referenceBlock, incidentId, incidentTeePcrHash[incidentId]
-                    )
-                )
-            );
-            address recovered = ECDSA.recover(digest, signature);
+
+        if (incidentId == 0) {
+            // Open a new incident.
+            if (signature.length != 65) revert ECDSA.ECDSAInvalidSignatureLength(signature.length);
+            incidentId = nextIncidentId;
+            bytes32 teePcrHash = registry().teePcrHash();
+
+            address recovered =
+                ECDSA.recover(_incidentOpenDigest(insuredToken, referenceBlock, incidentId, teePcrHash), signature);
             if (!isTeeSigner[recovered]) revert UnauthorizedOpenSigner(recovered);
+
+            _openIncident(insuredToken, referenceBlock, teePcrHash);
+        } else {
+            // Join the active incident.
+            if (referenceBlock != 0 || signature.length != 0) revert UnexpectedOpenAttestation();
+
+            Incident storage cur = incidents[incidentId];
+            if (cur.root != bytes32(0)) revert IncidentFinalizing(incidentId);
+            if (cur.insuredToken != insuredToken) {
+                revert IncidentTokenMismatch(incidentId, cur.insuredToken, insuredToken);
+            }
+
+            if (block.timestamp > cur.phaseDeadline) {
+                revert ClaimWindowClosed(insuredToken, cur.phaseDeadline);
+            }
+
+            // Prevent score-budget multiplication through claim splitting.
+            if (claimIdByIncidentAndUser[incidentId][msg.sender] != 0) revert DuplicateClaim(incidentId);
         }
 
-        uint128 escrow = uint128(_pullToken(insuredToken, msg.sender, insuredTokenAmount));
+        uint128 bondAmount = claimBondAmount;
+        uint128 escrow = _pullToken(insuredToken, msg.sender, insuredTokenAmount).toUint128();
         if (escrow == 0) revert ZeroAmount();
-        uint128 minimum = insuredTokens[insuredToken].minClaimAmount;
-        if (escrow < minimum) revert ClaimBelowMinimum(insuredToken, escrow, minimum);
         escrowedInsuredTokens[insuredToken] += escrow;
 
+        {
+            IERC20 usd8 = IERC20(registry().usd8());
+            usd8.safeTransferFrom(msg.sender, address(this), bondAmount);
+            _escrowedClaimBonds += bondAmount;
+        }
+
         claimId = nextClaimId++;
-        activeClaimId[incidentId][msg.sender] = claimId;
+        claimIdByIncidentAndUser[incidentId][msg.sender] = claimId;
         claims[claimId] = Claim({
             user: msg.sender,
-            incidentId: incidentId,
+            incidentId: incidentId.toUint64(),
             insuredTokenAmount: escrow,
-            boosterAmount: 0,
-            resolved: false,
-            boosterCollection: address(0)
+            boosterAmount: boosterAmount.toUint128(),
+            bondAmount: bondAmount,
+            resolved: false
         });
 
         if (boosterAmount != 0) {
-            // Keep stored and emitted booster amounts identical.
-            if (boosterAmount > type(uint128).max) revert BoosterAmountTooLarge(boosterAmount);
-            address booster = registry().boosterNFT();
-            if (booster == address(0)) revert BoosterNFTUnset();
-            claims[claimId].boosterAmount = uint128(boosterAmount);
-            claims[claimId].boosterCollection = booster;
-            IERC1155(booster).safeTransferFrom(msg.sender, address(this), BOOSTER_ID, boosterAmount, "");
+            (address booster, uint64 boosterId,) = registry().boosterConfig();
+            IERC1155(booster).safeTransferFrom(msg.sender, address(this), boosterId, boosterAmount, "");
         }
 
-        Incident storage reg = incidents[incidentId];
-        reg.unresolved += 1;
+        Incident storage inc = incidents[incidentId];
+
+        inc.unresolvedClaims += 1;
         // Commit the emitted join fields in replay order.
-        reg.claimSetHash =
-            keccak256(abi.encode(reg.claimSetHash, claimId, msg.sender, escrow, scoreToSpend, boosterAmount));
+        inc.claimSetHash =
+            keccak256(abi.encode(inc.claimSetHash, claimId, msg.sender, escrow, scoreToSpend, boosterAmount));
 
         emit ClaimRegistered(claimId, incidentId, msg.sender, escrow, scoreToSpend, boosterAmount);
+    }
+
+    /// @notice Cancel your active claim during the claim phase. Returns insured-token
+    ///         escrow, boosters, and bond, then allows a new claim id in the same phase.
+    function cancelClaim() external nonReentrant {
+        uint256 incidentId = _activeIncidentId();
+        uint256 claimId = claimIdByIncidentAndUser[incidentId][msg.sender];
+        if (claimId == 0) revert NoActiveClaim();
+
+        Incident storage inc = incidents[incidentId];
+        if (inc.root != bytes32(0)) revert IncidentFinalizing(incidentId);
+        if (block.timestamp > inc.phaseDeadline) {
+            revert ClaimWindowClosed(inc.insuredToken, inc.phaseDeadline);
+        }
+
+        Claim storage c = claims[claimId];
+        if (c.resolved) revert ClaimAlreadyResolved(claimId);
+        c.resolved = true;
+        inc.unresolvedClaims -= 1;
+        // Chain cancellations into the claim-set commitment with a distinct encoding
+        // from claim entries.
+        inc.claimSetHash = keccak256(abi.encode(inc.claimSetHash, claimId));
+        claimIdByIncidentAndUser[incidentId][msg.sender] = 0; // may re-file within the window with a different claim id
+        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
+        _returnBoosters(c, msg.sender);
+        _resolveClaimBond(c, msg.sender);
+        inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
+
+        emit ClaimCancelled(claimId, msg.sender);
     }
 
     /// @dev Pull tokens and return the actual balance delta.
@@ -736,41 +623,21 @@ contract DefiInsurance is
         received = token.balanceOf(address(this)) - balanceBefore;
     }
 
-    /// @dev Return a claim's escrowed boosters on a non-finalization exit.
+    /// @dev Return a claim's escrowed boosters on a non-acceptance exit.
     function _returnBoosters(Claim storage c, address recipient) internal {
         uint256 amount = c.boosterAmount;
         if (amount != 0) {
-            IERC1155(c.boosterCollection).safeTransferFrom(address(this), recipient, BOOSTER_ID, amount, "");
+            (address booster, uint64 boosterId,) = registry().boosterConfig();
+            IERC1155(booster).safeTransferFrom(address(this), recipient, boosterId, amount, "");
         }
     }
 
-    /// @notice Cancel your live claim on the active incident while its window is
-    ///         still open; returns the escrow. No id argument — an account has at
-    ///         most one live claim per incident, looked up from {activeClaimId}.
-    function cancelClaim() external nonReentrant {
-        uint256 incidentId = _activeIncidentId();
-        uint256 claimId = activeClaimId[incidentId][msg.sender];
-        if (claimId == 0) revert NoActiveClaim();
-
-        Incident storage inc = incidents[incidentId];
-        if (block.timestamp > inc.claimWindowEndTime) {
-            revert ClaimWindowClosed(inc.insuredToken, inc.claimWindowEndTime);
-        }
-
-        // The referenced claim is live by construction: finalize can't run during
-        // the window and cancel clears the ref, so no resolved check.
-        Claim storage c = claims[claimId];
-        c.resolved = true;
-        inc.unresolved -= 1;
-        // Chain the cancel into the claim-set commitment (M-06). Two words vs the
-        // join's six, so a cancel entry can never collide with a join entry.
-        inc.claimSetHash = keccak256(abi.encode(inc.claimSetHash, claimId));
-        activeClaimId[incidentId][msg.sender] = 0; // may re-file within the window
-        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
-        _returnBoosters(c, msg.sender);
-        inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
-
-        emit ClaimCancelled(claimId, msg.sender);
+    /// @dev Release a resolved claim's USD8 bond.
+    function _resolveClaimBond(Claim storage c, address recipient) internal {
+        uint256 amount = c.bondAmount;
+        IERC20 token = IERC20(registry().usd8());
+        _escrowedClaimBonds -= amount;
+        token.safeTransfer(recipient, amount);
     }
 
     // ─────────────────────────── Settlement (TEE-signed root only) ───────────────────────────
@@ -779,10 +646,9 @@ contract DefiInsurance is
     /// @param root Merkle root over claimant payout rows.
     /// @param poolPayouts Per-pool budgets aligned to the open-time pool snapshot.
     /// @param signature EIP-712 signature from an authorized TEE signer.
-    function settleIncident(bytes32 root, uint256[] calldata poolPayouts, bytes calldata signature)
-        external
-        whenNotPaused
-    {
+    function settleIncident(bytes32 root, uint256[] calldata poolPayouts, bytes calldata signature) external {
+        _requireNotPaused();
+        _requireRegisteredDefiInsurance();
         uint256 incidentId = _requireActiveIncident();
         Incident storage inc = incidents[incidentId];
 
@@ -790,21 +656,22 @@ contract DefiInsurance is
         if (root == bytes32(0)) revert NoStandingRoot(incidentId);
         // A standing root can only be replaced by beta governance.
         if (inc.root != bytes32(0)) revert AlreadySettled(incidentId);
-        if (block.timestamp <= inc.claimWindowEndTime || block.timestamp > inc.claimWindowEndTime + SUBMIT_DEADLINE) {
+        uint256 settlementDeadline = uint256(inc.phaseDeadline) + incidentPhaseWindow[incidentId];
+        if (block.timestamp <= inc.phaseDeadline || block.timestamp > settlementDeadline) {
             revert OutsideSettlementPhase(incidentId);
         }
 
         // Bind the signature to the PCR snapshotted when the incident opened.
-        bytes32 teePcrHash = incidentTeePcrHash[incidentId];
+        bytes32 teePcrHash = inc.teePcrHash;
         {
             bytes32 structHash = keccak256(
                 abi.encode(
                     SETTLEMENT_TYPEHASH,
                     incidentId,
                     root,
-                    inc.unresolved,
+                    inc.unresolvedClaims,
                     keccak256(abi.encodePacked(poolPayouts)),
-                    keccak256(abi.encodePacked(incidentPools[incidentId])),
+                    keccak256(abi.encodePacked(inc.pools)),
                     inc.claimSetHash,
                     teePcrHash
                 )
@@ -817,28 +684,26 @@ contract DefiInsurance is
         emit IncidentSettled(incidentId, root, teePcrHash);
     }
 
-    /// @notice Beta-only correction of a standing root during its dispute period.
-    ///         A zero root voids the incident; a nonzero root starts a fresh dispute period.
+    /// @notice Beta-only correction of a standing root during its correction window.
+    ///         A zero root voids the incident; a nonzero root starts a fresh correction window.
     /// @param root Corrected root, or zero to void the settlement.
-    /// @param poolPayouts Corrected budgets aligned to {incidentPools}; empty when voiding.
-    function adminCorrectSettlement(bytes32 root, uint256[] calldata poolPayouts)
-        external
-        onlyAdminOrTimelock
-        onlyBetaMode
-    {
+    /// @param poolPayouts Corrected budgets aligned to the incident's pool snapshot; empty when voiding.
+    function adminCorrectSettlement(bytes32 root, uint256[] calldata poolPayouts) external {
+        _requireAdminOrTimelock();
+        _requireBetaMode();
+        _requireRegisteredDefiInsurance();
         uint256 incidentId = _requireActiveIncident();
         Incident storage inc = incidents[incidentId];
         // Only a standing pre-finalization root is directly correctable.
         if (inc.root == bytes32(0)) revert NoStandingRoot(incidentId);
-        if (block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD) revert IncidentFinalizing(incidentId);
+        if (block.timestamp > inc.phaseDeadline) revert IncidentFinalizing(incidentId);
 
         if (root == bytes32(0)) {
             if (poolPayouts.length != 0) revert SettlementPoolMismatch(poolPayouts.length, 0);
-            delete incidentPoolBudget[incidentId];
+            delete inc.poolBudget;
             inc.root = bytes32(0);
-            inc.rootSubmittedAt = 0;
-            inc.status = Status.Closed;
-            incidentResolvedAt[incidentId] = uint64(block.timestamp);
+            inc.phaseDeadline = 0;
+            inc.resolvedAt = uint64(block.timestamp);
             emit IncidentCorrected(incidentId, root);
             return;
         }
@@ -847,12 +712,12 @@ contract DefiInsurance is
         emit IncidentCorrected(incidentId, root);
     }
 
-    /// @dev Commit a root and capped per-pool budgets, start its dispute period, and
+    /// @dev Commit a root and capped per-pool budgets, start its correction window, and
     ///      delist the affected token.
     function _commitRoot(uint256 incidentId, Incident storage inc, bytes32 root, uint256[] calldata poolPayouts)
         private
     {
-        address[] storage poolAddrs = incidentPools[incidentId];
+        address[] storage poolAddrs = inc.pools;
         if (poolPayouts.length != poolAddrs.length) {
             revert SettlementPoolMismatch(poolPayouts.length, poolAddrs.length);
         }
@@ -860,98 +725,133 @@ contract DefiInsurance is
             uint256 cap = ISingleAssetCoverPool(poolAddrs[i]).maxPayoutPerIncident();
             if (poolPayouts[i] > cap) revert PayoutCapExceeded(i, poolPayouts[i], cap);
         }
-        incidentPoolBudget[incidentId] = poolPayouts;
+        inc.poolBudget = poolPayouts;
 
         inc.root = root;
-        inc.rootSubmittedAt = uint64(block.timestamp);
+        inc.phaseDeadline = uint64(block.timestamp) + incidentPhaseWindow[incidentId];
         _delistInsuredToken(inc.insuredToken);
     }
 
     // ─────────────────────────── Finalize Claim ───────────────────────────
 
-    /// @notice Finalize the caller's live claim using its Merkle-proven payout row.
-    ///         Eligible escrow is forfeited, excess escrow is refunded, and pools pay
-    ///         amounts within their remaining incident budgets.
+    /// @notice Resolve a claim using its Merkle-proven payout row. The claimant may
+    ///         accept or decline an eligible payout; anyone may resolve a proven
+    ///         bond-ineligible row without accepting a payout.
+    /// @param claimId Claim being resolved.
+    /// @param acceptPayout Whether to consume eligibility and accept the offered payout.
     /// @param amounts Per-pool payouts aligned to the incident pool snapshot.
     /// @param scoreSpent Raw historical score consumed by this claim and recorded in the Registry.
     /// @param boostedScore Booster-adjusted score used only for off-chain payout weighting.
-    /// @param eligibleAmount Covered escrow amount; cannot exceed total escrow.
+    /// @param eligibleAmount Covered escrow amount. Bond and payout eligibility also
+    ///        require nonzero score spent.
     /// @param proof Merkle proof against the standing root.
     function finalizeClaim(
+        uint256 claimId,
+        bool acceptPayout,
         uint256[] calldata amounts,
         uint256 scoreSpent,
         uint256 boostedScore,
         uint256 eligibleAmount,
         bytes32[] calldata proof
-    ) external nonReentrant whenNotPaused {
-        uint256 incidentId = _activeIncidentId();
-        uint256 claimId = activeClaimId[incidentId][msg.sender];
-        if (claimId == 0) revert NoActiveClaim();
-        if (claims[claimId].resolved) revert ClaimAlreadyResolved(claimId);
+    ) external nonReentrant {
+        Claim storage c = claims[claimId];
+        if (c.user == address(0)) revert UnauthorizedClaim(claimId);
+        if (c.resolved) revert ClaimAlreadyResolved(claimId);
 
+        uint256 incidentId = c.incidentId;
         Incident storage inc = incidents[incidentId];
-        // Require a standing root inside its finalization window.
-        if (
-            inc.status != Status.Open || inc.root == bytes32(0)
-                || block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD
-                || block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW
-        ) {
-            revert FinalizeNotOpen(incidentId);
+        bool moduleInactive = registry().defiInsurance() != address(this);
+
+        // A removed module or missing/voided root has no usable proof. After the
+        // applicable deadline, the claimant may recover without settlement.
+        if (moduleInactive || inc.root == bytes32(0)) {
+            if (msg.sender != c.user) revert UnauthorizedClaim(claimId);
+            bool unavailable =
+                moduleInactive || block.timestamp > uint256(inc.phaseDeadline) + incidentPhaseWindow[incidentId];
+            if (acceptPayout || !unavailable) revert FinalizeNotOpen(incidentId);
+            _resolveWithoutSettlement(claimId, c, inc);
+            return;
+        }
+
+        // A proof-backed decline remains available after payout expiry so an eligible
+        // claimant can recover the bond without accepting an inadequate offer.
+        if (block.timestamp <= inc.phaseDeadline) revert FinalizeNotOpen(incidentId);
+        if (acceptPayout) {
+            uint256 finalizeDeadline = uint256(inc.phaseDeadline) + incidentPhaseWindow[incidentId];
+            if (block.timestamp > finalizeDeadline) revert FinalizeNotOpen(incidentId);
+            registry().requireNotPaused(address(this));
         }
 
         {
-            // Verify the row against the open-time pool ordering.
-            if (amounts.length != incidentPools[incidentId].length) revert InvalidProof(claimId);
-            // StandardMerkleTree double-hashed claim leaf.
+            if (amounts.length != inc.pools.length) revert InvalidProof(claimId);
             bytes32 leaf =
-                _settlementLeaf(incidentId, claimId, msg.sender, amounts, scoreSpent, boostedScore, eligibleAmount);
+                _settlementLeaf(incidentId, claimId, c.user, amounts, scoreSpent, boostedScore, eligibleAmount);
             if (!MerkleProof.verifyCalldata(proof, inc.root, leaf)) revert InvalidProof(claimId);
         }
 
-        Claim storage c = claims[claimId];
         {
-            uint256 expectedBoostedScore = Math.mulDiv(
-                scoreSpent, BPS_DENOMINATOR + uint256(c.boosterAmount) * BOOSTER_BOOST_BPS, BPS_DENOMINATOR
-            );
+            (,, uint16 boosterBoostBps) = registry().boosterConfig();
+            uint256 expectedBoostedScore =
+                Math.mulDiv(scoreSpent, BPS_DENOMINATOR + uint256(c.boosterAmount) * boosterBoostBps, BPS_DENOMINATOR);
             if (boostedScore != expectedBoostedScore) revert InvalidBoostedScore(boostedScore, expectedBoostedScore);
         }
 
-        // Keep unresolved nonzero through external calls so pools remain frozen.
-        c.resolved = true;
+        bool eligible = eligibleAmount != 0 && scoreSpent != 0;
+        // A third party can only close a proven bond-ineligible row and can never
+        // exercise the claimant's payout choice.
+        if (msg.sender != c.user && (acceptPayout || eligible)) revert UnauthorizedClaim(claimId);
+        c.resolved = true; // Keep unresolved nonzero through external calls so pools remain frozen.
 
-        // Forfeit eligible escrow and refund any signed excess.
         {
             uint256 escrow = c.insuredTokenAmount;
             if (eligibleAmount > escrow) revert EligibleExceedsEscrow(eligibleAmount, escrow);
             escrowedInsuredTokens[inc.insuredToken] -= escrow;
-            uint256 refund = escrow - eligibleAmount;
-            if (refund > 0) inc.insuredToken.safeTransfer(msg.sender, refund);
+            uint256 refund = acceptPayout && eligible ? escrow - eligibleAmount : escrow;
+            if (refund != 0) inc.insuredToken.safeTransfer(c.user, refund);
         }
 
-        // Burn the boosters escrowed when the claim was filed.
-        {
-            uint256 boosterAmount = c.boosterAmount;
-            if (boosterAmount != 0) {
-                IERC1155Burnable(c.boosterCollection).burn(address(this), BOOSTER_ID, boosterAmount);
-                // Preserve the committed-and-burned amount as permanent claim history.
+        uint256 boosterAmount = c.boosterAmount;
+        if (boosterAmount != 0) {
+            if (acceptPayout && eligible) {
+                (address booster, uint64 boosterId,) = registry().boosterConfig();
+                IERC1155Burnable(booster).burn(address(this), boosterId, boosterAmount);
+            } else {
+                _returnBoosters(c, c.user);
             }
         }
 
-        _payClaimAmounts(incidentId, amounts);
+        // Eligibility—not payout size or acceptance—determines who receives the bond.
+        _resolveClaimBond(c, eligible ? c.user : registry().treasury());
 
-        // Emit incident-specific raw score use and mirror only that cumulative total in Registry.
-        if (scoreSpent != 0) {
-            emit ScoreSpent(msg.sender, scoreSpent, incidentId);
-            registry().recordScoreSpent(msg.sender, scoreSpent);
+        if (acceptPayout && eligible) {
+            _payClaimAmounts(incidentId, c.user, amounts);
+            if (scoreSpent != 0) {
+                emit ScoreSpent(c.user, scoreSpent, incidentId);
+                registry().recordScoreSpent(c.user, scoreSpent);
+            }
         }
 
-        // Only unfreeze after every external interaction completes.
-        inc.unresolved -= 1;
-        if (inc.unresolved == 0 && incidentResolvedAt[incidentId] == 0) {
-            incidentResolvedAt[incidentId] = uint64(block.timestamp);
+        inc.unresolvedClaims -= 1;
+        if (inc.unresolvedClaims == 0 && inc.resolvedAt == 0) {
+            inc.resolvedAt = uint64(block.timestamp);
         }
 
-        emit ClaimFinalized(claimId, msg.sender);
+        if (acceptPayout && eligible) emit ClaimFinalized(claimId, c.user);
+        else emit ClaimDeclined(claimId, c.user, eligible);
+    }
+
+    /// @dev Resolve an incident that cannot produce a usable Merkle decision.
+    function _resolveWithoutSettlement(uint256 claimId, Claim storage c, Incident storage inc) internal {
+        c.resolved = true;
+        inc.unresolvedClaims -= 1;
+        if (inc.unresolvedClaims == 0 && inc.resolvedAt == 0) {
+            inc.resolvedAt = uint64(block.timestamp);
+        }
+        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
+        _returnBoosters(c, msg.sender);
+        _resolveClaimBond(c, msg.sender);
+        inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
+        emit ClaimDeclined(claimId, msg.sender, false);
     }
 
     /// @dev OpenZeppelin StandardMerkleTree double-hashed settlement leaf.
@@ -972,53 +872,34 @@ contract DefiInsurance is
     }
 
     /// @dev Draw down hard per-pool budgets before each external payout.
-    function _payClaimAmounts(uint256 incidentId, uint256[] calldata amounts) internal {
-        address[] storage poolAddrs = incidentPools[incidentId];
-        uint256[] storage budget = incidentPoolBudget[incidentId];
-        for (uint256 i = 0; i < poolAddrs.length; i++) {
+    function _payClaimAmounts(uint256 incidentId, address claimant, uint256[] calldata amounts) internal {
+        Incident storage inc = incidents[incidentId];
+        Registry.ProtocolFeeConfig memory feeConfig = registry().protocolFeeConfig();
+        for (uint256 i = 0; i < inc.pools.length; i++) {
             uint256 amount = amounts[i];
             if (amount == 0) continue;
-            uint256 remaining = budget[i];
-            if (amount > remaining) revert PayoutCapExceeded(i, amount, remaining);
-            budget[i] = remaining - amount;
-            ISingleAssetCoverPool(poolAddrs[i]).payClaim(msg.sender, amount);
+            uint256 grossAmount = Math.mulDiv(amount, BPS_DENOMINATOR, BPS_DENOMINATOR - inc.protocolFeeShareBps);
+            uint256 remaining = inc.poolBudget[i];
+            if (grossAmount > remaining) revert PayoutCapExceeded(i, grossAmount, remaining);
+            inc.poolBudget[i] = remaining - grossAmount;
+            address pool = inc.pools[i];
+            ISingleAssetCoverPool(pool).payClaim(claimant, amount);
+            uint256 protocolFee = grossAmount - amount;
+            if (protocolFee != 0) {
+                ISingleAssetCoverPool(pool).payClaim(feeConfig.receiver, protocolFee);
+                emit ProtocolFeePaid(incidentId, pool, feeConfig.receiver, protocolFee);
+            }
         }
-    }
-
-    /// @notice Recover escrow after beta void, missing root, or finalize expiry.
-    /// @dev Available while paused so claimant funds cannot be trapped.
-    /// @param claimId Caller's unresolved claim.
-    function withdrawNonFinalizedClaim(uint256 claimId) external nonReentrant {
-        Claim storage c = claims[claimId];
-        if (c.user != msg.sender) revert UnauthorizedClaim(claimId);
-        if (c.resolved) revert ClaimAlreadyResolved(claimId);
-
-        Incident storage inc = incidents[c.incidentId];
-        // A claim is recoverable only after every payout path is closed.
-        bool killed = inc.status == Status.Closed;
-        bool incidentVoid = inc.status == Status.Open && inc.root == bytes32(0)
-            && block.timestamp > inc.claimWindowEndTime + SUBMIT_DEADLINE;
-        bool finalizeExpired = inc.status == Status.Open && inc.root != bytes32(0)
-            && block.timestamp > inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW;
-
-        if (!killed && !incidentVoid && !finalizeExpired) revert ClaimNotWithdrawable(claimId);
-
-        c.resolved = true;
-        inc.unresolved -= 1;
-        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
-        _returnBoosters(c, msg.sender);
-        inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
-
-        emit ClaimWithdrawn(claimId, msg.sender);
     }
 
     // ─────────────────────────── Role management ───────────────────────────
 
     /// @notice Add or remove a TEE signer between incidents. Timelock only.
-    ///         Missing settlement automatically voids after {SUBMIT_DEADLINE}.
     /// @param signer Nonzero signer address.
     /// @param authorized Whether to authorize it.
-    function setTeeSigner(address signer, bool authorized) external onlyTimelock notDuringIncident {
+    function setTeeSigner(address signer, bool authorized) external {
+        _requireTimelock();
+        _requireNoActiveIncident();
         if (signer == address(0)) revert ZeroAddress();
         isTeeSigner[signer] = authorized;
         emit TeeSignerSet(signer, authorized);
@@ -1031,7 +912,44 @@ contract DefiInsurance is
         return _activeIncidentId();
     }
 
-    /// @notice The full per-token config (κ, minimum claim, oracle, conversion recipe).
+    function _incidentOpenDigest(IERC20 insuredToken, uint64 referenceBlock, uint256 incidentId, bytes32 teePcrHash)
+        internal
+        view
+        returns (bytes32)
+    {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    OPEN_TYPEHASH,
+                    address(insuredToken),
+                    referenceBlock,
+                    incidentId,
+                    teePcrHash,
+                    incidentOpenEligibilityHash(insuredToken)
+                )
+            )
+        );
+    }
+
+    /// @notice Hash of the exact incident-open price policy and conversion recipe
+    ///         that a TEE authorization must bind.
+    function incidentOpenEligibilityHash(IERC20 insuredToken) public view returns (bytes32) {
+        Registry reg = registry();
+        Registry.IncidentOpenPriceConfig memory price = reg.incidentOpenPriceConfig();
+        InsuredToken storage token = insuredTokens[insuredToken];
+        return keccak256(
+            abi.encode(
+                address(reg),
+                price.twapBlocks,
+                price.sampleStepBlocks,
+                price.minimumDropBps,
+                token.underlyingConversionAddress,
+                keccak256(token.underlyingConversionCallData)
+            )
+        );
+    }
+
+    /// @notice The full per-token config (coverage, oracle, and conversion recipe).
     /// @param insuredToken  Insured token to query.
     function getInsuredToken(IERC20 insuredToken) external view returns (InsuredToken memory) {
         return insuredTokens[insuredToken];
@@ -1042,29 +960,17 @@ contract DefiInsurance is
         return insuredTokens[token].maxCoverageBps != 0;
     }
 
-    /// @notice Number of insured tokens currently in the approval list.
-    function insuredTokenListLength() external view returns (uint256) {
-        return insuredTokenList.length;
-    }
-
-    /// @notice Units of {BOOSTER_ID} committed and initially escrowed by a claim (0 if none).
-    /// @param claimId  Claim to query.
-    function getClaimBoosterAmount(uint256 claimId) external view returns (uint256) {
-        return claims[claimId].boosterAmount;
-    }
-
     // ─────────────────────────── Internal: incident lifecycle ───────────────────────────
 
-    /// @dev Derive the sole active incident from the last-opened id and phase deadlines.
+    /// @dev Derive the sole active incident from the last-opened id and current phase deadline.
     function _activeIncidentId() internal view returns (uint256) {
         uint256 id = nextIncidentId - 1; // 0 before the first open
         if (id == 0) return 0;
         Incident storage inc = incidents[id];
-        if (inc.status == Status.Closed) return 0; // beta-voided — pool unfrozen
-        if (block.timestamp <= inc.claimWindowEndTime) return id;
-        if (inc.unresolved == 0) return 0;
-        if (inc.root == bytes32(0)) return block.timestamp <= inc.claimWindowEndTime + SUBMIT_DEADLINE ? id : 0;
-        return block.timestamp <= inc.rootSubmittedAt + DISPUTE_PERIOD + FINALIZE_WINDOW ? id : 0;
+        if (block.timestamp <= inc.phaseDeadline) return id;
+        if (inc.unresolvedClaims == 0) return 0;
+        uint256 terminalDeadline = uint256(inc.phaseDeadline) + incidentPhaseWindow[id];
+        return block.timestamp <= terminalDeadline ? id : 0;
     }
 
     /// @dev {_activeIncidentId} but reverts when there is none — for sites that require
@@ -1074,19 +980,10 @@ contract DefiInsurance is
         if (id == 0) revert NotActiveIncident(0);
     }
 
-    /// @dev Delist an insured token (zero its maxCoverageBps) and remove it from
-    ///      {insuredTokenList}. No-op if absent.
+    /// @dev Delist an insured token by zeroing its maxCoverageBps. No-op if absent.
     function _delistInsuredToken(IERC20 insuredToken) internal {
         if (insuredTokens[insuredToken].maxCoverageBps == 0) return;
         insuredTokens[insuredToken].maxCoverageBps = 0;
-        uint256 n = insuredTokenList.length;
-        for (uint256 i = 0; i < n; i++) {
-            if (insuredTokenList[i] == insuredToken) {
-                insuredTokenList[i] = insuredTokenList[n - 1];
-                insuredTokenList.pop();
-                break;
-            }
-        }
         emit InsuredTokenRemoved(insuredToken);
     }
 }

@@ -56,8 +56,8 @@ import {DeploymentConfig} from "./config/DeploymentConfig.sol";
 /// Operational invariants that are NOT (all) enforced on-chain. Whoever
 /// deploys and governs the system MUST uphold these:
 ///
-///  1. DURING BETA, TIMELOCK DELAY (1 day) < DISPUTE_PERIOD (2 days). The governance timelock's
-///     minDelay must be strictly less than DefiInsurance.DISPUTE_PERIOD so
+///  1. DURING BETA, TIMELOCK DELAY (1 day) < CORRECTION_WINDOW (2 days). The governance timelock's
+///     minDelay must be strictly less than DefiInsurance.CORRECTION_WINDOW so
 ///     {DefiInsurance.adminCorrectSettlement} can execute before finalization.
 ///     The admin can act without delay; root correction is disabled after beta.
 ///
@@ -105,7 +105,7 @@ contract DeployUSD8SystemScript is DeploymentConfig {
     error LaunchStrategyReviewNotConfirmed();
 
     /// @notice TimelockController minDelay. During beta, it must stay strictly under
-    ///         DefiInsurance.DISPUTE_PERIOD (2 days) so timelock root correction fits.
+    ///         DefiInsurance.CORRECTION_WINDOW (2 days) so timelock root correction fits.
     uint256 constant EXPECTED_TIMELOCK_MIN_DELAY = 24 hours;
 
     /// @notice USD8 insurance-score rate, 1e18-scaled. Set for a 12s-block chain
@@ -120,12 +120,9 @@ contract DeployUSD8SystemScript is DeploymentConfig {
     uint256 public constant SUSD8_MAX_RATE = 20e16 / uint256(365 days);
     bytes32 public constant SUSD8_SALT = keccak256("USD8 Savings Morpho Vault V2");
 
-    uint128 constant INITIAL_MIN_CLAIM_AMOUNT = 1e18;
-
     struct InsuredTokenDeploymentConfig {
         address token;
         uint256 maxCoverageBps;
-        uint128 minClaimAmount;
         address underlyingPriceOracle;
         address conversionAddress;
         bytes conversionCallData;
@@ -306,7 +303,6 @@ contract DeployUSD8SystemScript is DeploymentConfig {
         configs[0] = InsuredTokenDeploymentConfig({
             token: addresses.aaveSgho,
             maxCoverageBps: 8000,
-            minClaimAmount: INITIAL_MIN_CLAIM_AMOUNT,
             underlyingPriceOracle: addresses.ghoUsdOracle,
             conversionAddress: addresses.aaveSgho,
             conversionCallData: conversionCallData
@@ -314,14 +310,13 @@ contract DeployUSD8SystemScript is DeploymentConfig {
         configs[1] = InsuredTokenDeploymentConfig({
             token: addresses.skySusds,
             maxCoverageBps: 7000,
-            minClaimAmount: INITIAL_MIN_CLAIM_AMOUNT,
             underlyingPriceOracle: addresses.usdsUsdOracle,
             conversionAddress: addresses.skySusds,
             conversionCallData: conversionCallData
         });
     }
 
-    function _coreProtocolInsuredTokenConfig(address usd8, address usd8PriceOracle)
+    function _coreProtocolInsuredTokenConfig(address usd8, address treasury, address usdcUsdOracle)
         internal
         pure
         returns (InsuredTokenDeploymentConfig memory config)
@@ -329,19 +324,22 @@ contract DeployUSD8SystemScript is DeploymentConfig {
         config = InsuredTokenDeploymentConfig({
             token: usd8,
             maxCoverageBps: 8000,
-            minClaimAmount: INITIAL_MIN_CLAIM_AMOUNT,
-            underlyingPriceOracle: usd8PriceOracle,
-            conversionAddress: address(0),
-            conversionCallData: bytes("")
+            underlyingPriceOracle: usdcUsdOracle,
+            conversionAddress: treasury,
+            conversionCallData: abi.encodeCall(Treasury.usd8ToUsdcRate, ())
         });
     }
 
-    function _addCoreProtocolInsuredToken(DefiInsurance defiInsurance, address usd8, address usd8PriceOracle) internal {
-        InsuredTokenDeploymentConfig memory config = _coreProtocolInsuredTokenConfig(usd8, usd8PriceOracle);
-        defiInsurance.addInsuredToken(
+    function _addCoreProtocolInsuredToken(
+        DefiInsurance defiInsurance,
+        address usd8,
+        address treasury,
+        address usdcUsdOracle
+    ) internal {
+        InsuredTokenDeploymentConfig memory config = _coreProtocolInsuredTokenConfig(usd8, treasury, usdcUsdOracle);
+        defiInsurance.editInsuredToken(
             IERC20(config.token),
             config.maxCoverageBps,
-            config.minClaimAmount,
             config.underlyingPriceOracle,
             config.conversionAddress,
             config.conversionCallData
@@ -352,10 +350,9 @@ contract DeployUSD8SystemScript is DeploymentConfig {
         InsuredTokenDeploymentConfig[2] memory configs = _initialInsuredTokenConfigs(addresses);
         for (uint256 i; i < configs.length; ++i) {
             InsuredTokenDeploymentConfig memory config = configs[i];
-            defiInsurance.addInsuredToken(
+            defiInsurance.editInsuredToken(
                 IERC20(config.token),
                 config.maxCoverageBps,
-                config.minClaimAmount,
                 config.underlyingPriceOracle,
                 config.conversionAddress,
                 config.conversionCallData
@@ -373,13 +370,8 @@ contract DeployUSD8SystemScript is DeploymentConfig {
     ) internal {
         registry.setSavingsVault(vault);
         registry.setScoredToken(IERC20(vault), SUSD8_SCORE_RATE);
-        defiInsurance.addInsuredToken(
-            IERC20(vault),
-            8000,
-            INITIAL_MIN_CLAIM_AMOUNT,
-            usd8PriceOracle,
-            vault,
-            abi.encodeCall(IERC4626.convertToAssets, (1e18))
+        defiInsurance.editInsuredToken(
+            IERC20(vault), 8000, usd8PriceOracle, vault, abi.encodeCall(IERC4626.convertToAssets, (1e18))
         );
         treasury.setProfitReceiver(
             adapter, INITIAL_SAVINGS_PROFIT_WEIGHT, Treasury.RevenueDistributionMode.ReceiveProfitDistribution
@@ -412,8 +404,6 @@ contract DeployUSD8SystemScript is DeploymentConfig {
         d.registry.setUsd8(address(d.usd8));
 
         // Treasury impl + ERC-1967 proxy (UUPS, timelock-upgraded in place, M-06).
-        // Fresh-deployment path only: this does not migrate a funded legacy
-        // constructor Treasury's reserve, strategies, or receiver configuration.
         Treasury treasuryImpl = new Treasury();
         d.treasuryImpl = address(treasuryImpl);
         d.treasury = Treasury(
@@ -460,11 +450,8 @@ contract DeployUSD8SystemScript is DeploymentConfig {
         d.poolBeacon = address(beacon);
         IERC20 wsteth = IERC20(addresses.coverAsset);
 
-        // Deploy the pool beacon proxy. No seed step: totalAssets is tracked accounting
-        // (not balanceOf), so donations can't inflate price-per-share, and per-share
-        // value only ever falls (on payout) — the first-depositor inflation attack has
-        // no foothold. The OZ-style +1 virtual offset in stake/completeUnstake covers
-        // the total-loss edge without locking capital. The pool is live on init.
+        // Deploy the pool beacon proxy. totalAssets is tracked accounting (not
+        // balanceOf), so donations cannot inflate price-per-share.
         d.wstethPool = SingleAssetCoverPool(
             address(
                 new BeaconProxy(
@@ -477,13 +464,17 @@ contract DeployUSD8SystemScript is DeploymentConfig {
             )
         );
 
+        wsteth.forceApprove(address(d.wstethPool), 0.01 ether);
+        d.wstethPool.deposit(0.01 ether, addresses.seedSink);
+        require(d.wstethPool.balanceOf(addresses.seedSink) != 0, "cover pool seed missing");
+
         d.registry.addPool(address(d.wstethPool), addresses.coverAssetUsdOracle);
 
         // USD8 scoring + booster live on the Registry. sUSD8 scoring is
         // configured below before bootstrap authority is handed off.
         d.registry.setScoredToken(IERC20(address(d.usd8)), USD8_SCORE_RATE);
 
-        d.registry.setBoosterNFT(addresses.booster);
+        d.registry.setBoosterConfig(addresses.booster, 1, 100);
 
         // Savings launches at zero weight, so all recurring Treasury revenue initially funds cover LPs.
         d.treasury
@@ -507,7 +498,7 @@ contract DeployUSD8SystemScript is DeploymentConfig {
         require(d.registry.maxOracleStaleness() != 0, "oracle staleness unset");
         d.usd8PriceOracle = address(new USD8PriceOracle(d.registry, addresses.usdcUsdOracle));
         d.registry.setUsd8PriceOracle(d.usd8PriceOracle);
-        _addCoreProtocolInsuredToken(d.defiInsurance, address(d.usd8), d.usd8PriceOracle);
+        _addCoreProtocolInsuredToken(d.defiInsurance, address(d.usd8), address(d.treasury), addresses.usdcUsdOracle);
         _addInitialInsuredTokens(d.defiInsurance, addresses);
         _configureSavings(d.registry, d.defiInsurance, d.treasury, d.savingsVault, d.savingsAdapter, d.usd8PriceOracle);
 

@@ -8,7 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  FOUNDRY_PROFILE: ci
+  # Compile-time sentinel for Linux enclave CI only; release builds require REGISTRY.
+  USD8_REGISTRY: "0x0000000000000000000000000000000000000001"
 
 jobs:
   check:
@@ -27,25 +28,17 @@ jobs:
         with:
           version: v1.5.1
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22.22.3
-          cache: npm
-          cache-dependency-path: offchain/package-lock.json
-
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: 1.92.0
           components: rustfmt, clippy
 
+      - name: Install TEE job API Rust
+        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt,clippy
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
-
-      - name: Install off-chain dependencies
-        working-directory: offchain
-        run: npm ci --include=dev
 
       - name: Show Forge version
         run: forge --version
@@ -56,17 +49,13 @@ jobs:
       - name: Run Forge build
         run: forge build --sizes
 
-      - name: Build off-chain settlement
-        working-directory: offchain
-        run: npm run build
+      - name: Check Rust-consumed Solidity ABI parity
+        run: |
+          python3 script/check_offchain_abi.py --self-test
+          python3 script/check_offchain_abi.py --artifacts out
 
-      - name: Run TypeScript oracle and ABI-parity tests
-        working-directory: offchain
-        run: npm test
-
-      - name: Audit TypeScript oracle dependencies
-        working-directory: offchain
-        run: npm audit --audit-level=high
+      - name: Verify published Sepolia source freeze
+        run: python3 script/check_sepolia_source_freeze.py
 
       - name: Check Rust formatting
         working-directory: offchain-rust
@@ -100,50 +89,42 @@ jobs:
 
       - name: Check TEE job API formatting
         working-directory: offchain-rust/job-api
-        run: cargo fmt --check
+        run: cargo +1.94.1 fmt --check
 
       - name: Lint TEE job API
         working-directory: offchain-rust/job-api
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo +1.94.1 clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Test TEE job API
         working-directory: offchain-rust/job-api
         run: |
-          cargo test --locked --all-features
+          cargo +1.94.1 test --locked --all-features
           python3 -m unittest discover -s deploy/tests -v
 
       - name: Audit TEE job API dependencies
         working-directory: offchain-rust/job-api
-        run: cargo audit --deny warnings
-
-      - name: Run TypeScript ↔ Rust differential fixtures
-        working-directory: offchain
-        run: |
-          node rust-comparison/bench/compare.mjs ../offchain-rust/fixtures/small.json
-          node rust-comparison/bench/compare.mjs ../offchain-rust/fixtures/matrix.json
-          node rust-comparison/bench/compare.mjs ../offchain-rust/fixtures/real-usdc-usdt-1000.json
+        run: cargo +1.94.1 audit --deny warnings
 
       - name: Test standalone real-history helpers
         working-directory: offchain-rust
         run: python3 -m unittest bench/test_real_history.py -v
 
-      - name: Check differential comparison scripts
-        working-directory: offchain
-        run: for file in rust-comparison/bench/*.mjs; do node --check "$file"; done
-
       - name: Run Forge tests
-        run: forge test --no-match-path 'test/kontrol/**' --no-match-contract SettlementIntegrationTest -vvv
+        run: forge test --no-match-contract SettlementIntegrationTest -vvv
+
+      - name: Compile formal harnesses against production ABI
+        env:
+          FOUNDRY_PROFILE: kontrol
+        run: forge build
+
+      - name: Run formal properties as Forge regressions
+        env:
+          FOUNDRY_PROFILE: kontrol
+        run: forge test --summary
 
       - name: Run Solidity ↔ Rust FFI parity tests
         env:
           RUN_INTEGRATION: "1"
-          USE_RUST_FFI: "1"
-        run: forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vvv
-
-      - name: Run Solidity ↔ TypeScript oracle FFI tests
-        env:
-          RUN_INTEGRATION: "1"
-          USE_RUST_FFI: "0"
         run: forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vvv
 
       - name: Check generated-file hygiene

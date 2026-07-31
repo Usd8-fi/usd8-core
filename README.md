@@ -19,10 +19,10 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
   - [Insured tokens](#insured-tokens)
   - [Claim lifecycle](#claim-lifecycle)
   - [Boosters](#boosters)
-  - [Eligibility](#eligibility)
+  - [Eligibility](#finalize-claim-eligibility)
   - [Insured token valuation](#insured-token-valuation)
   - [Payout allocation](#payout-allocation)
-    - [Why geometric weighting](#why-geometric-weighting)
+    - [Why score-proportional entitlement](#why-score-proportional-entitlement)
 - [Governance and trust assumptions](#governance-and-trust-assumptions)
   - [Beta mode and permanent disablement of upgradeability](#beta-mode-and-permanent-disablement-of-upgradeability)
   - [Repository layout](#repository-layout)
@@ -30,7 +30,7 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 - [Getting started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Install and build](#install-and-build)
-  - [Mainnet deployment order](#mainnet-deployment-order)
+  - [Deployment order](#deployment-order)
   - [Test](#test)
   - [Security](#security)
   - [License](#license)
@@ -71,7 +71,7 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 | [`Treasury`](src/Treasury.sol) | Beta-only UUPS reserve module that mints USD8 against USDC, manages approved strategies, harvests surplus, and routes USD8 revenue. |
 | Morpho Vault V2 savings | Official Morpho Vault V2 share token with symbol `sUSD8`, backed by [`USD8SavingsAdapter`](src/adapters/USD8SavingsAdapter.sol). There is no custom sUSD8 vault contract. |
 | [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) | One ERC-4626 staking pool per cover asset. Stakers earn USD8 rewards and accept claim-loss risk. |
-| [`DefiInsurance`](src/DefiInsurance.sol) | Beta-only UUPS insured-token configuration, claimant escrow, incident lifecycle, TEE-signed settlement, disputes, and claim payouts. |
+| [`DefiInsurance`](src/DefiInsurance.sol) | Beta-only UUPS insured-token configuration, claimant escrow, incident lifecycle, TEE-signed settlement, admin correction, and claim payouts. |
 | [`StrategyBase`](src/strategies/StrategyBase.sol) | Shared strategy swap boundary. Each strategy declares its deployment token. Approved routes may swap USDC into that token, or any non-position token back to USDC; USDC output goes directly to Treasury. |
 | [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) | `StrategyBase` adapter for deploying Treasury USDC into an approved ERC-4626 USDC vault. Its deployment token is USDC, so only non-position-token → USDC swaps are available. |
 <br/><br/><br/><br/>
@@ -164,88 +164,74 @@ USD8 is a stable coin offering free defi insurance to users. This repo contains 
 - if the underlying depegs instead of the insured token, user will get value based on depegged underlying, not worth it.
 
 ## Claim lifecycle
+
 ```text
-         File Claim (requires TEE sig)
+   ┌─────────────────────┐
+   │       CLAIM         │  anyone can claim, first one
+   │         3d          │  requires TEE sig
+   └─────────────────────┘
              │
              ▼
    ┌─────────────────────┐
-   │   CLAIM WINDOW 5d   │  anyone can file or
-   │    pools frozen     │    cancel claim
+   │       SETTLE        │  anyone can settle
+   │         3d          │  with TEE sig
    └─────────────────────┘
-        │             │
-    no claims    with claims
-        │             ▼
-        │   ┌─────────────────────┐
-        │   │  SUBMISSION ≤ 3d    │  Anyone can submit TEE-signed Merkle root
-        │   └─────────────────────┘
-        │        │           │
-        │      no root      root submitted
-        │        │           ▼
-        │        │   ┌─────────────────────┐
-        │        │   │    DISPUTE 2d       │
-        │        │   └─────────────────────┘
-        │        │      │              │
-        │        │   accepted       disputed (admin only during beta)
-        │        │      │              ▼
-        │        │      │    ┌───────────────────┐
-        │        │      │    │ CORRECTION ≤ 3d   │
-        │        │      │    └───────────────────┘
-        │        │      │       │             │
-        │        │      │   corrected     no correction
-        │        │      │       │             │
-        │        │      │       └─▶ fresh     │
-        │        │      │          dispute    │
-        │        │      ▼                     │
-        │        │   ┌─────────────────────┐  │
-        │        │   │    FINALIZE 4d      │  │
-        │        │   │ prove and withdraw  │  │
-        │        │   └─────────────────────┘  │
-        │        │      │              │      │
-        │        │  all finalized   deadline  │
-        ▼        ▼      ▼              ▼      ▼
-   ┌─────────────────────────────────────────────┐
-   │              UNFREEZE Cover Pools           │
-   │             next incident may open          │
-   └─────────────────────────────────────────────┘
+             │
+             ▼
+   ┌─────────────────────┐
+   │  CORRECT SETTLEMENT │  admin or timelock
+   │         3d          │  during beta
+   └─────────────────────┘
+             │
+             ▼
+   ┌─────────────────────┐
+   │      FINALIZE       │  claimers withdraw
+   │         3d          │  payout & bond
+   └─────────────────────┘
 ```
-- any one with insured token can file a claim by escrow their insured token, first claimer needs to get TEE signed attestation price has dropped 20% around given block. This freezes Cover Pool deposits and settlement of exits that were not already reserved; new exit requests remain loss-exposed.
-- claim for this token will be open for 5 days allows others to file claim, after no further claims allowed this insured token
-- anyone can submit TEE signed payout root. TEE computes claimers insurance score and their eligible payouts using [payout allocation](#payout-allocation). This algorithm is open sourced, anyone can run locally and check their results. This will also delist the insured token.
-- after root is submitted, admin can check and correct the root if incorrect (privilege during beta)
-- after that users have 4 days to finalize their claim payout. Miss this means no payout. Unfinalized claim insured tokens can be withdrawn.
+
+Each incident snapshots one `phaseWindow` when it opens; the current deployment uses 3 days. `phaseDeadline` starts as the claim deadline. With no root, settlement is allowed after that deadline through `phaseDeadline + phaseWindow`. A committed or corrected nonzero root replaces `phaseDeadline` with `block.timestamp + phaseWindow`, making it the correction deadline; proof-backed finalization then runs through one further `phaseWindow`. A later Registry timing update cannot change an existing incident.
+
+- anyone may request an incident-open authorization for an insured token. The TEE discovers and signs `referenceBlock`; the first claimant submits it atomically through `fileClaim(..., artifact.referenceBlock, signature)`. Later claimants use the same function with `referenceBlock = 0` and an empty signature. The TEE reads `Registry.incidentOpenPriceConfig`, samples the configured token→immediate-underlying conversion at symmetric non-overlapping blocks before and after the selected block, requires the complete post-reference window finalized, and signs only when the exact post-window sum is strictly more than `minimumDropBps` (default 20%) below the baseline sum. Every insured-token config supplies the conversion address and calldata; USD8 uses `Treasury.usd8ToUsdcRate()` for its capped pro-rata USD8→USDC redemption rate. No insured-token/USD price enters eligibility. The signature binds the price policy and conversion recipe, so governance changes invalidate outstanding authorizations. Opening freezes Cover Pool deposits and settlement of exits that were not already reserved; new exit requests remain loss-exposed.
+- claims remain open for the incident's snapshotted phase window (3 days at deployment), after which no further claims are accepted
+- anyone can settle with a TEE-signed payout root. The TEE computes claimants' insurance scores and eligible payouts using [payout allocation](#payout-allocation). This algorithm is open source; anyone can run it locally and check the results. Settlement also delists the insured token.
+- after settlement, an admin or the timelock can check and correct the root if incorrect (privilege during beta)
+- after correction closes, users have one snapshotted phase window to finalize payout. After payout expiry they can still resolve a proof-backed decline or recover escrow through the no-root/void path, but cannot collect an expired payout.
 - Cover Pool unfreezes for withdraws
 - Only one incident can be active at a time
 
+## File a claim
 
-## Boosters
-- NFTs that gives a 1% boost to users insurance score
-- can be used when filing a claim
+All claimants use one entrypoint:
+
+`fileClaim(insuredToken, amount, scoreToSpend, boosterAmount, referenceBlock, signature)`
+
+The first claimant copies `referenceBlock` and `signature` from the verified TEE artifact;
+`fileClaim` validates them, calls `_openIncident`, and escrows the claim atomically.
+Later claimants pass `referenceBlock = 0` and an empty signature. The trusted
+admin/timelock emergency route may still call `openClaimIncident(...)` without a TEE signature.
+
+The TEE authorization requires the insured-token/immediate-underlying TWAP ratio
+to drop strictly more than the configured threshold. A claim must escrow a nonzero amount of the insured token.
 
 
-## Eligibility
+## Finalize claim eligibility
+Only claimants meeting the following conditions are eligible for compensation:
+- have held the insured token >= 7 days. Excess escrow is refunded during finalization.
+- account has USD8 insurance score > 0
 
-Users need to hold the insured token for 7 days to be eligible for insurance. Offchain TEE reconstructs each live claim from `ClaimRegistered` and `ClaimCancelled` events. A claimant's eligible amount is:
-
-```text
-eligibleAmount = min(
-  escrowReceived,
-  minimum insured-token balance over the pre-incident 7 days holding window
-)
-```
-
-Excess escrow above `eligibleAmount` is refunded during finalization.
 
 ## Insured token valuation
 There are 3 conversions during a payout.
 
 1. insured token -> underlying token : TWAP price over past 7 days from incident block at every 300 blocks(1 hour).
-2. underlying token -> USD : spot price of underlying/USD at `claimWindowEnd`
-3. USD -> cover pool assets : spot price at `claimWindowEnd`
+2. underlying token -> USD: archive-read oracle price at the incident's snapshotted valuation block
+3. USD -> cover pool assets: archive-read pool-asset/USD price at the same settlement snapshot
 
 
 ## Payout allocation
 
-Payouts use capped water-filling with geometric weights based on covered claim cap in USD and booster-adjusted payout score. Raw score accounting remains separate.
+Each claimant receives a strict share of the incident payout budget proportional to booster-adjusted score spent. The final payout is the lower of that score entitlement and the covered-loss cap; unused entitlement remains in the cover pools and is not redistributed.
 
 For each claim:
 
@@ -253,21 +239,27 @@ For each claim:
 C_i = floor(preIncidentEligibleValueUsd * coverageBps / 10_000)
 R_i = min(requestedRawScore, rawUnspentScore)
 S_i = floor(R_i * (10_000 + boosterAmount_i * boosterBoostBps) / 10_000)
-W_i = floor(sqrt(C_i * S_i))
 B   = floor(totalCoverPoolUsd * maxCoverPoolPayoutBps / 10_000)
-P_i = min(C_i, lambda * W_i)
+T   = sum(S_j for all live claims)
+E_i = floor(B * S_i / T)
+P_i = min(C_i, E_i)
 sum(P_i) <= B
 ```
 
 Only `R_i` is recorded as spent in the Registry. `S_i` is committed in the Merkle leaf and used only for payout allocation. `C_i` is the claim's absolute coverage cap.
 
-### Why geometric weighting
+## Boosters
+- The Registry atomically configures the ERC-1155 collection, token ID, and boost BPS exactly once; the policy has no update path.
+- Boosters escrowed when filing a claim increase insurance score according to that permanent policy, so incidents do not snapshot booster configuration.
 
-`W_i = sqrt(C_i * S_i)` gives covered need and boosted score equal multiplicative influence. Increasing either value raises a claim's absolute weight, but with diminishing returns: larger claims generally receive more dollars while smaller claims may receive a higher percentage of their covered loss when pool capital is scarce. This limits concentration by large claims or accumulated score and keeps proportional claim splitting neutral—splitting both cap and score proportionally does not increase their combined weight. A zero cap or zero score produces zero weight.
 
-A deterministic capped water-filling calculation selects `lambda`. Claims that reach their cap are removed first; the remaining budget is redistributed by weight. Integer dust remains in the pools. Each payout is then split across the snapshotted cover pools in proportion to their USD value while respecting each pool's incident cap.
+### Why score-proportional entitlement
 
-The settlement code builds one Merkle root over the exact claim set and payout rows. Any authorized TEE signer may sign it, anyone may submit it, and anyone may independently reproduce it. The Rust production runtime and operations are documented in [`offchain-rust/README.md`](offchain-rust/README.md); [`offchain/README.md`](offchain/README.md) documents the temporary TypeScript differential oracle.
+Score alone determines each claimant's share of available cover capital: a claimant with 50% of total boosted score receives 50% of the incident budget as entitlement. Loss value cannot compensate for low score; it only caps how much of that entitlement may be collected. A sole claimant with nonzero score receives 100% of the budget entitlement, still bounded by the covered-loss cap.
+
+Entitlement left unused because a claim reaches its covered-loss cap is not redistributed. Unused entitlement and integer-division dust remain in the pools. Each payout is split across the snapshotted cover pools in proportion to their USD value while respecting each pool's incident cap.
+
+The settlement code builds one Merkle root over the exact claim set and payout rows. Any authorized TEE signer may sign it, anyone may settle it, and anyone may independently reproduce it. The Rust production runtime and operations are documented in [`offchain-rust/README.md`](offchain-rust/README.md).
 
 <br/><br/><br/><br/>
 
@@ -275,7 +267,7 @@ The settlement code builds one Merkle root over the exact claim set and payout r
 
 - Registry admin and timelock roles are privileged by design. They control upgrades, topology, settlement price feeds and staleness policy, strategy admission and allocation, profit routing, pauses, insured-token parameters, and incident/root operations.
 - The timelock alone approves strategy swap target/spender pairs. Admins and the timelock may execute fresh routes. Each strategy permits only USDC → its declared deployment token or any non-position token → USDC; verified USDC output goes directly to Treasury and position tokens cannot be sold through this entrypoint.
-- Any authorized TEE signer can open or sign a settlement. Compromise of one signer is bounded by the dispute window, pool payout caps, and governance close/correction powers.
+- Any authorized TEE signer can open or sign a settlement. Compromise of one signer is bounded by the correction window, pool payout caps, and governance close/correction powers.
 - All TEE algorithms are open sourced, user can verify their insurance score, payout amount independently.
 
 ## Beta mode and permanent disablement of upgradeability
@@ -283,7 +275,7 @@ The settlement code builds one Merkle root over the exact claim set and payout r
 USD8 launches with Registry `betaMode` enabled. It is a narrow, temporary safety boundary around two classes of critical action:
 
 - UUPS upgrades to Registry, USD8, Treasury, and DefiInsurance require the timelock and are permitted only while beta mode is active.
-- `adminCorrectSettlement` lets an admin or the timelock replace or void a standing settlement root during its dispute period. It remains subject to the normal incident phase checks and per-pool payout caps.
+- `adminCorrectSettlement` lets an admin or the timelock replace or void a standing settlement root during its correction window. It remains subject to the normal incident phase checks and per-pool payout caps.
 
 The timelock can call `endBetaMode()` only while no incident is active. There is no function to re-enable beta mode, so this permanently disables all four UUPS upgrade paths and the direct settlement-correction shortcut for both admins and the timelock. Ordinary governance powers such as parameter changes, topology management, pauses, and strategy controls are not removed.
 
@@ -307,15 +299,10 @@ offchain-rust/
   src/                          production settlement runtime and FFI
   README.md                     operations, trust model, and recovery
 
-offchain/                       TypeScript CI/shadow oracle; not production
-  src/compute.ts                independent settlement oracle
-  src/chain.ts                  independent pinned-read oracle
-
 script/
   01_DeployTimelock.s.sol       step 1: governance timelock
   02_DeployUSD8System.s.sol     step 2: complete mainnet system, including sUSD8
 test/                           Foundry tests
-offchain/test/                  Vitest settlement tests
 ```
 ## Codebase structure
 
@@ -357,8 +344,7 @@ offchain/test/                  Vitest settlement tests
 ## Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `cast`, `anvil`)
-- Rust 1.91.1 for the production settlement runtime
-- Node.js 22.22.3 and npm only for differential-oracle tests
+- Rust 1.92.0 for the production settlement runtime
 
 ## Install and build
 
@@ -370,11 +356,6 @@ forge build
 
 cd offchain-rust
 cargo build --release --locked
-
-# Optional: build the TypeScript differential oracle.
-cd ../offchain
-npm ci --include=dev
-npm run build
 ```
 
 ## Deployment order
@@ -438,15 +419,9 @@ cd offchain-rust
 cargo test --locked
 cargo build --release --locked
 
-# TypeScript differential oracle
-cd ../offchain
-npm test
-
-# Both contract-integration lanes
-npm run build
+# Solidity ↔ Rust contract integration
 cd ..
-RUN_INTEGRATION=1 USE_RUST_FFI=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
-RUN_INTEGRATION=1 USE_RUST_FFI=0 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
+RUN_INTEGRATION=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 ```
 
 

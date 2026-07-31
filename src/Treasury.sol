@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
+
 //  __  __   ______   ______   ______
 // /_/\/_/\ /_____/\ /_____/\ /_____/\
 // \:\ \:\ \\::::_\/_\:::_ \ \\:::_:\ \
-//  \:\ \:\ \\:\/___/\\:\ \ \ \\:\_\:\ \
+//  \:\ \:\ \\: \/___/\\:\ \ \ \\:\_\:\ \
 //   \:\ \:\ \\_::._\:\\:\ \ \ \\::__:\ \
-//    \:\_\:\ \ /____\:\\:\/.:| |\:\_\:\ \
+//    \:\_\:\ \ /____\:\\:\\/.:| |\:\_\:\ \
 //     \_____\/ \_____\/ \____/_/ \_____\/
 
 pragma solidity 0.8.28;
@@ -13,6 +14,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -23,46 +25,17 @@ import {SharedBase} from "./SharedBase.sol";
 import {IProfitDistributionReceiver} from "./interfaces/IProfitDistributionReceiver.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 
-/// @title  USD8 Treasury v1
-/// @notice Wraps USDC into USD8 at a fixed 1:1 dollar peg and holds the USDC reserve.
-/// @dev    Units: USDC is 6-decimal, USD8 is 18-decimal, so 1 USDC == 1e12 USD8. Terms:
-///           R  = reserve: all USDC the Treasury controls, incl. accrued yield ({getReserveBalance}).
-///           eff = effective collateral = min(R·1e12, USD8Supply).
-///           S  = surplus = R·1e12 − USD8Supply (signed): S > 0 is reserve above backing
-///                (routed to yield via {harvestAndDistribute}); S < 0 is distress.
-///         The reserve asset is USDC and cannot be changed.
-///
-///         Mint is always 1:1. Redeem pays redeemedUSDC = givenUSD8 · eff / (USD8Supply · 1e12),
-///         rounded down (sub-unit dust burns for 0 USDC, favoring the Treasury). When S >= 0,
-///         eff = USD8Supply and this is the exact 1:1 peg. In distress (S < 0, only reachable via a
-///         strategy loss) eff = R·1e12, so every redeemer takes the same proportional haircut — no
-///         first-mover advantage, no bank run. Surplus is never paid to redeemers, and minting in
-///         distress only donates to holders, so no rational actor mints then.
-///
-///         Strategies: a timelock-approved list ({addStrategy}/{removeStrategy}). Mints leave USDC
-///         idle; admin moves it via {depositToStrategy}/{withdrawFromStrategy}. Redeem spends idle
-///         first, then walks the list in order — the array is the withdrawal-priority queue.
-///         UPGRADEABLE: the Treasury is a UUPS proxy, so governance can normally
-///         evolve logic in place without moving reserves or re-pointing USD8's
-///         mint/burn authority. The timelock may rotate Treasury through
-///         {USD8.setTreasury}; governance is trusted to migrate every reserve,
-///         strategy position, and operational setting before doing so.
-///
-///         DEPLOYMENT NOTE: this v1 proxy is for a fresh protocol deployment. It
-///         does not migrate reserves, strategy positions, or configuration from a
-///         previously deployed constructor-based Treasury; such a live migration
-///         would require a separate audited migration procedure.
+/// @title USD8 Treasury
+/// @notice Mints USD8 1:1 for six-decimal USDC and manages the USDC reserve.
+/// @dev Healthy redemptions return USDC 1:1. If reserves fall below supply,
+///      redemptions receive the same pro-rata haircut. Approved strategies are
+///      counted as reserve and form an ordered withdrawal queue after idle USDC;
+///      strategy liquidity can still block execution. Timelock upgrades require beta mode.
 /// @custom:security-contact rick@usd8.fi
 contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, SharedBase {
     using SafeERC20 for IERC20;
 
-    /// @notice How harvested USD8 revenue is routed to a recipient.
-    ///         - DirectTransfer: raw USD8 transfer; use only when
-    ///           immediate accounting is acceptable.
-    ///         - ReceiveProfitDistribution: approve the recipient and
-    ///           call {IProfitDistributionReceiver-receiveProfitDistribution};
-    ///           use for vaults that must vest or linearize incoming profit for
-    ///           anti JIT attacks.
+    /// @notice Deliver revenue by direct transfer or a receiver hook for custom accounting.
     enum RevenueDistributionMode {
         DirectTransfer,
         ReceiveProfitDistribution
@@ -73,6 +46,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     /// @custom:storage-location erc7201:usd8.storage.Treasury
     struct TreasuryStorage {
         IERC20 usdc;
+        uint256 harvestBufferDivisor;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("usd8.storage.Treasury")) - 1)) & ~bytes32(uint256(0xff))
@@ -92,30 +66,22 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     /// @notice Decimal-scale factor between USDC (6) and USD8 (18): 1e12.
     uint256 public constant USDC_TO_USD8_SCALE = 1e12;
 
-    /// @notice Overcollateralization buffer retained by {harvestAndDistribute},
-    ///         expressed as a divisor of supply: buffer = supply / 1000,
-    ///         i.e. 10 bps. After every harvest the reserve sits at
-    ///         supply + buffer rather than exactly at supply, keeping the
-    ///         peg strictly above 1:1 so block-to-block strategy totalAssets()
-    ///         drift (interest accrual, fee dilution) doesn't repeatedly tip
-    ///         the system across the distressed-redemption boundary.
+    /// @notice Default harvest buffer divisor; the effective divisor is returned by {harvestBufferDivisor}.
     uint256 public constant HARVEST_BUFFER_DIVISOR = 1000;
+
+    /// @notice Current divisor used to retain a fraction of USD8 supply during harvest.
+    function harvestBufferDivisor() public view returns (uint256) {
+        uint256 divisor = _treasuryStorage().harvestBufferDivisor;
+        return divisor == 0 ? HARVEST_BUFFER_DIVISOR : divisor;
+    }
 
     /// @notice Maximum aggregate reserve-accounting difference allowed by one
     ///         mint or redeem, in USDC base units (100 = 0.0001 USDC).
     uint256 public constant RESERVE_CHECK_TOLERANCE = 100;
 
-    /// @notice Approved strategies, in timelock-determined order. Membership
-    ///         in this array IS the approval — there is no separate
-    ///         approval mapping. The array order doubles as the redeem
-    ///         fallback withdrawal queue: idle USDC is consumed first, then
-    ///         each strategy in strategies order until the redemption is
-    ///         satisfied.
-    /// @dev    No hard cap is enforced on-chain. Admin is responsible for
-    ///         keeping the count under ~10 (timelock curates the set) — every approved strategy adds
-    ///         external-call overhead to {getReserveBalance} (called twice
-    ///         per mint/redeem) and the redeem fallback walk. Membership
-    ///         checks are O(n) array scans, also cheap at small N.
+    /// @notice Approved strategies in withdrawal order after idle USDC.
+    /// @dev This array is also the approval set and is scanned during reserve reads.
+    ///      Mint values it twice; redeem values it three times and may walk it for liquidity.
     IStrategy[] public strategies;
 
     /// @notice A registered profit receiver and its distribution config.
@@ -126,12 +92,12 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///                  {IProfitDistributionReceiver-receiveProfitDistribution}.
     struct ProfitReceiver {
         address receiver;
-        uint256 weight;
+        uint88 weight;
         RevenueDistributionMode mode;
     }
 
     /// @notice Registered profit receivers — the weighted-split targets of
-    ///         {harvestAndDistribute}. Admin curates via
+    ///         {harvestAndDistribute}. Admin or timelock curates via
     ///         {setProfitReceiver}/{removeProfitReceiver}. Keep the count small:
     ///         each distribution is a linear scan plus one external call per
     ///         positive-weight receiver.
@@ -156,13 +122,10 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///         surprised by an in-flight transition into a distressed state.
     error InsufficientUsdcOut(uint256 usdcOut, uint256 minUsdcOut);
 
-    /// @notice Thrown when idle USDC plus everything the strategy walk could
-    ///         withdraw is still below the amount a redeem must pay out (e.g.
-    ///         every strategy is illiquid or reverting).
+    /// @notice Idle USDC plus successful strategy withdrawals cannot fund a redemption.
     error InsufficientLiquidity(uint256 needed, uint256 available);
 
-    /// @notice Thrown when an timelock operation targets a strategy that has
-    ///         not been approved via {addStrategy}.
+    /// @notice A strategy operation targeted one not approved through {addStrategy}.
     error StrategyNotApproved(IStrategy strategy);
 
     /// @notice Thrown by {addStrategy} when the strategy is already approved.
@@ -184,7 +147,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     error InvalidReserveAsset(address candidate);
     error InvalidReserveDecimals(uint8 actual);
-    error ReserveAssetAlreadyConfigured(address current);
+    error InvalidHarvestBufferDivisor(uint256 divisor);
 
     // ─────────────────────────── Events ──────────────────────────
 
@@ -202,17 +165,19 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///         require the strategy to be drained first.
     event StrategyRemoved(IStrategy indexed strategy);
 
-    /// @notice Emitted when timelock pushes idle USDC to a strategy.
+    /// @notice Emitted when an admin or timelock deposits idle USDC into a strategy.
     event DepositedToStrategy(IStrategy indexed strategy, uint256 amount);
 
-    /// @notice Emitted when timelock pulls USDC from a strategy back to idle.
+    /// @notice Emitted when an admin or timelock withdraws USDC from a strategy.
     ///         amount is the actual delta observed in the Treasury's USDC
     ///         balance, not the requested amount.
     event WithdrawnFromStrategy(IStrategy indexed strategy, uint256 amount);
 
-    /// @notice Emitted when timelock forwards USD8 from the harvested-revenue
-    ///         balance to a recipient.
+    /// @notice Emitted when {harvestAndDistribute} sends USD8 to a receiver.
     event RevenueDistributed(address indexed recipient, uint256 amount);
+
+    /// @notice Emitted when Treasury routes its configured share of distributed revenue.
+    event ProtocolFeePaid(address indexed recipient, uint256 amount);
 
     /// @notice Emitted when a profit receiver is registered or its weight/mode
     ///         updated via {setProfitReceiver}.
@@ -224,7 +189,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     /// @notice Emitted when {harvestAndDistribute} mints surplus into this Treasury.
     ///         amount is in USD8 base units (18 decimals).
     event RevenueHarvested(uint256 amount);
-    event ReserveAssetMigrated(address indexed reserveAsset);
+
+    /// @notice Emitted when the timelock updates the harvest buffer divisor.
+    event HarvestBufferDivisorSet(uint256 oldDivisor, uint256 newDivisor);
 
     // ─────────────────────────── Constructor ─────────────────────
 
@@ -239,20 +206,6 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     function initialize(Registry _registry, IERC20 usdc_) external initializer {
         if (address(_registry) == address(0) || address(usdc_) == address(0)) revert ZeroAddress();
         _setRegistry(_registry);
-        _setReserveAsset(usdc_);
-    }
-
-    /// @notice Populate the reserve slot when upgrading a V1 proxy whose USDC
-    ///         address was a compile-time constant. Call atomically via upgradeToAndCall.
-    function migrateReserveAsset(IERC20 usdc_) external reinitializer(2) onlyTimelock {
-        IERC20 current = _treasuryStorage().usdc;
-        if (address(current) != address(0)) revert ReserveAssetAlreadyConfigured(address(current));
-        _setReserveAsset(usdc_);
-        emit ReserveAssetMigrated(address(usdc_));
-    }
-
-    function _setReserveAsset(IERC20 usdc_) private {
-        if (address(usdc_) == address(0)) revert ZeroAddress();
         if (address(usdc_).code.length == 0) revert InvalidReserveAsset(address(usdc_));
         uint8 reserveDecimals = IERC20Metadata(address(usdc_)).decimals();
         if (reserveDecimals != 6) revert InvalidReserveDecimals(reserveDecimals);
@@ -264,21 +217,28 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
         return USD8(registry().usd8());
     }
 
+    /// @notice Set the divisor used to retain a fraction of USD8 supply during harvest.
+    function setHarvestBufferDivisor(uint256 divisor) external {
+        _requireTimelock();
+        if (divisor == 0) revert InvalidHarvestBufferDivisor(divisor);
+        TreasuryStorage storage $ = _treasuryStorage();
+        uint256 oldDivisor = harvestBufferDivisor();
+        $.harvestBufferDivisor = divisor;
+        emit HarvestBufferDivisorSet(oldDivisor, divisor);
+    }
+
     /// @dev Only the timelock can upgrade the Treasury in place, and only during beta.
-    ///      Registry topology may separately rotate the active Treasury during migration.
-    function _authorizeUpgrade(address) internal view override onlyTimelock onlyBetaMode {}
+    function _authorizeUpgrade(address) internal view override {
+        _requireTimelock();
+        _requireBetaMode();
+    }
 
     // ─────────────────────────── Modifiers ───────────────────────
 
-    /// @dev Validates mint/redeem using only pre-state and post-state. If the
-    ///      system starts healthy or in surplus, surplus must not decrease; if it
-    ///      starts distressed, the reserve/supply ratio must not decrease.
-    ///
-    ///      Each check allows 100 USDC base units of aggregate accounting difference.
-    ///      This accommodates dust rounding without per-strategy configuration.
-    ///      Tolerance only decides revert-vs-pass: the redeemer's payout remains
-    ///      fixed by the formula and the allowance cannot itself be withdrawn.
+    /// @dev After mint or redeem, healthy-state surplus or distressed-state backing
+    ///      ratio must not worsen beyond {RESERVE_CHECK_TOLERANCE} USDC base units.
     modifier reserveSupplyStatusCheck() {
+        _requireNotPaused();
         uint256 reserveBefore = getReserveBalance();
         uint256 supplyBefore = usd8().totalSupply();
         _;
@@ -306,12 +266,25 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
         }
     }
 
+    // ─────────────────────────── USD8 / USDC conversion ───────────────────────────
+
+    /// @notice WAD-scaled redemption ratio used by incident-open pricing.
+    /// @dev Returns `min(reserve * 1e12, supply) / supply` without consulting a
+    ///      USDC price oracle. Reverts when supply is zero.
+    function usd8ToUsdcRate() external view returns (uint256) {
+        uint256 supply = usd8().totalSupply();
+        if (supply == 0) revert NoUsd8Supply();
+        uint256 reserveInUsd8 = getReserveBalance() * USDC_TO_USD8_SCALE;
+        uint256 effectiveReserve = reserveInUsd8 < supply ? reserveInUsd8 : supply;
+        return Math.mulDiv(effectiveReserve, 1e18, supply);
+    }
+
     // ─────────────────────────── User operations (mint / redeem) ───────────────────────────
 
     /// @notice Deposit USDC and mint USD8 at a 1:1 dollar peg. The caller
     ///         must have approved usdcAmount USDC to this contract.
     /// @param  usdcAmount Amount of USDC (6 decimals) to deposit.
-    function mintUSD8(uint256 usdcAmount) external nonReentrant whenNotPaused reserveSupplyStatusCheck {
+    function mintUSD8(uint256 usdcAmount) external nonReentrant reserveSupplyStatusCheck {
         if (usdcAmount == 0) revert ZeroAmount();
 
         USDC().safeTransferFrom(msg.sender, address(this), usdcAmount);
@@ -334,12 +307,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///                     0 to accept any payout; pass the expected 1:1
     ///                     value to revert if an in-flight strategy loss has
     ///                     dropped the system into distress.
-    function redeemUSD8(uint256 usd8Amount, uint256 minUsdcOut)
-        external
-        nonReentrant
-        whenNotPaused
-        reserveSupplyStatusCheck
-    {
+    function redeemUSD8(uint256 usd8Amount, uint256 minUsdcOut) external nonReentrant reserveSupplyStatusCheck {
         if (usd8Amount == 0) revert ZeroAmount();
 
         uint256 supply = usd8().totalSupply();
@@ -362,14 +330,11 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     // ─────────────────────────── Strategy management ───────────────────────────
 
-    /// @notice Approve a new strategy and insert it at index in the
-    ///         redeem fallback withdrawal queue (strategies[0] is consulted
-    ///         first). Timelock only. Any index >= strategies.length appends.
-    ///         To reposition an existing strategy, {removeStrategy} it and
-    ///         re-add it at the desired index. withdraw goes from first strategy.
-    ///         Strategy approval is a trusted process — timelock is expected to
-    ///         verify the contract implements IStrategy correctly off-chain.
-    function addStrategy(IStrategy s, uint256 index) external onlyTimelock {
+    /// @notice Approve a strategy and insert it into the withdrawal queue. Timelock only.
+    /// @dev An index beyond the array appends. Strategy behavior is a trusted
+    ///      governance boundary; Treasury does not verify the implementation.
+    function addStrategy(IStrategy s, uint256 index) external {
+        _requireTimelock();
         if (address(s) == address(0)) revert ZeroAddress();
         (, bool exists) = _findStrategy(s);
         if (exists) revert StrategyAlreadyApproved(s);
@@ -384,26 +349,13 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
         emit StrategyAdded(s);
     }
 
-    /// @notice Remove a previously approved strategy. Timelock only.
-    ///         **Force removal**: no zero-assets precondition is
-    ///         enforced — timelock can drop a strategy that's reverting on
-    ///         totalAssets() or otherwise stuck, recovering the rest of
-    ///         the system at the cost of orphaning the strategy's reported
-    ///         balance.
-    /// @dev    DANGER: Removing a strategy that still holds funds
-    ///         permanently orphans those funds from the protocol's
-    ///         accounting. The strategy's totalAssets() no longer
-    ///         contributes to {getReserveBalance}, which creates unbacked
-    ///         USD8 against the orphaned USDC. Use {withdrawFromStrategy}
-    ///         to drain first; only force-remove a strategy when its
-    ///         reported balance is known-lost (e.g., the strategy is
-    ///         compromised, the underlying protocol is dead, or
-    ///         totalAssets() reverts and recovery is impossible).
-    /// @dev    Order-preserving: strategies after the removed slot shift
-    ///         down one position, so the relative priority of the remaining
-    ///         withdrawal queue is unchanged. To reorder, remove and
-    ///         re-{addStrategy} at the desired index (drain first if funded).
-    function removeStrategy(IStrategy s) external onlyTimelock {
+    /// @notice Remove a strategy while preserving the order of the remaining queue.
+    ///         Timelock only.
+    /// @dev Removal does not require the strategy to be empty. Any funds left there
+    ///      stop counting as reserve and may become unreachable; drain first unless
+    ///      the position is already considered lost.
+    function removeStrategy(IStrategy s) external {
+        _requireTimelock();
         uint256 idx = _findApprovedStrategy(s);
 
         uint256 last = strategies.length - 1;
@@ -418,7 +370,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///         Blocked while paused.
     /// @dev    Push pattern: USDC is safeTransfer'd to the strategy first,
     ///         then strategy.deploy(amount) is called as a notification.
-    function depositToStrategy(IStrategy s, uint256 amount) external nonReentrant onlyAdminOrTimelock whenNotPaused {
+    function depositToStrategy(IStrategy s, uint256 amount) external nonReentrant {
+        _requireAdminOrTimelock();
+        _requireNotPaused();
         if (amount == 0) revert ZeroAmount();
         _findApprovedStrategy(s);
         USDC().safeTransfer(address(s), amount); // push USDC to strategies to avoid granting approvals.
@@ -428,12 +382,10 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     /// @notice Pull amount USDC from an approved strategy back to idle.
     ///         Admin or timelock. Blocked while paused.
-    /// @dev    The emitted WithdrawnFromStrategy amount reflects the
-    ///         actual delta observed in this contract's USDC balance,
-    ///         which equals amount for any strategy that honors its
-    ///         IStrategy contract (exact transfer or revert), and may
-    ///         be less for a misbehaving strategy.
-    function withdrawFromStrategy(IStrategy s, uint256 amount) external nonReentrant onlyAdminOrTimelock whenNotPaused {
+    /// @dev The event records the actual USDC received, which may be less than requested.
+    function withdrawFromStrategy(IStrategy s, uint256 amount) external nonReentrant {
+        _requireAdminOrTimelock();
+        _requireNotPaused();
         _findApprovedStrategy(s);
         if (amount == 0) revert ZeroAmount();
         uint256 balanceBefore = USDC().balanceOf(address(this));
@@ -444,46 +396,19 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     // ─────────────────────────── Revenue harvesting & routing ───────────────────────────
 
-    /// @notice Harvest the protocol's surplus and split the entire resulting
-    ///         revenue pool across the registered profit receivers by weight —
-    ///         the whole recurring revenue flow in one call. Admin or timelock;
-    ///         blocked while paused.
-    ///
-    ///         Harvest: mints reserve·1e12 − supply − buffer as USD8 into this
-    ///         Treasury, where buffer = supply / {HARVEST_BUFFER_DIVISOR}. The USDC
-    ///         stays as backing, so after the mint the reserve sits at supply +
-    ///         buffer — the peg holds strictly above 1:1 by the retained buffer,
-    ///         a shock absorber a strategy loss must eat through before redemptions
-    ///         go distressed. No USDC moves; harvest no-ops when at/below buffer.
-    ///         Restricting the trigger lets the protocol time harvests around
-    ///         per-strategy totalAssets() volatility so a transient spike isn't
-    ///         permanently coined into supply.
-    ///
-    ///         Distribute: the full USD8 balance (this harvest plus any residual)
-    ///         is streamed to receivers pro-rata to {ProfitReceiver-weight}, each
-    ///         via its configured mode. Zero-weight receivers are skipped; the last
-    ///         positive-weight one absorbs integer-division dust so nothing strands.
-    ///         Atomic: if there is revenue to distribute but no weighted receiver
-    ///         (or a receiver rejects), the whole call — including the harvest
-    ///         mint — reverts. No-ops cleanly when there is no revenue.
-    /// @dev    INVARIANT: the Treasury's USD8 balance is exclusively the
-    ///         harvested-revenue pool. No other path parks USD8 here — mintUSD8
-    ///         sends to the caller, redeemUSD8 burns from the caller, and
-    ///         {getReserveBalance} is USDC-denominated and ignores Treasury-held
-    ///         USD8. So distributing the full balance is correct: it is all revenue.
+    /// @notice Mint reserve surplus above the buffer, then distribute all USD8 held
+    ///         by Treasury across positive-weight receivers. Admin or timelock.
+    /// @dev Unsolicited USD8 is also distributed. The last eligible receiver gets
+    ///      division dust; any receiver failure reverts the whole call.
     /// @return harvested   USD8 minted from surplus this call (0 if at/below buffer).
-    /// @return distributed USD8 pushed to receivers (0 if the pool was empty).
-    function harvestAndDistribute()
-        external
-        nonReentrant
-        onlyAdminOrTimelock
-        whenNotPaused
-        returns (uint256 harvested, uint256 distributed)
-    {
+    /// @return distributed USD8 pushed to receivers (zero when no revenue exists).
+    function harvestAndDistribute() external nonReentrant returns (uint256 harvested, uint256 distributed) {
+        _requireAdminOrTimelock();
+        _requireNotPaused();
         // ── Harvest: mint surplus above the retained buffer. ──
         uint256 supply = usd8().totalSupply();
         uint256 reserveInUsd8 = getReserveBalance() * USDC_TO_USD8_SCALE;
-        uint256 retain = supply + supply / HARVEST_BUFFER_DIVISOR;
+        uint256 retain = supply + supply / harvestBufferDivisor();
         if (reserveInUsd8 > retain) {
             harvested = reserveInUsd8 - retain;
             usd8().mint(address(this), harvested); // no JIT concerns
@@ -506,13 +431,23 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
         }
         if (totalWeight == 0) revert NoEligibleProfitReceivers();
 
-        // Pass 2: pay each its pro-rata share. The last positive-weight receiver
+        Registry.ProtocolFeeConfig memory feeConfig = registry().protocolFeeConfig();
+        uint256 protocolFee = Math.mulDiv(distributed, feeConfig.reserveYieldFeeBps, 10_000);
+        uint256 weightedRevenue = distributed - protocolFee;
+        if (protocolFee != 0) {
+            usd8().transfer(feeConfig.receiver, protocolFee);
+            emit ProtocolFeePaid(feeConfig.receiver, protocolFee);
+        }
+
+        // Pass 2: pay each its pro-rata share of revenue after the protocol fee.
+        // The last positive-weight receiver
         // takes the remainder (its share plus truncation dust) so nothing strands.
         uint256 paid;
         for (uint256 i = 0; i < n; i++) {
             ProfitReceiver memory p = profitReceivers[i];
             if (p.weight == 0) continue;
-            uint256 share = i == lastEligible ? distributed - paid : Math.mulDiv(distributed, p.weight, totalWeight);
+            uint256 share =
+                i == lastEligible ? weightedRevenue - paid : Math.mulDiv(weightedRevenue, p.weight, totalWeight);
             paid += share;
             if (share == 0) continue;
 
@@ -542,22 +477,21 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     /// @param weight    Relative distribution share.
     /// @param mode      Delivery mode (see {RevenueDistributionMode}). Vesting
     ///                  accounting-aware receivers MUST use ReceiveProfitDistribution.
-    function setProfitReceiver(address receiver, uint256 weight, RevenueDistributionMode mode)
-        external
-        onlyAdminOrTimelock
-    {
+    function setProfitReceiver(address receiver, uint256 weight, RevenueDistributionMode mode) external {
+        _requireAdminOrTimelock();
         if (receiver == address(0)) revert ZeroAddress();
         if (receiver == address(this)) revert InvalidProfitReceiver(receiver);
+        uint88 packedWeight = SafeCast.toUint88(weight);
         uint256 n = profitReceivers.length;
         for (uint256 i = 0; i < n; i++) {
             if (profitReceivers[i].receiver == receiver) {
-                profitReceivers[i].weight = weight;
+                profitReceivers[i].weight = packedWeight;
                 profitReceivers[i].mode = mode;
                 emit ProfitReceiverSet(receiver, weight, mode);
                 return;
             }
         }
-        profitReceivers.push(ProfitReceiver({receiver: receiver, weight: weight, mode: mode}));
+        profitReceivers.push(ProfitReceiver({receiver: receiver, weight: packedWeight, mode: mode}));
         emit ProfitReceiverSet(receiver, weight, mode);
     }
 
@@ -565,7 +499,8 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///         remaining receivers is not preserved (weighted split is order-
     ///         independent). Reverts if the receiver isn't registered.
     /// @param receiver  Registered receiver to remove.
-    function removeProfitReceiver(address receiver) external onlyAdminOrTimelock {
+    function removeProfitReceiver(address receiver) external {
+        _requireAdminOrTimelock();
         uint256 n = profitReceivers.length;
         for (uint256 i = 0; i < n; i++) {
             if (profitReceivers[i].receiver == receiver) {
@@ -580,10 +515,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     // ─────────────────────────── Admin control ───────────────────────────
 
-    /// @dev Rescuable via {SharedBase-rescueToken}: any stray token EXCEPT the
-    ///      reserve asset ({USDC}) and the harvested-revenue token ({usd8}),
-    ///      which are protected (cap 0). Their normal exits are redeem/strategy
-    ///      flows (USDC) and {harvestAndDistribute} (USD8).
+    /// @dev {SharedBase-sweepToken} may recover stray tokens, but never USDC or USD8.
     function _sweepable(address token) internal view override returns (uint256) {
         if (token == address(USDC()) || token == address(usd8())) return 0;
         return IERC20(token).balanceOf(address(this));
@@ -626,12 +558,9 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     // ─────────────────────────── Internal helpers ───────────────────────────
 
-    /// @dev Ensures the Treasury holds at least amount of idle USDC. Walks
-    ///      strategies in array order, re-reading the Treasury's USDC balance
-    ///      after each pull so a strategy that delivers short doesn't cause the
-    ///      next iteration to under-ask, and skipping any that revert. Reverts
-    ///      InsufficientLiquidity if idle + everything the walk could pull is
-    ///      still below amount (post-condition: idle >= amount on return).
+    /// @dev Pulls USDC in strategy order until `amount` is idle. A reverting
+    ///      `withdraw` is skipped, but a reverting `totalAssets` call propagates.
+    ///      Reverts with {InsufficientLiquidity} if successful pulls remain short.
     function _ensureIdleUsdc(uint256 amount) internal {
         uint256 n = strategies.length;
         for (uint256 i = 0; i < n; i++) {
@@ -642,8 +571,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
             uint256 available = s.totalAssets();
             if (available == 0) continue;
             uint256 toPull = needed < available ? needed : available;
-            // Skip strategies that revert (e.g. illiquid Aave during stress)
-            // so the walk continues to the next strategy and remaining idle.
+            // Skip reverting withdrawals and continue through the queue.
             try s.withdraw(toPull) {} catch {}
         }
 
@@ -653,8 +581,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
         if (finalIdle < amount) revert InsufficientLiquidity(amount, finalIdle);
     }
 
-    /// @dev Linear scan of strategies for s. Returns its index plus a
-    ///      found flag. O(n), acceptable at the operational count of <10.
+    /// @dev Linear strategy scan returning its index and a found flag.
     function _findStrategy(IStrategy s) internal view returns (uint256 idx, bool found) {
         uint256 n = strategies.length;
         for (uint256 i = 0; i < n; i++) {

@@ -21,6 +21,7 @@ contract InsuranceInvariantFeed {
 contract InsuranceClaimHandler is Test {
     DefiInsurance public defi;
     MockERC20 public insuredToken;
+    MockERC20 public bondToken;
     uint256 public incidentId;
 
     address[5] public actors;
@@ -30,9 +31,10 @@ contract InsuranceClaimHandler is Test {
     uint256 public ghostClaimsCreated;
     bytes32 public ghostClaimSetHash;
 
-    constructor(DefiInsurance defi_, MockERC20 insuredToken_, uint256 incidentId_) {
+    constructor(DefiInsurance defi_, MockERC20 insuredToken_, MockERC20 bondToken_, uint256 incidentId_) {
         defi = defi_;
         insuredToken = insuredToken_;
+        bondToken = bondToken_;
         incidentId = incidentId_;
         actors = [address(0xA11), address(0xB0B), address(0xCA1), address(0xD00D), address(0xE11)];
     }
@@ -43,20 +45,22 @@ contract InsuranceClaimHandler is Test {
 
     function join(uint256 actorSeed, uint128 amount, uint256 scoreToSpend) external {
         address actor = _actor(actorSeed);
-        if (defi.activeClaimId(incidentId, actor) != 0) return;
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
-        if (block.timestamp > claimWindowEndTime) return;
+        if (defi.claimIdByIncidentAndUser(incidentId, actor) != 0) return;
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
+        if (block.timestamp > claimDeadline) return;
 
         amount = uint128(bound(uint256(amount), 1e18, 1e24));
         scoreToSpend = bound(scoreToSpend, 0, 1e36);
         insuredToken.mint(actor, amount);
+        bondToken.mint(actor, defi.claimBondAmount());
 
         vm.startPrank(actor);
         insuredToken.approve(address(defi), amount);
-        uint256 claimId = defi.joinClaim(IERC20(address(insuredToken)), amount, scoreToSpend, 0, 0, "");
+        bondToken.approve(address(defi), defi.claimBondAmount());
+        uint256 claimId = defi.fileClaim(IERC20(address(insuredToken)), amount, scoreToSpend, 0, 0, "");
         vm.stopPrank();
 
-        (address claimant, uint256 claimIncident, uint128 escrow,, bool resolved,) = defi.claims(claimId);
+        (address claimant, uint256 claimIncident, uint128 escrow,,, bool resolved) = defi.claims(claimId);
         assertEq(claimant, actor, "claimant");
         assertEq(claimIncident, incidentId, "claim incident");
         assertEq(escrow, amount, "claim escrow");
@@ -71,19 +75,19 @@ contract InsuranceClaimHandler is Test {
 
     function cancel(uint256 actorSeed) external {
         address actor = _actor(actorSeed);
-        uint256 claimId = defi.activeClaimId(incidentId, actor);
+        uint256 claimId = defi.claimIdByIncidentAndUser(incidentId, actor);
         if (claimId == 0) return;
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
-        if (block.timestamp > claimWindowEndTime) return;
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
+        if (block.timestamp > claimDeadline) return;
 
         uint256 amount = ghostEscrow[actor];
         uint256 balanceBefore = insuredToken.balanceOf(actor);
         vm.prank(actor);
         defi.cancelClaim();
 
-        (,,,, bool resolved,) = defi.claims(claimId);
+        (,,,,, bool resolved) = defi.claims(claimId);
         assertTrue(resolved, "cancelled claim unresolved");
-        assertEq(defi.activeClaimId(incidentId, actor), 0, "active id not cleared");
+        assertEq(defi.claimIdByIncidentAndUser(incidentId, actor), 0, "cancelled claim id not cleared");
         assertEq(insuredToken.balanceOf(actor), balanceBefore + amount, "escrow not returned");
 
         delete ghostEscrow[actor];
@@ -99,19 +103,20 @@ contract InsuranceClaimHandler is Test {
 
     function withdrawExpired(uint256 actorSeed) external {
         address actor = _actor(actorSeed);
-        uint256 claimId = defi.activeClaimId(incidentId, actor);
+        uint256 claimId = defi.claimIdByIncidentAndUser(incidentId, actor);
         if (claimId == 0) return;
-        (,,,, bool resolved,) = defi.claims(claimId);
+        (,,,,, bool resolved) = defi.claims(claimId);
         if (resolved) return;
-        (, uint64 claimWindowEndTime,,,,,,,,) = defi.incidents(incidentId);
-        if (block.timestamp <= claimWindowEndTime + defi.SUBMIT_DEADLINE()) return;
+        (,,,, uint64 phaseDeadline,,,,,) = defi.incidents(incidentId);
+        uint256 settlementDeadline = uint256(phaseDeadline) + defi.incidentPhaseWindow(incidentId);
+        if (block.timestamp <= settlementDeadline) return;
 
         uint256 amount = ghostEscrow[actor];
         uint256 balanceBefore = insuredToken.balanceOf(actor);
         vm.prank(actor);
-        defi.withdrawNonFinalizedClaim(claimId);
+        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
 
-        (,,,, resolved,) = defi.claims(claimId);
+        (,,,,, resolved) = defi.claims(claimId);
         assertTrue(resolved, "withdrawn claim unresolved");
         assertEq(insuredToken.balanceOf(actor), balanceBefore + amount, "expired escrow not returned");
 
@@ -131,12 +136,14 @@ contract InsuranceClaimInvariantTest is StdInvariant, Test {
     Registry internal registry;
     DefiInsurance internal defi;
     MockERC20 internal insuredToken;
+    MockERC20 internal bondToken;
     InsuranceClaimHandler internal handler;
     uint256 internal incidentId;
 
     function setUp() public {
         vm.roll(1000);
         insuredToken = new MockERC20("Insured LP", "iLP", 18);
+        bondToken = new MockERC20("USD8", "USD8", 18);
         registry = Registry(
             address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (ADMIN, ADMIN))))
         );
@@ -148,12 +155,13 @@ contract InsuranceClaimInvariantTest is StdInvariant, Test {
 
         address feed = address(new InsuranceInvariantFeed());
         vm.startPrank(ADMIN);
+        registry.setUsd8(address(bondToken));
         registry.setDefiInsurance(address(defi));
-        defi.addInsuredToken(IERC20(address(insuredToken)), 8000, 1e18, feed, address(0), "");
+        defi.editInsuredToken(IERC20(address(insuredToken)), 8000, feed, address(0), "");
         incidentId = defi.openClaimIncident(IERC20(address(insuredToken)), uint64(block.number - 1));
         vm.stopPrank();
 
-        handler = new InsuranceClaimHandler(defi, insuredToken, incidentId);
+        handler = new InsuranceClaimHandler(defi, insuredToken, bondToken, incidentId);
         bytes4[] memory selectors = new bytes4[](4);
         selectors[0] = InsuranceClaimHandler.join.selector;
         selectors[1] = InsuranceClaimHandler.cancel.selector;
@@ -164,7 +172,7 @@ contract InsuranceClaimInvariantTest is StdInvariant, Test {
     }
 
     function invariant_unresolvedMatchesLiveClaims() public view {
-        (,,, uint256 unresolved,,,,,,) = defi.incidents(incidentId);
+        (,,,,,, uint256 unresolved,,,) = defi.incidents(incidentId);
         assertEq(unresolved, handler.ghostUnresolved(), "unresolved count");
     }
 
@@ -179,38 +187,29 @@ contract InsuranceClaimInvariantTest is StdInvariant, Test {
     }
 
     function invariant_claimSetCommitmentMatchesReplay() public view {
-        (,,,,,,,,, bytes32 claimSetHash) = defi.incidents(incidentId);
+        (,,,,,,, bytes32 claimSetHash,,) = defi.incidents(incidentId);
         assertEq(claimSetHash, handler.ghostClaimSetHash(), "claim-set commitment mismatch");
     }
 
     function invariant_expiredVoidUnfreezesPools() public view {
-        (, uint64 claimWindowEndTime, bytes32 root,,,,,,,) = defi.incidents(incidentId);
-        if (root == bytes32(0) && block.timestamp > claimWindowEndTime + defi.SUBMIT_DEADLINE()) {
+        (,,,, uint64 phaseDeadline, bytes32 root,,,,) = defi.incidents(incidentId);
+        uint256 settlementDeadline = uint256(phaseDeadline) + defi.incidentPhaseWindow(incidentId);
+        if (root == bytes32(0) && block.timestamp > settlementDeadline) {
             assertEq(defi.activeIncidentId(), 0, "expired void remains active");
             assertFalse(registry.payoutIncidentActive(), "expired void keeps pools frozen");
         }
     }
 
     function invariant_activeIncidentMatchesIndependentPhaseModel() public view {
-        (
-            ,
-            uint64 claimWindowEndTime,
-            bytes32 root,
-            uint256 unresolved,
-            uint64 rootSubmittedAt,,,
-            DefiInsurance.Status status,,
-        ) = defi.incidents(incidentId);
+        (,,,, uint64 phaseDeadline, bytes32 root, uint256 unresolved,,,) = defi.incidents(incidentId);
 
         uint256 expected;
-        if (status != DefiInsurance.Status.Closed) {
-            if (block.timestamp <= claimWindowEndTime) {
+        if (block.timestamp <= phaseDeadline) {
+            expected = incidentId;
+        } else if (unresolved != 0) {
+            uint256 terminalDeadline = uint256(phaseDeadline) + defi.incidentPhaseWindow(incidentId);
+            if (block.timestamp <= terminalDeadline) {
                 expected = incidentId;
-            } else if (unresolved != 0) {
-                if (root == bytes32(0)) {
-                    if (block.timestamp <= claimWindowEndTime + defi.SUBMIT_DEADLINE()) expected = incidentId;
-                } else if (block.timestamp <= rootSubmittedAt + defi.DISPUTE_PERIOD() + defi.FINALIZE_WINDOW()) {
-                    expected = incidentId;
-                }
             }
         }
 
@@ -222,15 +221,15 @@ contract InsuranceClaimInvariantTest is StdInvariant, Test {
         for (uint256 i = 0; i < 5; i++) {
             address actor = handler.actorAt(i);
             uint256 expectedEscrow = handler.ghostEscrow(actor);
-            uint256 claimId = defi.activeClaimId(incidentId, actor);
+            uint256 claimId = defi.claimIdByIncidentAndUser(incidentId, actor);
             if (expectedEscrow == 0) {
                 if (claimId != 0) {
-                    (,,,, bool resolved,) = defi.claims(claimId);
+                    (,,,,, bool resolved) = defi.claims(claimId);
                     assertTrue(resolved, "historical claim remains unresolved");
                 }
             } else {
                 assertNotEq(claimId, 0, "missing active claim id");
-                (address claimant, uint256 claimIncident, uint128 amount,, bool resolved,) = defi.claims(claimId);
+                (address claimant, uint256 claimIncident, uint128 amount,,, bool resolved) = defi.claims(claimId);
                 assertEq(claimant, actor, "active claimant");
                 assertEq(claimIncident, incidentId, "active incident");
                 assertEq(amount, expectedEscrow, "active escrow");

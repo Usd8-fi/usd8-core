@@ -54,7 +54,7 @@
     "coverPoolFundingBlock": 11335708,
     "settlementParams": {
       "twapLookbackBlocks": 300,
-      "holdingMarginBlocks": 1,
+      "minHoldingRequired": 1,
       "sampleStepBlocks": 300,
       "holdingMarginUpdateTransaction": "0xbad794e24b4589a76893c0de14bb00e717ce67cf732f92fe3bcf922548577da0",
       "holdingMarginUpdateBlock": 11335727,
@@ -78,5 +78,7 @@
     "dualRpc": true,
     "activeIncidentId": 0,
     "note": "The oracle drop is staged; it does not itself open an incident."
-  }
+  },
+  "status": "retired",
+  "retiredReason": "Uses retired USD-oracle/minClaimAmount incident-open model; use offchain-rust attested-open."
 }

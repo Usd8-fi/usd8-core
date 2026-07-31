@@ -1,0 +1,1028 @@
+{
+  "contract": "DefiInsurance",
+  "compiled_counts": {
+    "functions": 38,
+    "errors": 47,
+    "events": 22
+  },
+  "selectors": [
+    {
+      "signature": "MAX_CLAIMANT_COVERAGE_BPS()",
+      "selector": "0xedd29f0a",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_initializationAndStaticGettersAreExact()",
+        "assertions": [
+          "returns the exact 8,000-bps claimant coverage ceiling"
+        ]
+      }
+    },
+    {
+      "signature": "UPGRADE_INTERFACE_VERSION()",
+      "selector": "0xad3cb1cc",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_upgradeInterfaceVersionAndEip712DomainAreIndependentlyExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "activeIncidentId()",
+      "selector": "0x4732300f",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_initializationAndStaticGettersAreExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "adminCorrectSettlement(bytes32,uint256[])",
+      "selector": "0x85aebff9",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_nonzeroCorrectionReplacesRootBudgetAndRestartsDeadlines()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "cancelClaim()",
+      "selector": "0x2bd7cc0f",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_cancelReturnsEscrowAndBoostersUpdatesCommitmentAndAllowsRefile(uint8)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "claimBondAmount()",
+      "selector": "0x822bdaf9",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_claimBondAmountTimelockControlsFullUint128Domain(uint128,uint128)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "claimIdByIncidentAndUser(uint256,address)",
+      "selector": "0x8de19004",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_firstFileClaimUsesProductionDigestAndExactEscrow(uint128,uint128)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "claims(uint256)",
+      "selector": "0xa888c2cd",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_firstFileClaimUsesProductionDigestAndExactEscrow(uint128,uint128)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "editInsuredToken(address,uint256,address,address,bytes)",
+      "selector": "0xaab15516",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_insuredTokenConfigAndDynamicBytesAreStoredExactly(uint16,bytes4)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "eip712Domain()",
+      "selector": "0x84b0196e",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_upgradeInterfaceVersionAndEip712DomainAreIndependentlyExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "escrowedInsuredTokens(address)",
+      "selector": "0x3bc8f32a",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_firstFileClaimUsesProductionDigestAndExactEscrow(uint128,uint128)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "fileClaim(address,uint128,uint256,uint256,uint64,bytes)",
+      "selector": "0x7dd2ac69",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_firstFileClaimUsesProductionDigestAndExactEscrow(uint128,uint128)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "finalizeClaim(uint256,bool,uint256[],uint256,uint256,uint256,bytes32[])",
+      "selector": "0x18e07b34",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_symbolicEligibleEscrowRefundAndForfeitureAreExact(uint64,uint64)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "getInsuredToken(address)",
+      "selector": "0x3f962199",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_insuredTokenConfigAndDynamicBytesAreStoredExactly(uint16,bytes4)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "incidentOpenEligibilityHash(address)",
+      "selector": "0x8f0328a4",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_incidentOpenEligibilityHashBindsExactPricePolicyAndConversionRecipe()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "incidentPhaseWindow(uint256)",
+      "selector": "0xa617c97b",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_openedIncidentDeadlinesIgnoreLaterLegalRegistryTimingChange()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "incidentPoolBudget(uint256)",
+      "selector": "0xd236c729",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_fullArrayGettersReturnExactEmptyAndOpenedPoolSnapshots()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "incidentPools(uint256)",
+      "selector": "0x68a7013e",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_fullArrayGettersReturnExactEmptyAndOpenedPoolSnapshots()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "incidents(uint256)",
+      "selector": "0xa6c6a8f3",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_openSnapshotsRegistryTimingPcrAndPoolAfterSettlingMaturedEpochs()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "initialize(address)",
+      "selector": "0xc4d66de8",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_directImplementationAndProxyReinitializationAreLocked()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "isInsuredToken(address)",
+      "selector": "0x39d427c8",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_initializationAndStaticGettersAreExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "isTeeSigner(address)",
+      "selector": "0x8e50991b",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_teeSignerAuthorizationZeroAndIncidentFreeze()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "nextClaimId()",
+      "selector": "0xa0021cf1",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_initializationAndStaticGettersAreExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "nextIncidentId()",
+      "selector": "0x0fd19668",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_initializationAndStaticGettersAreExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)",
+      "selector": "0xbc197c81",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_erc1155ReceiverSelectorsAcceptSingleAndBatch()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "onERC1155Received(address,address,uint256,uint256,bytes)",
+      "selector": "0xf23a6e61",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_erc1155ReceiverSelectorsAcceptSingleAndBatch()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "openClaimIncident(address,uint64)",
+      "selector": "0x15fd5c19",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_openSnapshotsRegistryTimingPcrAndPoolAfterSettlingMaturedEpochs()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "proxiableUUID()",
+      "selector": "0x52d1902d",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_proxyAndImplementationUupsContextsAreExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "registry()",
+      "selector": "0x7b103999",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_initializationAndStaticGettersAreExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "setClaimBondAmount(uint128)",
+      "selector": "0x08355338",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_claimBondAmountTimelockControlsFullUint128Domain(uint128,uint128)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "setSettlementParams((uint64,uint64,uint64))",
+      "selector": "0x6ddf8697",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_setSettlementParamsAcceptsFullUint64FieldsWhenStrideNonzero(uint64,uint64,uint64)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "setTeeSigner(address,bool)",
+      "selector": "0x61e8ecad",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_teeSignerAuthorizationZeroAndIncidentFreeze()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "settleIncident(bytes32,uint256[],bytes)",
+      "selector": "0xa9daa546",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_settlementCommitsRootDeadlinesBudgetAndDelistsToken()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "settlementParams()",
+      "selector": "0xcbeee318",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_setSettlementParamsAcceptsFullUint64FieldsWhenStrideNonzero(uint64,uint64,uint64)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "supportsInterface(bytes4)",
+      "selector": "0x01ffc9a7",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_initializationAndStaticGettersAreExact()",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "sweepETH(address)",
+      "selector": "0x1163b2b0",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_ethSweepExactAndRejectingReceiverRollback(uint128)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "sweepToken(address,address)",
+      "selector": "0x258836fe",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_sweepOnlyTransfersSurplusAboveLiveEscrow(uint64,uint64)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    },
+    {
+      "signature": "upgradeToAndCall(address,bytes)",
+      "selector": "0x4f1ef286",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_validNamedV2UpgradePreservesHistoricalResolvedInsuranceState(uint64)",
+        "assertions": [
+          "production call succeeds or fails at the specified boundary",
+          "return value and representative state transition are asserted"
+        ]
+      }
+    }
+  ],
+  "errors": [
+    {
+      "signature": "AddressEmptyCode(address)",
+      "selector": "0x9996b315",
+      "classification": "preempted",
+      "evidence": {
+        "reason": "UUPS probes proxiableUUID first; a no-code candidate fails with empty returndata before ERC1967/Address code validation.",
+        "source_path": "src/DefiInsurance.sol; src/SharedBase.sol; vendored OpenZeppelin UUPS/Address"
+      }
+    },
+    {
+      "signature": "AlreadySettled(uint256)",
+      "selector": "0x8fec535e",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_zeroRootAndSecondSettlementRevertWithoutReplacingStandingRoot()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "ClaimAlreadyResolved(uint256)",
+      "selector": "0xd7432b27",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_doubleFinalizationCannotPayOrConsumeTwice()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "resolved claim, incident resolution fields, escrow accounting, and both insured-token balances remain unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "ClaimWindowClosed(address,uint64)",
+      "selector": "0xc8adc329",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_laterJoinRejectsDuplicateWrongTokenAndClosedEndpoint()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "DefiInsuranceNotRegistered()",
+      "selector": "0x05684e3b",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_deregisteredModuleRejectsFirstClaimBeforeOpenAttestationPartition()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "DuplicateClaim(uint256)",
+      "selector": "0xc314bc02",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_laterJoinRejectsDuplicateWrongTokenAndClosedEndpoint()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "ECDSAInvalidSignature()",
+      "selector": "0xf645eedf",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_settlementEcdsaInvalidLengthInvalidSAndInvalidVAreExactAndAtomic()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "ECDSAInvalidSignatureLength(uint256)",
+      "selector": "0xfce698f7",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_settlementEcdsaInvalidLengthInvalidSAndInvalidVAreExactAndAtomic()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "ECDSAInvalidSignatureS(bytes32)",
+      "selector": "0xd78bce0c",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_settlementEcdsaInvalidLengthInvalidSAndInvalidVAreExactAndAtomic()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "ERC1967InvalidImplementation(address)",
+      "selector": "0x4c9c8ce3",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_nonUupsCandidateReturnsExactInvalidImplementationAndNoCodePreemptsWithEmptyBytes()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "ERC1967NonPayable()",
+      "selector": "0xb398979f",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_emptyCalldataUpgradeRejectsValueWithExactFourBytesAndRollback()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "EligibleExceedsEscrow(uint256,uint256)",
+      "selector": "0x1c20a379",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_eligibleExcessRevertsAtomicallyWithoutBackwardWarp()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "EthTransferFailed()",
+      "selector": "0x6d963f88",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_ethSweepExactAndRejectingReceiverRollback(uint128)",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "nonzero ETH remains on the module and rejecting receiver balance remains zero"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "FailedCall()",
+      "selector": "0xd6bda275",
+      "classification": "structural",
+      "evidence": {
+        "reason": "Address generic-call error has no DefiInsurance or SharedBase production call site.",
+        "source_path": "src/DefiInsurance.sol; src/SharedBase.sol; vendored OpenZeppelin UUPS/Address"
+      }
+    },
+    {
+      "signature": "FinalizeNotOpen(uint256)",
+      "selector": "0x286a3faa",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_finalizationPhaseEndpointsAndPauseAreExact()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "unresolved claim and live escrow remain intact before finalization opens"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "IncidentFinalizing(uint256)",
+      "selector": "0xdb5015cb",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_correctionAuthBetaStandingRootAndDisputeEndpointBoundaries()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "standing corrected root, restarted deadline, unresolved count, and pool budget remain unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "IncidentTokenMismatch(uint256,address,address)",
+      "selector": "0x5c2820e2",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_laterJoinRejectsDuplicateWrongTokenAndClosedEndpoint()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "IncidentsActive()",
+      "selector": "0xa9016b02",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_openAuthorizationPauseRegistrationAndSingleIncidentGuardsAreAtomic()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "existing active incident id, next-id counter, phase deadline, and PCR snapshot remain unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "InsuredTokenNotApproved(address)",
+      "selector": "0x72a1e767",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_editInsuredTokenRejectsInvalidBoundariesAndUpdatesInPlace()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "candidate token remains unlisted and existing token configurations remain intact"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "InvalidBoostedScore(uint256,uint256)",
+      "selector": "0xf03de6b8",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_invalidBoostRevertsAtomically(uint64,uint8)",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "InvalidInitialization()",
+      "selector": "0xf92ee8a9",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_directImplementationAndProxyReinitializationAreLocked()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "implementation remains uninitialized; initialized proxy retains registry and both nonzero next-id counters"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "InvalidMaxCoverageBps(uint256,uint256)",
+      "selector": "0x7982589a",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_editInsuredTokenRejectsInvalidBoundariesAndUpdatesInPlace()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "candidate token remains unlisted after the rejected oversized coverage update"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "InvalidProof(uint256)",
+      "selector": "0x5e3fa051",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_invalidLengthProofAndLeafFieldsRevertAtomically()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "claim remains unresolved and nonzero insured-token escrow remains intact for both malformed proof branches"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "InvalidReferenceBlock(uint64)",
+      "selector": "0x3ae6f3fb",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_openRejectsZeroCurrentFutureAndTooOldReferenceBlocksAtomically()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "incident counter remains one and no active incident is created for every invalid reference block"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "InvalidSettlementParams()",
+      "selector": "0x613f856c",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_zeroSettlementStrideRevertsAndPreservesConfig(uint64,uint64)",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "all three preexisting settlement-parameter fields remain unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "InvalidSweepRecipient(address)",
+      "selector": "0x346931c5",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_sweepAclRecipientAndNothingToSweepGuardsAreAtomic()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "nonzero module token balance remains intact and recipient balance remains zero"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "NoActiveClaim()",
+      "selector": "0xdc3d4063",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_cancelWithoutActiveClaimRevertsExactlyAndPreservesCounters()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "NoStandingRoot(uint256)",
+      "selector": "0x877b2f2e",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_zeroRootAndSecondSettlementRevertWithoutReplacingStandingRoot()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "NotActiveIncident(uint256)",
+      "selector": "0x275f7027",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_settlementRejectedAtClaimEndAndAfterSettlementDeadline()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "expired incident root, unresolved count, escrow accounting, and claim-set commitment remain unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "NotBetaMode()",
+      "selector": "0xc8e83e9c",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_upgradeRejectedAfterBetaEnds()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "proxy implementation slot remains unchanged after permanent beta shutdown"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "NotInitializing()",
+      "selector": "0xd7e6bcf8",
+      "classification": "structural",
+      "evidence": {
+        "reason": "No externally reachable onlyInitializing body exists; initialize lock failures use InvalidInitialization.",
+        "source_path": "src/DefiInsurance.sol; src/SharedBase.sol; vendored OpenZeppelin UUPS/Address"
+      }
+    },
+    {
+      "signature": "NothingToSweep(address)",
+      "selector": "0x0180603d",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_sweepAclRecipientAndNothingToSweepGuardsAreAtomic()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "nonzero protected insured-token balance and live escrow remain intact and recipient receives nothing"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "OutsideSettlementPhase(uint256)",
+      "selector": "0x816a74a7",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_settlementRejectedAtClaimEndAndAfterSettlementDeadline()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "standing root, unresolved count, escrow accounting, and claim-set commitment remain unchanged at the claim endpoint"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "PayoutCapExceeded(uint256,uint256,uint256)",
+      "selector": "0x1e1db3e0",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_poolArrayMismatchAndCapExcessRevertAtomically()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "ReentrancyGuardReentrantCall()",
+      "selector": "0x3ee5aeb5",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_poolPaymentCallbackCannotReenterFinalizationAndOuterPayoutCompletes()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "SafeCastOverflowedUintDowncast(uint8,uint256)",
+      "selector": "0x6dfcc650",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_joinZeroTinyAndOversizedBoosterBoundaries()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "SafeERC20FailedOperation(address)",
+      "selector": "0x5274afe7",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_falseRevertingAndMalformedTokenSweepsRollbackAtomically(uint64)",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "SettlementPoolMismatch(uint256,uint256)",
+      "selector": "0x9642d581",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_poolArrayMismatchAndCapExcessRevertAtomically()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "TokenConflict()",
+      "selector": "0xd776b221",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_editInsuredTokenRejectsCoverPoolAsset()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "registered pool/asset binding remains intact and the pool asset remains uninsured"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "UUPSUnauthorizedCallContext()",
+      "selector": "0xe07c8dba",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_proxyAndImplementationUupsContextsAreExact()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "proxy implementation slot, registry binding, and both nonzero next-id counters remain unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "UUPSUnsupportedProxiableUUID(bytes32)",
+      "selector": "0xaa1d49a4",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceAdminKontrolTest::test_wrongUuidCandidateReturnsExactUnsupportedUuidAndRollsBack()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "UnauthorizedClaim(uint256)",
+      "selector": "0x5f16cd42",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceFinalizationKontrolTest::test_declineIsAvailableAfterDisputeAndChecksUnauthorizedResolved()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "claim remains unresolved with unresolved count one and nonzero insured-token escrow intact"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "UnauthorizedOpenSigner(address)",
+      "selector": "0x4914e1ca",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_firstJoinRejectsMalformedAndWrongSignerWithoutOpening()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "incident and claim counters remain at one, no incident opens, and claimant tokens are not escrowed"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "UnauthorizedSettlementSigner(address)",
+      "selector": "0x0b6fbf37",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceSettlementKontrolTest::test_settlementRejectsClaimSetOnlyMutationWithFullRecoveredBytes()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": "abi"
+      }
+    },
+    {
+      "signature": "UnexpectedOpenAttestation()",
+      "selector": "0x6862f766",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_laterJoinRejectsUnexpectedOpenAttestationExactlyAndAtomically()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "ZeroAddress()",
+      "selector": "0xd92e233d",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceConfigKontrolTest::test_editInsuredTokenRejectsInvalidBoundariesAndUpdatesInPlace()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "zero-token configuration call leaves the candidate unlisted and existing insured-token configurations intact"
+        ],
+        "returndata_length": 4
+      }
+    },
+    {
+      "signature": "ZeroAmount()",
+      "selector": "0x1f2a2005",
+      "classification": "reachable",
+      "evidence": {
+        "test": "DefiInsuranceClaimLifecycleKontrolTest::test_joinZeroTinyAndOversizedBoosterBoundaries()",
+        "returndata": "exact-length-and-content",
+        "rollback": [
+          "failed call leaves the branch-relevant storage, balances, counters, or implementation unchanged"
+        ],
+        "returndata_length": 4
+      }
+    }
+  ]
+}

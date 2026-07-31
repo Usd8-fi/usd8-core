@@ -1,19 +1,20 @@
 # Compiler files
-cache/
-out/
+/cache/
+/out/
 /out-kontrol/
-/*-kontrol.xml
+/formal-verification/out/
+/formal-verification/cache/
+/formal-verification/reports/*.xml
+/formal-verification/reports/campaign-manifest.json
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
-
-# Docs
-docs/
+# Generated Foundry broadcast output; canonical evidence belongs under /deployments/
+/broadcast/
 
 # Dotenv file
 .env
+.env.*
+!.env.example
+!**/.env.example
 
 # Local hardware-wallet deployment progress
 /deployments/sepolia/*.state.json
@@ -22,6 +23,7 @@ docs/
 /deployments/sepolia/*-plan.json
 /deployments/sepolia/*.tx.json
 /deployments/sepolia/config.env
+/deployments/sepolia/implementation-only-upgrade-preflight-blocked.json
 
 # Local Safe 7 transaction/deployment tooling
 /script/testnet/trezor_deploy.py
@@ -31,6 +33,9 @@ docs/
 
 # Local browser-wallet transaction launcher
 /script/wallet/
+
+# Local Sepolia E2E test accounts (contains private keys)
+/test/testnet/.accounts/
 
 # Generated Python bytecode
 __pycache__/
@@ -43,9 +48,7 @@ __pycache__/
 .DS_Store
 **/.DS_Store
 
-# Off-chain settlement packages
-offchain/node_modules/
-offchain/dist/
+# Off-chain settlement package
 offchain-rust/target/
 offchain-rust/**/__pycache__/
 offchain-rust/**/*.pyc
@@ -54,3 +57,13 @@ offchain-rust/artifacts/
 
 # Deep-fuzz corpora, coverage, and minimized failures (uploaded by CI).
 artifacts/echidna/
+
+# Local workspace and automation state
+/.hermes/
+/.claude/
+
+# Local generated review output; final reports are delivered outside the repository
+/output/
+
+# Throwaway experiments and backtest probes
+/spikes/

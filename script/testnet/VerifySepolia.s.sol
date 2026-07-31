@@ -16,114 +16,205 @@ interface IOwnableView {
     function owner() external view returns (address);
 }
 
-/// @notice Verifies the complete nonce-locked USD8 Sepolia staging deployment.
+interface IUpgradeableBeaconView {
+    function implementation() external view returns (address);
+}
+
+/// @notice Verifies a fresh USD8 Sepolia staging deployment from explicit environment addresses.
 contract VerifySepolia is Script {
     uint256 private constant SEPOLIA_CHAIN_ID = 11_155_111;
-    address private constant ADMIN = 0xB2E999D531D45a9115dA7706adFc651999f3c1F1;
-    address private constant USDC = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
-    address private constant BOOSTER = 0xC0012770848FCD350AB11906e93ba9fdfDA19f4c;
-    address private constant SEED_SINK = 0x000000000000000000000000000000000000dEaD;
+    uint256 private constant TIMELOCK_DELAY = 24 hours;
+    bytes32 private constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
-    address private constant TIMELOCK = 0x8d10C99dDE0E91Dba85896ce65Daa861B972b330;
-    address private constant REGISTRY = 0x3Fa82eC1842f72c36580D84E03377b10B5E2F590;
-    address private constant USD8_PROXY = 0x12C7b483C164C648b4F7b72Af4b93250bED623CE;
-    address private constant TREASURY = 0x5B5e52b7E603cA71C7dc37134924855cc45864c1;
-    address private constant COVER_POOL = 0xd54ce4989Bf30A1d28864f0892e8211e4A28AF30;
-    address private constant COVER_POOL_BEACON = 0x02051110D30CD5087a3cE0f03F2d419d0415640E;
-    address private constant AAVE_STRATEGY = 0x9c8a4d149Af4AFEcAb45E82dB5265975dd12040a;
-    address private constant MORPHO_STRATEGY = 0xCdb5Aa1f50F3b19C12FC1d50E482e93FBaBc39eC;
-    address private constant SAVINGS_VAULT = 0x64E64eAdD9817e5F97266D34FF057ba4777c395B;
-    address private constant DEFI_INSURANCE = 0x250CeBDD9d6997fFD45C60D6E713f42e44E383ec;
-    address private constant USD8_PRICE_ORACLE = 0xc316AC5A8fa0D6961c2BCd26EA2d9F9e657626f5;
+    struct Deployment {
+        address admin;
+        address usdc;
+        address booster;
+        address seedSink;
+        address coverAsset;
+        address coverOracle;
+        address aaveVault;
+        address morphoVault;
+        address sgho;
+        address ghoOracle;
+        address susds;
+        address usdsOracle;
+        address usdcOracle;
+        address timelock;
+        address registry;
+        address registryImplementation;
+        address usd8;
+        address usd8Implementation;
+        address treasury;
+        address treasuryImplementation;
+        address coverPool;
+        address coverPoolBeacon;
+        address coverPoolImplementation;
+        address aaveStrategy;
+        address morphoStrategy;
+        address savingsVault;
+        address defiInsurance;
+        address defiInsuranceImplementation;
+        address usd8PriceOracle;
+    }
 
     function run() external view {
         require(block.chainid == SEPOLIA_CHAIN_ID, "wrong chain");
-
-        address coverAsset = vm.envAddress("SEPOLIA_COVER_ASSET");
-        address coverOracle = vm.envAddress("SEPOLIA_COVER_ASSET_USD_ORACLE");
-        address aaveVault = vm.envAddress("SEPOLIA_AAVE_USDC_VAULT");
-        address morphoVault = vm.envAddress("SEPOLIA_MORPHO_USDC_VAULT");
-        address sgho = vm.envAddress("SEPOLIA_AAVE_SGHO");
-        address ghoOracle = vm.envAddress("SEPOLIA_GHO_USD_ORACLE");
-        address susds = vm.envAddress("SEPOLIA_SKY_SUSDS");
-        address usdsOracle = vm.envAddress("SEPOLIA_USDS_USD_ORACLE");
-        address usdcOracle = vm.envAddress("SEPOLIA_USDC_USD_ORACLE");
-
-        _requireCode(BOOSTER);
-        _requireCode(coverAsset);
-        _requireCode(coverOracle);
-        _requireCode(aaveVault);
-        _requireCode(morphoVault);
-        _requireCode(sgho);
-        _requireCode(ghoOracle);
-        _requireCode(susds);
-        _requireCode(usdsOracle);
-        _requireCode(usdcOracle);
-        require(IERC4626(aaveVault).asset() == USDC, "wrong Aave mock asset");
-        require(IERC4626(morphoVault).asset() == USDC, "wrong Morpho mock asset");
-        require(IERC4626(sgho).convertToAssets(1e18) != 0, "bad sGHO conversion");
-        require(IERC4626(susds).convertToAssets(1e18) != 0, "bad sUSDS conversion");
-        _requirePositiveOracle(coverOracle);
-        _requirePositiveOracle(ghoOracle);
-        _requirePositiveOracle(usdsOracle);
-        _requirePositiveOracle(usdcOracle);
-
-        TimelockController timelock = TimelockController(payable(TIMELOCK));
-        require(timelock.getMinDelay() == 1 days, "wrong timelock delay");
-        require(timelock.hasRole(timelock.PROPOSER_ROLE(), ADMIN), "missing proposer");
-        require(timelock.hasRole(timelock.CANCELLER_ROLE(), ADMIN), "missing canceller");
-        require(timelock.hasRole(timelock.EXECUTOR_ROLE(), address(0)), "executor not open");
-        require(timelock.hasRole(timelock.DEFAULT_ADMIN_ROLE(), TIMELOCK), "timelock not self-admin");
-        require(!timelock.hasRole(timelock.DEFAULT_ADMIN_ROLE(), ADMIN), "external timelock admin");
-
-        Registry registry = Registry(REGISTRY);
-        require(registry.timelock() == TIMELOCK, "wrong Registry timelock");
-        require(registry.isAdmin(ADMIN), "missing beta admin");
-        require(registry.usd8() == USD8_PROXY, "wrong canonical USD8");
-        require(registry.treasury() == TREASURY, "wrong canonical Treasury");
-        require(registry.savingsVault() == SAVINGS_VAULT, "wrong canonical savings vault");
-        require(registry.defiInsurance() == DEFI_INSURANCE, "wrong payout module");
-        require(registry.boosterNFT() == BOOSTER, "wrong booster");
-        require(registry.usd8PriceOracle() == USD8_PRICE_ORACLE, "wrong USD8 oracle");
-
-        (IERC20[] memory assets, address[] memory pools) = registry.coverPools();
-        require(assets.length == 1 && address(assets[0]) == coverAsset, "wrong cover asset");
-        require(pools.length == 1 && pools[0] == COVER_POOL, "wrong cover pool");
-        require(address(SingleAssetCoverPool(COVER_POOL).asset()) == coverAsset, "pool asset mismatch");
-
-        USD8 usd8 = USD8(USD8_PROXY);
-        Treasury treasury = Treasury(TREASURY);
-        require(usd8.treasury() == TREASURY, "USD8 Treasury mismatch");
-        require(address(treasury.USDC()) == USDC, "wrong reserve asset");
-        require(treasury.strategies(0) == ERC4626Strategy(AAVE_STRATEGY), "wrong strategy zero");
-        require(treasury.strategies(1) == ERC4626Strategy(MORPHO_STRATEGY), "wrong strategy one");
-        require(address(ERC4626Strategy(AAVE_STRATEGY).vault()) == aaveVault, "wrong Aave strategy vault");
-        require(address(ERC4626Strategy(MORPHO_STRATEGY).vault()) == morphoVault, "wrong Morpho strategy vault");
-        require(IOwnableView(COVER_POOL_BEACON).owner() == TIMELOCK, "wrong beacon owner");
-
-        IERC4626 savings = IERC4626(SAVINGS_VAULT);
-        require(savings.asset() == USD8_PROXY, "wrong savings asset");
-        require(savings.totalSupply() == 10e18, "wrong savings seed supply");
-        require(IERC20(SAVINGS_VAULT).balanceOf(SEED_SINK) == 10e18, "wrong seed sink balance");
-        require(IERC20(USDC).balanceOf(TREASURY) == 10e6, "wrong backing seed");
-
-        DefiInsurance insurance = DefiInsurance(DEFI_INSURANCE);
-        require(insurance.isInsuredToken(IERC20(USD8_PROXY)), "USD8 not insured");
-        require(insurance.isInsuredToken(IERC20(SAVINGS_VAULT)), "sUSD8 not insured");
-        require(insurance.isInsuredToken(IERC20(sgho)), "sGHO not insured");
-        require(insurance.isInsuredToken(IERC20(susds)), "sUSDS not insured");
-        require(insurance.activeIncidentId() == 0, "incident unexpectedly active");
+        Deployment memory d = _deployment();
+        _verifyDependencies(d);
+        _verifyTimelock(d);
+        _verifyRegistry(d);
+        _verifyAssetsAndStrategies(d);
+        _verifyInsurance(d);
 
         console2.log("USD8 Sepolia deployment verified");
-        console2.log("Registry:", REGISTRY);
-        console2.log("USD8:", USD8_PROXY);
-        console2.log("Treasury:", TREASURY);
-        console2.log("sUSD8:", SAVINGS_VAULT);
-        console2.log("DefiInsurance:", DEFI_INSURANCE);
+        console2.log("Timelock:", d.timelock);
+        console2.log("Registry:", d.registry);
+        console2.log("USD8:", d.usd8);
+        console2.log("Treasury:", d.treasury);
+        console2.log("sUSD8:", d.savingsVault);
+        console2.log("DefiInsurance:", d.defiInsurance);
+    }
+
+    function _deployment() private view returns (Deployment memory d) {
+        d.admin = vm.envAddress("SEPOLIA_ADMIN");
+        d.usdc = vm.envAddress("SEPOLIA_USDC");
+        d.booster = vm.envAddress("SEPOLIA_BOOSTER");
+        d.seedSink = vm.envOr("SEPOLIA_SEED_SINK", address(0xdead));
+        d.coverAsset = vm.envAddress("SEPOLIA_COVER_ASSET");
+        d.coverOracle = vm.envAddress("SEPOLIA_COVER_ASSET_USD_ORACLE");
+        d.aaveVault = vm.envAddress("SEPOLIA_AAVE_USDC_VAULT");
+        d.morphoVault = vm.envAddress("SEPOLIA_MORPHO_USDC_VAULT");
+        d.sgho = vm.envAddress("SEPOLIA_AAVE_SGHO");
+        d.ghoOracle = vm.envAddress("SEPOLIA_GHO_USD_ORACLE");
+        d.susds = vm.envAddress("SEPOLIA_SKY_SUSDS");
+        d.usdsOracle = vm.envAddress("SEPOLIA_USDS_USD_ORACLE");
+        d.usdcOracle = vm.envAddress("SEPOLIA_USDC_USD_ORACLE");
+        d.timelock = vm.envAddress("SEPOLIA_TIMELOCK");
+        d.registry = vm.envAddress("SEPOLIA_REGISTRY");
+        d.registryImplementation = vm.envAddress("SEPOLIA_REGISTRY_IMPLEMENTATION");
+        d.usd8 = vm.envAddress("SEPOLIA_USD8");
+        d.usd8Implementation = vm.envAddress("SEPOLIA_USD8_IMPLEMENTATION");
+        d.treasury = vm.envAddress("SEPOLIA_TREASURY");
+        d.treasuryImplementation = vm.envAddress("SEPOLIA_TREASURY_IMPLEMENTATION");
+        d.coverPool = vm.envAddress("SEPOLIA_COVER_POOL");
+        d.coverPoolBeacon = vm.envAddress("SEPOLIA_COVER_POOL_BEACON");
+        d.coverPoolImplementation = vm.envAddress("SEPOLIA_COVER_POOL_IMPLEMENTATION");
+        d.aaveStrategy = vm.envAddress("SEPOLIA_AAVE_STRATEGY");
+        d.morphoStrategy = vm.envAddress("SEPOLIA_MORPHO_STRATEGY");
+        d.savingsVault = vm.envAddress("SEPOLIA_SAVINGS_VAULT");
+        d.defiInsurance = vm.envAddress("SEPOLIA_DEFI_INSURANCE");
+        d.defiInsuranceImplementation = vm.envAddress("SEPOLIA_DEFI_INSURANCE_IMPLEMENTATION");
+        d.usd8PriceOracle = vm.envAddress("SEPOLIA_USD8_PRICE_ORACLE");
+    }
+
+    function _verifyDependencies(Deployment memory d) private view {
+        _requireCode(d.usdc);
+        _requireCode(d.booster);
+        _requireCode(d.coverAsset);
+        _requireCode(d.coverOracle);
+        _requireCode(d.aaveVault);
+        _requireCode(d.morphoVault);
+        _requireCode(d.sgho);
+        _requireCode(d.ghoOracle);
+        _requireCode(d.susds);
+        _requireCode(d.usdsOracle);
+        _requireCode(d.usdcOracle);
+        require(IERC4626(d.aaveVault).asset() == d.usdc, "wrong Aave mock asset");
+        require(IERC4626(d.morphoVault).asset() == d.usdc, "wrong Morpho mock asset");
+        require(IERC4626(d.sgho).convertToAssets(1e18) != 0, "bad sGHO conversion");
+        require(IERC4626(d.susds).convertToAssets(1e18) != 0, "bad sUSDS conversion");
+        _requirePositiveOracle(d.coverOracle);
+        _requirePositiveOracle(d.ghoOracle);
+        _requirePositiveOracle(d.usdsOracle);
+        _requirePositiveOracle(d.usdcOracle);
+    }
+
+    function _verifyTimelock(Deployment memory d) private view {
+        TimelockController timelock = TimelockController(payable(d.timelock));
+        require(timelock.getMinDelay() == TIMELOCK_DELAY, "wrong timelock delay");
+        require(timelock.hasRole(timelock.PROPOSER_ROLE(), d.admin), "missing proposer");
+        require(timelock.hasRole(timelock.CANCELLER_ROLE(), d.admin), "missing canceller");
+        require(timelock.hasRole(timelock.EXECUTOR_ROLE(), address(0)), "executor not open");
+        require(timelock.hasRole(timelock.DEFAULT_ADMIN_ROLE(), d.timelock), "timelock not self-admin");
+        require(!timelock.hasRole(timelock.DEFAULT_ADMIN_ROLE(), d.admin), "external timelock admin");
+    }
+
+    function _verifyRegistry(Deployment memory d) private view {
+        Registry registry = Registry(d.registry);
+        require(registry.timelock() == d.timelock, "wrong Registry timelock");
+        require(registry.isAdmin(d.admin), "missing beta admin");
+        require(registry.usd8() == d.usd8, "wrong canonical USD8");
+        require(registry.treasury() == d.treasury, "wrong canonical Treasury");
+        require(registry.savingsVault() == d.savingsVault, "wrong canonical savings vault");
+        require(registry.defiInsurance() == d.defiInsurance, "wrong payout module");
+        require(registry.usd8PriceOracle() == d.usd8PriceOracle, "wrong USD8 oracle");
+        require(_implementation(d.registry) == d.registryImplementation, "wrong Registry implementation");
+
+        (address boosterCollection, uint64 boosterId, uint16 boosterBoostBps) = registry.boosterConfig();
+        require(boosterCollection == d.booster && boosterId == 1 && boosterBoostBps == 100, "wrong booster");
+
+        Registry.IncidentTimingConfig memory incidentTiming = registry.incidentTimingConfig();
+        require(
+            incidentTiming.phaseWindow == 3 days && incidentTiming.maxReferenceBlockAge == 43_200,
+            "wrong incident timing"
+        );
+        Registry.ExitTimingConfig memory exitTiming = registry.exitTimingConfig();
+        require(exitTiming.unstakeCooldown == 7 days && exitTiming.exitBatchInterval == 3 days, "wrong exit timing");
+        Registry.IncidentOpenPriceConfig memory openPrice = registry.incidentOpenPriceConfig();
+        require(
+            openPrice.twapBlocks == 7_200 && openPrice.sampleStepBlocks == 300 && openPrice.minimumDropBps == 2_000,
+            "wrong incident-open price policy"
+        );
+
+        (IERC20[] memory assets, address[] memory pools) = registry.coverPools();
+        require(assets.length == 1 && address(assets[0]) == d.coverAsset, "wrong cover asset");
+        require(pools.length == 1 && pools[0] == d.coverPool, "wrong cover pool");
+    }
+
+    function _verifyAssetsAndStrategies(Deployment memory d) private view {
+        USD8 usd8 = USD8(d.usd8);
+        Treasury treasury = Treasury(d.treasury);
+        SingleAssetCoverPool pool = SingleAssetCoverPool(d.coverPool);
+        require(_implementation(d.usd8) == d.usd8Implementation, "wrong USD8 implementation");
+        require(_implementation(d.treasury) == d.treasuryImplementation, "wrong Treasury implementation");
+        require(usd8.treasury() == d.treasury, "USD8 Treasury mismatch");
+        require(address(treasury.USDC()) == d.usdc, "wrong reserve asset");
+        require(treasury.strategies(0) == ERC4626Strategy(d.aaveStrategy), "wrong strategy zero");
+        require(treasury.strategies(1) == ERC4626Strategy(d.morphoStrategy), "wrong strategy one");
+        require(address(ERC4626Strategy(d.aaveStrategy).vault()) == d.aaveVault, "wrong Aave strategy vault");
+        require(address(ERC4626Strategy(d.morphoStrategy).vault()) == d.morphoVault, "wrong Morpho strategy vault");
+        require(address(pool.asset()) == d.coverAsset, "pool asset mismatch");
+        require(pool.balanceOf(d.seedSink) != 0 && pool.totalAssets() >= 0.01 ether, "cover seed missing");
+        require(IOwnableView(d.coverPoolBeacon).owner() == d.timelock, "wrong beacon owner");
+        require(
+            IUpgradeableBeaconView(d.coverPoolBeacon).implementation() == d.coverPoolImplementation,
+            "wrong cover-pool implementation"
+        );
+
+        IERC4626 savings = IERC4626(d.savingsVault);
+        require(savings.asset() == d.usd8, "wrong savings asset");
+        require(savings.totalSupply() >= 10e18, "savings seed supply missing");
+        require(IERC20(d.savingsVault).balanceOf(d.seedSink) == 10e18, "wrong savings seed balance");
+        require(IERC20(d.usdc).balanceOf(d.treasury) == 10e6, "wrong backing seed");
+    }
+
+    function _verifyInsurance(Deployment memory d) private view {
+        DefiInsurance insurance = DefiInsurance(d.defiInsurance);
+        require(_implementation(d.defiInsurance) == d.defiInsuranceImplementation, "wrong insurance implementation");
+        require(insurance.isInsuredToken(IERC20(d.usd8)), "USD8 not insured");
+        require(insurance.isInsuredToken(IERC20(d.savingsVault)), "sUSD8 not insured");
+        require(insurance.isInsuredToken(IERC20(d.sgho)), "sGHO not insured");
+        require(insurance.isInsuredToken(IERC20(d.susds)), "sUSDS not insured");
+        require(insurance.activeIncidentId() == 0, "incident unexpectedly active");
     }
 
     function _requireCode(address candidate) private view {
         require(candidate.code.length != 0, "configured address has no code");
+    }
+
+    function _implementation(address proxy) private view returns (address) {
+        return address(uint160(uint256(vm.load(proxy, IMPLEMENTATION_SLOT))));
     }
 
     function _requirePositiveOracle(address oracle) private view {

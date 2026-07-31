@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "status": "retired-partial",
+  "network": "sepolia",
+  "chainId": 11155111,
+  "artifactSha256": "358d86dde1d7a291d9d8e58ed0e5a9a85324a3ab18ee993604b1e67ee9a1eb66",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "nonceRangeExecuted": [
+    45,
+    52
+  ],
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 45,
+      "label": "SepoliaDependencies",
+      "transactionHash": "0xe98bc3df8510b57982c4a6e9b949d15269b1666ff69147a8da3629b2a48ab1c1",
+      "status": "confirmed",
+      "blockNumber": 11373874,
+      "contractAddress": "0x62d167521ec796fba64a0bb429a565b57183f98b"
+    },
+    {
+      "index": 1,
+      "nonce": 46,
+      "label": "TimelockController",
+      "transactionHash": "0x98cd2e4aacdd50d8540f74e4e5f63d02b90e37c2b34dd486716701cbb7e753a5",
+      "status": "confirmed",
+      "blockNumber": 11373875,
+      "contractAddress": "0x158494e7b95c0e5f87e8db4ad1be5c32de99f645"
+    },
+    {
+      "index": 2,
+      "nonce": 47,
+      "label": "Registry",
+      "transactionHash": "0x1bf8c19f8b60bcd13cadecc8837c7ce4ae4fbf4eb93281ac2021de541de4bd31",
+      "status": "confirmed",
+      "blockNumber": 11373876,
+      "contractAddress": "0xbc2c5e16d25035b0cf979b5c17e62d0fe929b9fd"
+    },
+    {
+      "index": 3,
+      "nonce": 48,
+      "label": "ERC1967Proxy",
+      "transactionHash": "0x93340fa7e54b00d46c6ca294ce172f15a7c291541b452c3fdb0fbc6b4b24e503",
+      "status": "confirmed",
+      "blockNumber": 11373878,
+      "contractAddress": "0x26bc3f04d780b308c403de4bb7ff6d29eb13d9e6"
+    },
+    {
+      "index": 4,
+      "nonce": 49,
+      "label": "USD8",
+      "transactionHash": "0x90b437b2f816708e44579db47aaeea8de73e509282728827d4d633490d617461",
+      "status": "confirmed",
+      "blockNumber": 11373879,
+      "contractAddress": "0xb07e5f63b2e259b204ff65228e2ceac55ded50bf"
+    },
+    {
+      "index": 5,
+      "nonce": 50,
+      "label": "ERC1967Proxy",
+      "transactionHash": "0xa90870669b1da2ddc5faa927d671eca9623f68e766bf904ffce11d302a787ac6",
+      "status": "confirmed",
+      "blockNumber": 11373880,
+      "contractAddress": "0xfbff033f4227a8c06163bba9055a961a0d4256e0"
+    },
+    {
+      "index": 6,
+      "nonce": 51,
+      "label": "ERC1967Proxy",
+      "transactionHash": "0xc500ebb16e1d21d032ffefd7a0e3a6231e6c26de56fccc1d75ba3367a3fa1bc1",
+      "status": "confirmed",
+      "blockNumber": 11373881,
+      "contractAddress": null
+    },
+    {
+      "index": 7,
+      "nonce": 52,
+      "label": "Treasury",
+      "transactionHash": "0x440106af6638752de6daee4bf867ba6bb42c8f8786c6547a266f5d168da96abb",
+      "status": "sent"
+    }
+  ],
+  "reusedByCanonical": {
+    "dependencies": "0x62d167521ec796fba64a0bb429a565b57183f98b",
+    "timelock": "0x158494e7b95c0e5f87e8dB4Ad1Be5c32de99F645"
+  },
+  "abandonedNonCanonicalCore": {
+    "registryImplementation": "0x0d70e29b643ff9ce07deef3a50bbd0fa80f1fa93",
+    "registryProxy": "0x2a1bcddfc715d5eb1a5977f2159855067bb6991f",
+    "usd8Implementation": "0xad302ecde7a973336601f717761b71762c471c96",
+    "usd8Proxy": "0x438387380996db368247d33c9bfa3ecc2bbffb17",
+    "treasuryImplementation": "0x84badd2f2c56a4ff59f99b44e410bf051052cf34"
+  },
+  "reason": "Artifact became stale after frozen source changes; direct continuation was rejected because current implementation bytecode differed. These core addresses must not be used.",
+  "supersededBy": "deployments/sepolia/deployment.json"
+}

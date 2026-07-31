@@ -11,11 +11,7 @@ contract USD8TokenHandler is Test {
     bytes32 internal constant PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
 
-    Registry public immutable registry;
     USD8 public immutable usd8;
-    address public immutable timelock;
-    address public immutable treasuryA;
-    address public immutable treasuryB;
 
     uint256[3] internal actorKeys = [uint256(0xA11CE), uint256(0xB0B), uint256(0xCAFE)];
     address[3] internal actors;
@@ -31,15 +27,10 @@ contract USD8TokenHandler is Test {
     uint256 public successfulTransfers;
     uint256 public successfulTransferFroms;
     uint256 public successfulPermits;
-    uint256 public successfulTreasuryRotations;
 
-    constructor(Registry registry_, USD8 usd8_, address timelock_, address treasuryA_, address treasuryB_) {
-        registry = registry_;
+    constructor(USD8 usd8_, address treasury_) {
         usd8 = usd8_;
-        timelock = timelock_;
-        treasuryA = treasuryA_;
-        treasuryB = treasuryB_;
-        ghostTreasury = treasuryA_;
+        ghostTreasury = treasury_;
         for (uint256 i = 0; i < 3; i++) {
             actors[i] = vm.addr(actorKeys[i]);
         }
@@ -120,14 +111,6 @@ contract USD8TokenHandler is Test {
         successfulPermits++;
     }
 
-    function rotateTreasury(bool useSecond) external {
-        address next = useSecond ? treasuryB : treasuryA;
-        vm.prank(timelock);
-        registry.setTreasury(next);
-        ghostTreasury = next;
-        successfulTreasuryRotations++;
-    }
-
     function actor(uint256 i) external view returns (address) {
         return actors[i];
     }
@@ -140,7 +123,6 @@ contract USD8TokenInvariantTest is StdInvariant, Test {
 
     address constant TIMELOCK = address(0xD00D);
     address constant TREASURY_A = address(0xAAA1);
-    address constant TREASURY_B = address(0xBBB2);
 
     function setUp() public {
         registry = Registry(
@@ -154,15 +136,15 @@ contract USD8TokenInvariantTest is StdInvariant, Test {
         registry.setTreasury(TREASURY_A);
         vm.stopPrank();
 
-        handler = new USD8TokenHandler(registry, usd8, TIMELOCK, TREASURY_A, TREASURY_B);
-        bytes4[] memory selectors = new bytes4[](7);
+        handler = new USD8TokenHandler(usd8, TREASURY_A);
+        bytes4[] memory selectors = new bytes4[](6);
         selectors[0] = USD8TokenHandler.mint.selector;
         selectors[1] = USD8TokenHandler.burn.selector;
         selectors[2] = USD8TokenHandler.transfer.selector;
         selectors[3] = USD8TokenHandler.approve.selector;
         selectors[4] = USD8TokenHandler.transferFrom.selector;
         selectors[5] = USD8TokenHandler.permit.selector;
-        selectors[6] = USD8TokenHandler.rotateTreasury.selector;
+
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -173,14 +155,13 @@ contract USD8TokenInvariantTest is StdInvariant, Test {
         handler.approve(1, 2, 50e18);
         handler.transferFrom(1, 2, 0, 25e18);
         handler.permit(0, 1, 10e18);
-        handler.rotateTreasury(true);
         handler.burn(0, 1e18);
 
         assertGt(handler.successfulMints(), 0);
         assertGt(handler.successfulTransfers(), 0);
         assertGt(handler.successfulTransferFroms(), 0);
         assertGt(handler.successfulPermits(), 0);
-        assertGt(handler.successfulTreasuryRotations(), 0);
+
         assertGt(handler.successfulBurns(), 0);
     }
 

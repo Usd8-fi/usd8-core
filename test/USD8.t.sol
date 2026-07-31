@@ -11,7 +11,7 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {USD8} from "../src/USD8.sol";
-import {Treasury} from "../src/Treasury.sol";
+
 import {Registry} from "../src/Registry.sol";
 import {SharedBase} from "../src/SharedBase.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -45,24 +45,11 @@ contract USD8Test is Test {
     address newTimelock = address(0xD00D);
 
     event TimelockChanged(address indexed oldTimelock, address indexed newTimelock);
-    event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
 
     function _deployProxy() internal returns (USD8) {
         bytes memory init = abi.encodeCall(USD8.initialize, (registry));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), init);
         return USD8(address(proxy));
-    }
-
-    function _deployBoundTreasury() internal returns (Treasury) {
-        MockERC20 reserveAsset = new MockERC20("Configured USDC", "cUSDC", 6);
-        return Treasury(
-            address(
-                new ERC1967Proxy(
-                    address(new Treasury()),
-                    abi.encodeCall(Treasury.initialize, (registry, IERC20(address(reserveAsset))))
-                )
-            )
-        );
     }
 
     function _unauthorizedTimelock(address account) internal pure returns (bytes memory) {
@@ -88,19 +75,55 @@ contract USD8Test is Test {
         assertEq(usd8.treasury(), treasury);
     }
 
-    function test_TimelockCanSetCanonicalTopology() public {
+    function test_CanonicalTopologyCanOnlyBeSetOnce() public {
+        address savings = makeAddr("sUSD8");
+
+        vm.startPrank(timelock);
+        vm.expectRevert(bytes4(keccak256("Usd8AlreadySet()")));
+        registry.setUsd8(newTreasury);
+        vm.expectRevert(bytes4(keccak256("TreasuryAlreadySet()")));
+        registry.setTreasury(newTreasury);
+        registry.setSavingsVault(savings);
+        vm.expectRevert(bytes4(keccak256("SavingsVaultAlreadySet()")));
+        registry.setSavingsVault(newTreasury);
+        vm.stopPrank();
+
+        assertEq(registry.usd8(), address(usd8));
+        assertEq(registry.treasury(), treasury);
+        assertEq(registry.savingsVault(), savings);
+    }
+
+    function test_ZeroCanonicalTopologyDoesNotConsumeOneTimeRegistration() public {
+        Registry fresh = Registry(
+            address(
+                new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, timelock)))
+            )
+        );
+
+        vm.startPrank(timelock);
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        fresh.setUsd8(address(0));
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        fresh.setTreasury(address(0));
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        fresh.setSavingsVault(address(0));
+        fresh.setUsd8(address(usd8));
+        fresh.setTreasury(treasury);
+        fresh.setSavingsVault(makeAddr("fresh sUSD8"));
+        vm.stopPrank();
+    }
+
+    function test_TimelockCanCompleteCanonicalTopology() public {
         address savings = makeAddr("sUSD8");
         address oracle = makeAddr("USD8 price oracle");
 
         vm.startPrank(timelock);
-        registry.setUsd8(address(usd8));
-        registry.setTreasury(newTreasury);
         registry.setSavingsVault(savings);
         registry.setUsd8PriceOracle(oracle);
         vm.stopPrank();
 
         assertEq(registry.usd8(), address(usd8));
-        assertEq(registry.treasury(), newTreasury);
+        assertEq(registry.treasury(), treasury);
         assertEq(registry.savingsVault(), savings);
         assertEq(registry.usd8PriceOracle(), oracle);
     }
@@ -173,58 +196,15 @@ contract USD8Test is Test {
         usd8.burn(address(0), 1e18);
     }
 
-    function test_AdminCanSetTreasury() public {
-        Treasury candidate = _deployBoundTreasury();
-
-        vm.expectRevert(abi.encodeWithSelector(USD8.UnauthorizedTreasury.selector, address(candidate)));
-        vm.prank(address(candidate));
-        usd8.mint(alice, 1e18);
-
-        vm.prank(timelock);
-        vm.expectEmit(true, true, false, true, address(registry));
-        emit TreasurySet(treasury, address(candidate));
-        registry.setTreasury(address(candidate));
-
-        assertEq(usd8.treasury(), address(candidate));
-
-        vm.prank(address(candidate));
-        usd8.mint(alice, 1e18);
-        assertEq(usd8.balanceOf(alice), 1e18);
-
-        vm.expectRevert(abi.encodeWithSelector(USD8.UnauthorizedTreasury.selector, treasury));
-        vm.prank(treasury);
-        usd8.mint(alice, 1e18);
-    }
-
-    function test_SetTreasuryAllowsTimelockToCorrectAddressBeforeIssuance() public {
-        vm.prank(timelock);
-        registry.setTreasury(newTreasury);
-
-        assertEq(usd8.treasury(), newTreasury);
-    }
-
-    function test_TimelockCanRotateTreasuryWithLiveSupply() public {
-        vm.prank(treasury);
-        usd8.mint(alice, 1e18);
-        assertEq(usd8.totalSupply(), 1e18);
-
-        vm.prank(timelock);
-        registry.setTreasury(newTreasury);
-        assertEq(usd8.treasury(), newTreasury);
-
-        vm.expectRevert(abi.encodeWithSelector(USD8.UnauthorizedTreasury.selector, treasury));
-        vm.prank(treasury);
-        usd8.mint(alice, 1e18);
-
-        vm.prank(newTreasury);
-        usd8.mint(alice, 1e18);
-        assertEq(usd8.totalSupply(), 2e18);
-    }
-
     function test_SetTreasuryRejectsZero() public {
+        Registry fresh = Registry(
+            address(
+                new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, timelock)))
+            )
+        );
         vm.expectRevert(Registry.ZeroAddress.selector);
         vm.prank(timelock);
-        registry.setTreasury(address(0));
+        fresh.setTreasury(address(0));
     }
 
     function test_NonAdminCannotSetTreasury() public {
@@ -234,7 +214,7 @@ contract USD8Test is Test {
     }
 
     function test_TimelockCanBeTransferred() public {
-        Treasury candidate = _deployBoundTreasury();
+        address savings = makeAddr("sUSD8");
         vm.prank(timelock);
         vm.expectEmit(true, true, false, true, address(registry));
         emit TimelockChanged(timelock, newTimelock);
@@ -245,11 +225,11 @@ contract USD8Test is Test {
         // Old timelock can no longer act.
         vm.expectRevert(_unauthorizedTimelock(timelock));
         vm.prank(timelock);
-        registry.setTreasury(address(candidate));
+        registry.setSavingsVault(savings);
 
         vm.prank(newTimelock);
-        registry.setTreasury(address(candidate));
-        assertEq(usd8.treasury(), address(candidate));
+        registry.setSavingsVault(savings);
+        assertEq(registry.savingsVault(), savings);
     }
 
     function test_SetTimelockRejectsZero() public {

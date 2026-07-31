@@ -18,6 +18,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {LossyWithdrawStrategy} from "./mocks/LossyWithdrawStrategy.sol";
@@ -32,8 +33,6 @@ import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 import {USD8SavingsAdapter} from "../src/adapters/USD8SavingsAdapter.sol";
 
 contract TreasuryTest is Test {
-    bytes32 internal constant TREASURY_STORAGE = 0x0d48627c939e6496875931395c567691a7923a2c61d5f538a81c0feb79245c00;
-
     Registry registry;
     USD8 usd8;
     Treasury treasuryImpl;
@@ -129,16 +128,6 @@ contract TreasuryTest is Test {
         assertEq(address(treasury.usd8()), address(usd8));
     }
 
-    function test_Usd8ResolvesFromRegistry() public {
-        USD8 replacement =
-            USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (registry)))));
-
-        vm.prank(timelock);
-        registry.setUsd8(address(replacement));
-
-        assertEq(address(treasury.usd8()), address(replacement));
-    }
-
     function test_ImplementationDisabled() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         treasuryImpl.initialize(registry, IERC20(USDC_ADDR));
@@ -150,12 +139,15 @@ contract TreasuryTest is Test {
     }
 
     function test_InitializeAcceptsTrustedNonContractUsd8() public {
+        Registry otherRegistry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (timelock, admin))))
+        );
         vm.prank(timelock);
-        registry.setUsd8(alice);
+        otherRegistry.setUsd8(alice);
         Treasury candidate = Treasury(
             address(
                 new ERC1967Proxy(
-                    address(treasuryImpl), abi.encodeCall(Treasury.initialize, (registry, IERC20(USDC_ADDR)))
+                    address(treasuryImpl), abi.encodeCall(Treasury.initialize, (otherRegistry, IERC20(USDC_ADDR)))
                 )
             )
         );
@@ -316,40 +308,6 @@ contract TreasuryTest is Test {
         assertEq(treasury.strategiesLength(), 0);
     }
 
-    function _newTreasury() internal returns (Treasury) {
-        return Treasury(
-            address(
-                new ERC1967Proxy(
-                    address(new Treasury()), abi.encodeCall(Treasury.initialize, (registry, IERC20(USDC_ADDR)))
-                )
-            )
-        );
-    }
-
-    /// @dev Treasury rotation is a timelock trust assumption. USD8 transfers
-    ///      mint/burn authority even while liabilities and old reserves exist;
-    ///      governance must migrate those reserves separately.
-    function test_TimelockCanRotateTreasuryWithLiveSupply() public {
-        Treasury treasuryB = _newTreasury();
-        vm.prank(timelock);
-        registry.setTreasury(address(treasuryB));
-        assertEq(usd8.treasury(), address(treasuryB));
-
-        usdc.mint(alice, 100e6);
-        vm.startPrank(alice);
-        usdc.approve(address(treasuryB), 100e6);
-        treasuryB.mintUSD8(100e6);
-        vm.stopPrank();
-        assertEq(usd8.totalSupply(), 100e18);
-        assertEq(treasuryB.getReserveBalance(), 100e6);
-
-        Treasury treasuryC = _newTreasury();
-        vm.prank(timelock);
-        registry.setTreasury(address(treasuryC));
-        assertEq(usd8.treasury(), address(treasuryC));
-        assertEq(treasuryB.getReserveBalance(), 100e6);
-    }
-
     function test_TreasuryUpgradePermanentlyDisabledAfterBetaEnds() public {
         vm.prank(timelock);
         registry.endBetaMode();
@@ -419,39 +377,12 @@ contract TreasuryTest is Test {
         assertEq(treasury.getReserveBalance(), 100e6);
     }
 
-    function test_UpgradeMigratesLegacyConstantReserveAtomically() public {
-        MockStrategy strat = new MockStrategy(usdc);
-        vm.startPrank(timelock);
-        treasury.addStrategy(strat, 0);
-        treasury.setProfitReceiver(recipient, 7, Treasury.RevenueDistributionMode.DirectTransfer);
-        vm.stopPrank();
-
-        // Legacy V1 consumed initializer version 1 but had no ERC-7201 reserve slot:
-        // its mainnet USDC getter was a compile-time constant.
-        vm.store(address(treasury), TREASURY_STORAGE, bytes32(0));
-        Treasury replacement = new Treasury();
-
-        vm.prank(timelock);
-        treasury.upgradeToAndCall(
-            address(replacement), abi.encodeWithSignature("migrateReserveAsset(address)", USDC_ADDR)
-        );
-
-        assertEq(address(treasury.USDC()), USDC_ADDR);
-        assertEq(treasury.strategiesLength(), 1);
-        assertEq(address(treasury.strategies(0)), address(strat));
-        assertEq(treasury.profitReceiversLength(), 1);
-        (address receiver, uint256 weight,) = treasury.profitReceivers(0);
-        assertEq(receiver, recipient);
-        assertEq(weight, 7);
-    }
-
-    function test_FreshProxyCannotRemigrateReserveAsset() public {
-        vm.prank(timelock);
+    function test_ReserveMigrationSelectorIsNotExposed() public {
         (bool success, bytes memory returndata) =
             address(treasury).call(abi.encodeWithSignature("migrateReserveAsset(address)", USDC_ADDR));
 
         assertFalse(success);
-        assertEq(bytes4(returndata), bytes4(keccak256("ReserveAssetAlreadyConfigured(address)")));
+        assertEq(returndata.length, 0);
         assertEq(address(treasury.USDC()), USDC_ADDR);
     }
 
@@ -524,6 +455,18 @@ contract TreasuryTest is Test {
         treasury.setProfitReceiver(address(treasury), 1, Treasury.RevenueDistributionMode.DirectTransfer);
     }
 
+    function test_SetProfitReceiverWeightFitsPackedUint88() public {
+        vm.prank(admin);
+        treasury.setProfitReceiver(recipient, type(uint88).max, Treasury.RevenueDistributionMode.DirectTransfer);
+        (, uint88 storedWeight,) = treasury.profitReceivers(0);
+        assertEq(storedWeight, type(uint88).max);
+
+        uint256 oversizedWeight = uint256(type(uint88).max) + 1;
+        vm.expectRevert(abi.encodeWithSelector(SafeCast.SafeCastOverflowedUintDowncast.selector, 88, oversizedWeight));
+        vm.prank(admin);
+        treasury.setProfitReceiver(recipient, oversizedWeight, Treasury.RevenueDistributionMode.DirectTransfer);
+    }
+
     function test_HarvestAndDistributeSplitsProRata() public {
         _setupSurplus();
         vm.startPrank(admin);
@@ -534,8 +477,41 @@ contract TreasuryTest is Test {
 
         assertEq(harvested, 19.9e18); // 20e18 surplus − 10 bps buffer
         assertEq(distributed, 19.9e18); // full pool flushed
-        assertEq(usd8.balanceOf(recipient), 19.9e18 * 3 / 4); // 14.925e18
-        assertEq(usd8.balanceOf(recipient2), 19.9e18 - 19.9e18 * 3 / 4); // 4.975e18, remainder to last
+        assertEq(usd8.balanceOf(admin), 3.98e18);
+        assertEq(usd8.balanceOf(recipient), 11.94e18);
+        assertEq(usd8.balanceOf(recipient2), 3.98e18);
+        assertEq(usd8.balanceOf(address(treasury)), 0);
+    }
+
+    function test_HarvestAndDistributeTakesProtocolFeeBeforeWeightedSplit() public {
+        _setupSurplus();
+        vm.startPrank(admin);
+        treasury.setProfitReceiver(recipient, 3, Treasury.RevenueDistributionMode.DirectTransfer);
+        treasury.setProfitReceiver(recipient2, 1, Treasury.RevenueDistributionMode.DirectTransfer);
+        (uint256 harvested, uint256 distributed) = treasury.harvestAndDistribute();
+        vm.stopPrank();
+
+        uint256 protocolFee = harvested * 2_000 / 10_000;
+        uint256 weightedRevenue = harvested - protocolFee;
+        assertEq(distributed, harvested);
+        assertEq(usd8.balanceOf(admin), protocolFee);
+        assertEq(usd8.balanceOf(recipient), weightedRevenue * 3 / 4);
+        assertEq(usd8.balanceOf(recipient2), weightedRevenue - weightedRevenue * 3 / 4);
+        assertEq(usd8.balanceOf(address(treasury)), 0);
+    }
+
+    function test_HarvestAndDistributeTreatsDonatedUsd8AsFeeBearingRevenue() public {
+        vm.prank(admin);
+        treasury.setProfitReceiver(recipient, 1, Treasury.RevenueDistributionMode.DirectTransfer);
+        _seedTreasuryUsd8(10e18);
+
+        vm.prank(admin);
+        (uint256 harvested, uint256 distributed) = treasury.harvestAndDistribute();
+
+        assertEq(harvested, 0);
+        assertEq(distributed, 10e18);
+        assertEq(usd8.balanceOf(admin), 2e18);
+        assertEq(usd8.balanceOf(recipient), 8e18);
         assertEq(usd8.balanceOf(address(treasury)), 0);
     }
 
@@ -549,10 +525,10 @@ contract TreasuryTest is Test {
         (, uint256 distributed) = treasury.harvestAndDistribute();
         vm.stopPrank();
 
-        // 19.9e18 / 3 doesn't divide evenly; the last receiver takes the remainder.
+        // The 15.92e18 weighted remainder does not divide evenly by three.
         uint256 sum = usd8.balanceOf(recipient) + usd8.balanceOf(recipient2) + usd8.balanceOf(recipient3);
-        assertEq(sum, distributed, "full amount distributed, no dust stranded");
-        assertEq(usd8.balanceOf(recipient3), usd8.balanceOf(recipient) + 1); // absorbs +1 wei dust
+        assertEq(sum + usd8.balanceOf(admin), distributed, "full amount distributed, no dust stranded");
+        assertEq(usd8.balanceOf(recipient3), usd8.balanceOf(recipient) + 2); // absorbs +2 wei dust
     }
 
     function test_HarvestAndDistributeSkipsZeroWeight() public {
@@ -563,7 +539,8 @@ contract TreasuryTest is Test {
         treasury.harvestAndDistribute();
         vm.stopPrank();
 
-        assertEq(usd8.balanceOf(recipient), 19.9e18); // sole positive weight takes all
+        assertEq(usd8.balanceOf(recipient), 15.92e18); // sole positive weight takes weighted revenue
+        assertEq(usd8.balanceOf(admin), 3.98e18);
         assertEq(usd8.balanceOf(recipient2), 0);
     }
 
@@ -583,11 +560,11 @@ contract TreasuryTest is Test {
         vm.startPrank(admin);
         treasury.setProfitReceiver(address(adapter), 1, Treasury.RevenueDistributionMode.ReceiveProfitDistribution);
         treasury.setProfitReceiver(recipient, 1, Treasury.RevenueDistributionMode.DirectTransfer);
-        treasury.harvestAndDistribute(); // 19.9e18 split 1:1 → 9.95e18 each
+        treasury.harvestAndDistribute(); // 3.98e18 fee; 15.92e18 split 1:1
         vm.stopPrank();
 
-        assertEq(usd8.balanceOf(recipient), 9.95e18);
-        assertEq(usd8.balanceOf(address(adapter)), 109.95e18);
+        assertEq(usd8.balanceOf(recipient), 7.96e18);
+        assertEq(usd8.balanceOf(address(adapter)), 107.96e18);
         assertEq(savings.totalAssets(), 100e18, "maxRate prevents instant jump");
     }
 
@@ -656,6 +633,32 @@ contract TreasuryTest is Test {
         assertEq(usd8.balanceOf(address(treasury)), 0);
     }
 
+    function test_NonTimelockCannotSetHarvestBufferDivisor() public {
+        vm.expectRevert(_unauthorizedTimelock(admin));
+        vm.prank(admin);
+        treasury.setHarvestBufferDivisor(100);
+    }
+
+    function test_TimelockCanSetHarvestBufferDivisor() public {
+        _setupSurplus();
+        vm.prank(admin);
+        treasury.setProfitReceiver(recipient, 1, Treasury.RevenueDistributionMode.DirectTransfer);
+
+        vm.prank(timelock);
+        treasury.setHarvestBufferDivisor(100);
+        assertEq(treasury.harvestBufferDivisor(), 100);
+
+        vm.prank(timelock);
+        (uint256 harvested,) = treasury.harvestAndDistribute();
+        assertEq(harvested, 19e18);
+    }
+
+    function test_SetHarvestBufferDivisorRejectsZero() public {
+        vm.expectRevert(abi.encodeWithSelector(Treasury.InvalidHarvestBufferDivisor.selector, 0));
+        vm.prank(timelock);
+        treasury.setHarvestBufferDivisor(0);
+    }
+
     function test_HarvestRetainsSubBufferSurplus() public {
         usdc.mint(alice, 100e6);
         vm.startPrank(alice);
@@ -696,7 +699,8 @@ contract TreasuryTest is Test {
         (uint256 harvested,) = treasury.harvestAndDistribute();
 
         assertEq(harvested, 20e18 - buffer, "minted USD8 equals surplus minus retained buffer");
-        assertEq(usd8.balanceOf(recipient), 20e18 - buffer, "distributed to the receiver");
+        assertEq(usd8.balanceOf(recipient), (20e18 - buffer) * 8_000 / 10_000, "distributed weighted revenue");
+        assertEq(usd8.balanceOf(admin), (20e18 - buffer) * 2_000 / 10_000, "distributed protocol fee");
         assertEq(usd8.balanceOf(address(treasury)), 0);
         assertEq(treasury.getReserveBalance(), reserveBefore);
         assertEq(usd8.totalSupply(), supplyBefore + 20e18 - buffer);
@@ -726,7 +730,8 @@ contract TreasuryTest is Test {
         (uint256 harvested,) = treasury.harvestAndDistribute();
         // 15e18 surplus minus the 10 bps buffer (100e18 / 1000 = 0.1e18).
         assertEq(harvested, 14.9e18);
-        assertEq(usd8.balanceOf(recipient), 14.9e18);
+        assertEq(usd8.balanceOf(recipient), 11.92e18);
+        assertEq(usd8.balanceOf(admin), 2.98e18);
         assertEq(strat.withdrawCallCount(), 0, "strategy not touched");
         assertEq(usdc.balanceOf(address(strat)), 115e6);
         assertEq(usdc.balanceOf(address(treasury)), 0);
@@ -850,7 +855,8 @@ contract TreasuryTest is Test {
         vm.prank(timelock);
         treasury.harvestAndDistribute();
         // 5e18 surplus minus the 10 bps buffer (100e18 / 1000 = 0.1e18).
-        assertEq(usd8.balanceOf(recipient), 4.9e18);
+        assertEq(usd8.balanceOf(recipient), 3.92e18);
+        assertEq(usd8.balanceOf(admin), 0.98e18);
     }
 
     // -- Strategy ---------------------------------------------------------
@@ -1235,6 +1241,25 @@ contract TreasuryTest is Test {
         treasury.redeemUSD8(1e18, 0);
     }
 
+    function test_Usd8ToUsdcRateTracksCappedProRataRedemptionValue() public {
+        vm.expectRevert(Treasury.NoUsd8Supply.selector);
+        treasury.usd8ToUsdcRate();
+
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(treasury), 100e6);
+        treasury.mintUSD8(100e6);
+        vm.stopPrank();
+        assertEq(treasury.usd8ToUsdcRate(), 1e18);
+
+        vm.prank(address(treasury));
+        usdc.transfer(address(0xDEAD), 25e6);
+        assertEq(treasury.usd8ToUsdcRate(), 0.75e18);
+
+        usdc.mint(address(treasury), 50e6);
+        assertEq(treasury.usd8ToUsdcRate(), 1e18, "surplus is capped at peg");
+    }
+
     function test_GetReserveBalanceMirrorsUsdcBalance() public {
         assertEq(treasury.getReserveBalance(), 0);
         usdc.mint(address(treasury), 250e6);
@@ -1451,8 +1476,8 @@ contract HonestVault is ERC20, ERC4626 {
     }
 }
 
-/// @dev Strategy whose underlying() returns a non-USDC address, used to
-///      exercise StrategyAssetMismatch in Treasury.
+/// @dev Strategy whose non-USDC underlying is intentionally accepted because
+///      strategy approval relies on trusted timelock review.
 contract WrongUsdcStrategy is IStrategy {
     function underlying() external pure override returns (address) {
         return address(0xDEAD);

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "network": "sepolia",
+  "chainId": 11155111,
+  "releaseId": "bb8e9969e5c15884414fc7c3c057dea9b4198919cf9678a5dc5f42259d3a9c98",
+  "timelock": "0x158494e7b95c0e5f87e8db4ad1be5c32de99f645",
+  "registry": "0xe2a18c8327e684f66cb5532a11e7dd4a26776f87",
+  "defiInsurance": "0xb19108345ef9fe1e6ad65bbbce2318d384e085c5",
+  "signer": "0x0140cc1e7a438f2f29f1345348ae5f1ae4f0cb0f",
+  "teePcrHash": "0xde568f24577e82fa8b0e67a61433f658d9210db75694a7f6d0fb758c39ede39b",
+  "operationId": "0xcd7195a66fc3cc110a8df411197762b07dd8f440ada111679d878186517b754e",
+  "salt": "0xa4888b352eb83de9b2ca6563695c8888a12577f73315270c98268e86b99238d6",
+  "delaySeconds": 86400,
+  "readyAt": 1785566964,
+  "transactionHash": "0x73c73b52ea85ab734a46413cdf71c1811d65954827ffe29b3cda1f1c1e17f982",
+  "blockNumber": 11387771,
+  "status": "cancelled-wrong-registry",
+  "cancelTransactionHash": "0x84c5b247b0d4fba40de204a59cdc2bb4fa35ee75645818548dc7658f76c9f786",
+  "cancelBlockNumber": 11387841
+}
