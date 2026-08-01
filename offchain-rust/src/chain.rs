@@ -305,17 +305,19 @@ pub struct SettlementParams {
     pub sample_step_blocks: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RatePoint {
-    pub from_block: u64,
-    pub rate: BigUint,
-}
+pub use usd8_score_core::RatePoint;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScoredToken {
     pub token: Address,
     pub decimals: u8,
     pub rates: Vec<RatePoint>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScoreConfig {
+    pub params: SettlementParams,
+    pub scored_tokens: Vec<ScoredToken>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -684,11 +686,30 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
             "underlyingPriceOracle is zero".to_owned(),
         ));
     }
+    let score_config =
+        score_config_at(rpc, config.registry, config.defi_insurance, open_block).await?;
+
+    Ok(IncidentConfig {
+        coverage_bps: BigUint::from(insured.maxCoverageBps),
+        underlying_price_oracle: from_alloy(insured.underlyingPriceOracle),
+        conversion_address: from_alloy(insured.underlyingConversionAddress),
+        conversion_call_data: insured.underlyingConversionCallData.to_vec(),
+        params: score_config.params,
+        scored_tokens: score_config.scored_tokens,
+    })
+}
+
+pub async fn score_config_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    defi_insurance: Address,
+    block_number: u64,
+) -> Result<ScoreConfig, ChainError> {
     let params = contract_call(
         rpc,
-        config.defi_insurance,
+        defi_insurance,
         &IDefiInsurance::settlementParamsCall {},
-        Some(open_block),
+        Some(block_number),
     )
     .await?;
     if params.sampleStepBlocks == 0 {
@@ -699,9 +720,9 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
 
     let token_addresses = contract_call(
         rpc,
-        config.registry,
+        registry,
         &IRegistry::getScoredTokensCall {},
-        Some(open_block),
+        Some(block_number),
     )
     .await?;
     let mut seen = HashSet::new();
@@ -715,11 +736,11 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
         }
         let rates = contract_call(
             rpc,
-            config.registry,
+            registry,
             &IRegistry::getScoredRateHistoryCall {
                 token: to_alloy(token),
             },
-            Some(open_block),
+            Some(block_number),
         )
         .await?;
         if rates.is_empty() {
@@ -745,16 +766,12 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
             .collect::<Result<Vec<_>, _>>()?;
         scored_tokens.push(ScoredToken {
             token,
-            decimals: decimals_at(rpc, token, open_block).await?,
+            decimals: decimals_at(rpc, token, block_number).await?,
             rates,
         });
     }
 
-    Ok(IncidentConfig {
-        coverage_bps: BigUint::from(insured.maxCoverageBps),
-        underlying_price_oracle: from_alloy(insured.underlyingPriceOracle),
-        conversion_address: from_alloy(insured.underlyingConversionAddress),
-        conversion_call_data: insured.underlyingConversionCallData.to_vec(),
+    Ok(ScoreConfig {
         params: SettlementParams {
             twap_lookback_blocks: params.twapLookbackBlocks,
             holding_margin_blocks: params.minHoldingRequired,
@@ -1444,7 +1461,7 @@ pub async fn token_block_integral<R: Rpc + ?Sized>(
 
 pub async fn earned_score_of<R: Rpc + ?Sized>(
     rpc: &R,
-    config: &IncidentConfig,
+    scored_tokens: &[ScoredToken],
     account: Address,
     as_of_block: u64,
     max_range: u64,
@@ -1452,7 +1469,7 @@ pub async fn earned_score_of<R: Rpc + ?Sized>(
 ) -> Result<(BigUint, LogMetrics), ChainError> {
     let mut numerator = BigUint::from(0u8);
     let mut metrics = LogMetrics::default();
-    for scored in &config.scored_tokens {
+    for scored in scored_tokens {
         for (index, point) in scored.rates.iter().enumerate() {
             let next_from = scored
                 .rates

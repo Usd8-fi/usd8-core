@@ -3136,6 +3136,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "usd8-score-core"
+version = "0.1.0"
+dependencies = [
+ "num-bigint 0.5.1",
+ "thiserror",
+]
+
+[[package]]
 name = "usd8-settlement"
 version = "0.1.0"
 dependencies = [
@@ -3156,6 +3164,7 @@ dependencies = [
  "sha3",
  "thiserror",
  "tokio",
+ "usd8-score-core",
 ]
 
 [[package]]

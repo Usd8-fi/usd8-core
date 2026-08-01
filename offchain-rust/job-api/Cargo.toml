@@ -36,6 +36,7 @@ worker = [
   "dep:serde_bytes",
   "dep:tokio-vsock",
   "dep:usd8-settlement",
+  "usd8-settlement/nitro",
   "dep:zeroize",
 ]
 parent = [

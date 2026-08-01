@@ -17,6 +17,7 @@ pub mod ffi;
 pub mod incident_open;
 mod json;
 pub mod rpc;
+pub mod score;
 pub mod tee;
 pub mod typed_data;
 pub use json::{compute_json, parse_json, serialize_output};

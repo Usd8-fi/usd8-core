@@ -39,6 +39,7 @@ import sys
 root = pathlib.Path(sys.argv[1])
 patterns = (
     "Cargo.toml", "Cargo.lock", ".cargo/**/*", "src/**/*.rs",
+    "score-core/Cargo.toml", "score-core/src/**/*.rs",
     "job-api/Cargo.toml", "job-api/Cargo.lock", "job-api/rust-toolchain.toml",
     "job-api/.cargo/**/*", "job-api/src/**/*.rs", "job-api/deploy/**/*",
 )

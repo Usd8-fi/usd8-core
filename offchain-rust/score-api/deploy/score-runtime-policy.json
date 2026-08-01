@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteDedicatedScoreLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:eu-central-1:919437049909:log-group:/aws/lambda/usd8-score-api-sepolia:*"
+    },
+    {
+      "Sid": "UseDedicatedScoreCheckpointTable",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem"],
+      "Resource": "arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints-sepolia"
+    }
+  ]
+}

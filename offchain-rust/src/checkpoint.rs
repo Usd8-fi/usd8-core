@@ -16,13 +16,16 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use usd8_score_core::{
+    AccountScoreState, ScoreCoreError, apply_transfer, gross_score, projected_numerator,
+    validate_rates,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 const SCHEMA_VERSION: u32 = 1;
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const WAD: u64 = 1_000_000_000_000_000_000;
 const MAX_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -67,14 +70,7 @@ pub struct BulkMetadata {
     pub log_metrics: LogMetrics,
 }
 
-#[derive(Clone, Debug, Default)]
-struct AccountState {
-    balance: BigUint,
-    last_block: u64,
-    completed_numerator: BigUint,
-    active_segment_from: Option<u64>,
-    active_integral: BigUint,
-}
+type AccountState = AccountScoreState;
 
 #[derive(Clone, Debug)]
 struct TokenState {
@@ -222,16 +218,8 @@ fn valid_hash(hash: &str) -> bool {
         && hash[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn assert_rates(rates: &[RatePoint]) -> Result<(), CheckpointError> {
-    if rates
-        .windows(2)
-        .any(|pair| pair[0].from_block >= pair[1].from_block)
-    {
-        return Err(CheckpointError::Invalid(
-            "scored-token rate history must be strictly ascending".to_owned(),
-        ));
-    }
-    Ok(())
+fn core(error: ScoreCoreError) -> CheckpointError {
+    CheckpointError::Invalid(error.to_string())
 }
 
 fn first_contributing_block(scored: &ScoredToken, as_of_block: u64) -> Option<u64> {
@@ -247,93 +235,6 @@ fn first_contributing_block(scored: &ScoredToken, as_of_block: u64) -> Option<u6
 
 fn contributes_at(scored: &ScoredToken, as_of_block: u64) -> bool {
     first_contributing_block(scored, as_of_block).is_some()
-}
-
-fn scale_integral(integral: BigUint, decimals: u8) -> BigUint {
-    if decimals <= 18 {
-        integral * BigUint::from(10u8).pow(u32::from(18 - decimals))
-    } else {
-        integral / BigUint::from(10u8).pow(u32::from(decimals - 18))
-    }
-}
-
-fn rate_for(rates: &[RatePoint], from_block: u64) -> Result<&BigUint, CheckpointError> {
-    rates
-        .iter()
-        .find(|point| point.from_block == from_block)
-        .map(|point| &point.rate)
-        .ok_or_else(|| {
-            CheckpointError::Invalid(format!(
-                "active rate segment {from_block} is absent from current history"
-            ))
-        })
-}
-
-fn finalize_active(
-    account: &mut AccountState,
-    rates: &[RatePoint],
-    decimals: u8,
-) -> Result<(), CheckpointError> {
-    let Some(from_block) = account.active_segment_from else {
-        return Ok(());
-    };
-    account.completed_numerator +=
-        scale_integral(account.active_integral.clone(), decimals) * rate_for(rates, from_block)?;
-    account.active_segment_from = None;
-    account.active_integral = BigUint::from(0u8);
-    Ok(())
-}
-
-fn accrue_to(
-    account: &mut AccountState,
-    to_block: u64,
-    rates: &[RatePoint],
-    decimals: u8,
-) -> Result<(), CheckpointError> {
-    if to_block < account.last_block {
-        return Err(CheckpointError::Invalid(format!(
-            "cannot move score account backward from {} to {to_block}",
-            account.last_block
-        )));
-    }
-    if to_block == account.last_block {
-        return Ok(());
-    }
-    for (index, point) in rates.iter().enumerate() {
-        let next = rates.get(index + 1).map(|next| next.from_block);
-        let overlap_from = account.last_block.max(point.from_block);
-        let overlap_to = next.map_or(to_block, |next| next.min(to_block));
-        if overlap_from >= overlap_to {
-            continue;
-        }
-        if account.active_segment_from != Some(point.from_block) {
-            finalize_active(account, rates, decimals)?;
-            account.active_segment_from = Some(point.from_block);
-            account.active_integral = BigUint::from(0u8);
-        }
-        account.active_integral += &account.balance * BigUint::from(overlap_to - overlap_from);
-        if next.is_some_and(|next| overlap_to == next && next <= to_block) {
-            finalize_active(account, rates, decimals)?;
-        }
-    }
-    account.last_block = to_block;
-    Ok(())
-}
-
-fn projected_numerator(
-    account: &AccountState,
-    to_block: u64,
-    rates: &[RatePoint],
-    decimals: u8,
-) -> Result<BigUint, CheckpointError> {
-    let mut projected = account.clone();
-    accrue_to(&mut projected, to_block, rates, decimals)?;
-    let mut numerator = projected.completed_numerator;
-    if let Some(from_block) = projected.active_segment_from {
-        numerator +=
-            scale_integral(projected.active_integral, decimals) * rate_for(rates, from_block)?;
-    }
-    Ok(numerator)
 }
 
 fn serialize_state(state: &CheckpointState) -> PersistedCheckpoint {
@@ -418,7 +319,7 @@ fn parse_state(persisted: PersistedCheckpoint) -> Result<CheckpointState, Checkp
                 })
             })
             .collect::<Result<Vec<_>, CheckpointError>>()?;
-        assert_rates(&rates)?;
+        validate_rates(&rates).map_err(core)?;
         let mut accounts = BTreeMap::new();
         for (account_text, value) in raw.accounts {
             let account = Address::from_str(&account_text).map_err(|_| {
@@ -692,15 +593,31 @@ fn apply_transfer_delta(
         return Ok(());
     }
     let account = token.accounts.entry(address).or_default();
-    accrue_to(account, block, rates, token.decimals)?;
     if inflow {
-        account.balance += value;
-    } else if *value > account.balance {
-        return Err(CheckpointError::Invalid(format!(
-            "Transfer index produced negative balance for {address} at block {block}"
-        )));
+        apply_transfer(
+            account,
+            block,
+            value,
+            &BigUint::from(0u8),
+            rates,
+            token.decimals,
+        )
+        .map_err(core)?;
     } else {
-        account.balance -= value;
+        apply_transfer(
+            account,
+            block,
+            &BigUint::from(0u8),
+            value,
+            rates,
+            token.decimals,
+        )
+        .map_err(|error| match error {
+            ScoreCoreError::BalanceUnderflow { .. } => CheckpointError::Invalid(format!(
+                "Transfer index produced negative balance for {address} at block {block}"
+            )),
+            other => core(other),
+        })?;
     }
     Ok(())
 }
@@ -836,7 +753,7 @@ impl<R: Rpc + ?Sized> CheckpointScoreSource<R> {
         let mut indexed_transfers = 0usize;
         let mut log_metrics = LogMetrics::default();
         for scored in &active {
-            assert_rates(&scored.rates)?;
+            validate_rates(&scored.rates).map_err(core)?;
             if let Some(stored) = state.tokens.get(&scored.token) {
                 validate_stored_token(stored, scored)?;
                 if stored.cursor_block != 0 {
@@ -930,9 +847,10 @@ impl<R: Rpc + ?Sized> CheckpointScoreSource<R> {
                 )));
             }
             numerator +=
-                projected_numerator(&account, self.as_of_block, &scored.rates, scored.decimals)?;
+                projected_numerator(&account, self.as_of_block, &scored.rates, scored.decimals)
+                    .map_err(core)?;
         }
-        Ok(numerator / BigUint::from(WAD))
+        Ok(gross_score(numerator))
     }
 }
 
@@ -980,7 +898,7 @@ impl<R: Rpc + ?Sized> BulkScoreSource<R> {
             .iter()
             .filter(|scored| contributes_at(scored, as_of_block))
         {
-            assert_rates(&scored.rates)?;
+            validate_rates(&scored.rates).map_err(core)?;
             if !indexed_tokens.insert(scored.token) {
                 let stored = state.tokens.get(&scored.token).ok_or_else(|| {
                     CheckpointError::Invalid(format!("bulk token {} disappeared", scored.token))
@@ -1089,9 +1007,10 @@ impl<R: Rpc + ?Sized> BulkScoreSource<R> {
             })?;
             let account = token.accounts.get(&user).cloned().unwrap_or_default();
             numerator +=
-                projected_numerator(&account, self.as_of_block, &scored.rates, scored.decimals)?;
+                projected_numerator(&account, self.as_of_block, &scored.rates, scored.decimals)
+                    .map_err(core)?;
         }
-        Ok(numerator / BigUint::from(WAD))
+        Ok(gross_score(numerator))
     }
 }
 

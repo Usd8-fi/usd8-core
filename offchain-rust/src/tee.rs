@@ -1,17 +1,17 @@
 use crate::{hash_hex, keccak256};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 use ciborium::value::Value;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 use serde::Deserialize;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 use serde_bytes::ByteBuf;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const PCR_BYTE_LENGTH: usize = 48;
 const PCR_HASH_DOMAIN: &[u8] = b"USD8_TEE_PCR0_2_V1";
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 const FRESH_NONCE_LENGTH: usize = 32;
 
 #[derive(Debug, Error)]
@@ -30,7 +30,7 @@ pub struct FreshAttestation {
     pub pcr_hash: String,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 #[derive(Deserialize)]
 struct AttestationPayload {
     digest: String,
@@ -62,7 +62,7 @@ pub fn pcr0_2_hash(pcr0: &[u8], pcr1: &[u8], pcr2: &[u8]) -> Result<String, TeeE
     Ok(hash_hex(keccak256(preimage)))
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 /// Structurally validates a document returned directly by this process's local
 /// NSM request. This is not a remote COSE/certificate-chain verifier.
 fn parse_local_nsm_attestation(
@@ -133,13 +133,13 @@ fn parse_local_nsm_attestation(
     pcr0_2_hash(pcr(0)?.as_ref(), pcr(1)?.as_ref(), pcr(2)?.as_ref())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 trait NsmClient {
     fn get_random(&mut self) -> Result<Vec<u8>, TeeError>;
     fn attest(&mut self, nonce: &[u8], user_data: &[u8]) -> Result<Vec<u8>, TeeError>;
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 fn fresh_nitro_attestation_with<N: NsmClient>(
     nsm: &mut N,
     user_data: &[u8],
@@ -159,7 +159,7 @@ fn fresh_nitro_attestation_with<N: NsmClient>(
 
 /// Request a nonce-bound attestation from the local Nitro Security Module and
 /// derive the exact PCR commitment later bound into the settlement signature.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "nitro"))]
 pub fn fresh_nitro_attestation(user_data: &[u8]) -> Result<FreshAttestation, TeeError> {
     use aws_nitro_enclaves_nsm_api::api::{Request, Response};
     use aws_nitro_enclaves_nsm_api::driver::{nsm_exit, nsm_init, nsm_process_request};
@@ -220,10 +220,10 @@ pub fn fresh_nitro_attestation(user_data: &[u8]) -> Result<FreshAttestation, Tee
     fresh_nitro_attestation_with(&mut DriverNsm::open()?, user_data)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "nitro")))]
 pub fn fresh_nitro_attestation(_user_data: &[u8]) -> Result<FreshAttestation, TeeError> {
     Err(TeeError::NsmUnavailable(
-        "Nitro NSM is available only inside a Linux Nitro Enclave".to_owned(),
+        "Nitro NSM requires a Linux Nitro Enclave build with the nitro feature".to_owned(),
     ))
 }
 

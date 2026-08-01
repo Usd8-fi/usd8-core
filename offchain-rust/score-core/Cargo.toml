@@ -1,0 +1,11 @@
+[package]
+name = "usd8-score-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+license = "BUSL-1.1"
+
+[dependencies]
+num-bigint = "=0.5.1"
+thiserror = "=2.0.18"

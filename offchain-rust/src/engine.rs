@@ -595,13 +595,21 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
 
+    // Score must mature for the same pre-reference period that the insured token must be held.
+    let score_cutoff_block =
+        if provisional.reference_block > incident_config.params.holding_margin_blocks {
+            provisional.reference_block - incident_config.params.holding_margin_blocks
+        } else {
+            1
+        };
+
     let (mut checkpoint_source, checkpoint_integrity_key, bulk_source) = match score_mode {
         ScoreMode::Raw => (None, None, None),
         ScoreMode::Bulk => {
             let source = BulkScoreSource::open(
                 rpc.clone(),
                 &incident_config,
-                provisional.reference_block,
+                score_cutoff_block,
                 claimant_users,
                 config.chain_id,
                 MAX_LOG_RANGE,
@@ -617,7 +625,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             let source = CheckpointScoreSource::open(
                 rpc.clone(),
                 &incident_config,
-                provisional.reference_block,
+                score_cutoff_block,
                 path,
                 config.chain_id,
                 &integrity_key,
@@ -646,7 +654,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         }
     } else {
         ScoreSourceMetadata::Raw {
-            as_of_block: provisional.reference_block,
+            as_of_block: score_cutoff_block,
         }
     };
     let mut log_metrics = if let Some(source) = &bulk_source {
@@ -656,11 +664,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
     } else {
         event_metrics
     };
-    let hold_from = if provisional.reference_block > incident_config.params.holding_margin_blocks {
-        provisional.reference_block - incident_config.params.holding_margin_blocks
-    } else {
-        1
-    };
+    let hold_from = score_cutoff_block;
     let live_events = replay
         .live_claim_ids
         .iter()
@@ -701,9 +705,9 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         } else {
             let (score, score_metrics) = earned_score_of(
                 rpc.as_ref(),
-                &incident_config,
+                &incident_config.scored_tokens,
                 event.user,
-                provisional.reference_block,
+                score_cutoff_block,
                 MAX_LOG_RANGE,
                 LOG_RESULT_CAP,
             )

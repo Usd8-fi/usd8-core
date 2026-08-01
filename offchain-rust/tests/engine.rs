@@ -370,6 +370,7 @@ fn fixture_with_min_claim_and_root(
         ((INSURED.to_ascii_lowercase(), 75), U256::from(100)),
         ((INSURED.to_ascii_lowercase(), 80), U256::from(100)),
         ((SCORED.to_ascii_lowercase(), 1), U256::ZERO),
+        ((SCORED.to_ascii_lowercase(), 75), U256::from(100)),
         ((SCORED.to_ascii_lowercase(), 80), U256::from(100)),
     ]
     .into_iter()
@@ -479,6 +480,23 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     assert_eq!(persisted["rows"][0]["amounts"][0], "80");
     assert!(persisted["rows"][0]["proof"].is_array());
     fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn raw_score_stops_at_the_insured_holding_window_start() {
+    let (rpc, config) = fixture();
+    let run = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run.output.rows[0].gross_earned_score,
+        BigUint::from(6_500u16) * BigUint::from(10u8).pow(18)
+    );
+    assert_eq!(
+        run.artifact(&config, false)["scoreSource"]["asOfBlock"],
+        "75"
+    );
 }
 
 #[tokio::test]
@@ -655,7 +673,7 @@ async fn verified_checkpoint_run_commits_and_releases_lock() {
     let (rpc, config) = fixture();
     let path = artifact_path();
     let lock_path = PathBuf::from(format!("{}.lock", path.display()));
-    build_settlement(
+    let run = build_settlement(
         Arc::new(rpc),
         &config,
         BigUint::from(7u8),
@@ -667,6 +685,14 @@ async fn verified_checkpoint_run_commits_and_releases_lock() {
     .await
     .unwrap();
 
+    assert_eq!(
+        run.output.rows[0].gross_earned_score,
+        BigUint::from(6_500u16) * BigUint::from(10u8).pow(18)
+    );
+    assert_eq!(
+        run.artifact(&config, false)["scoreSource"]["asOfBlock"],
+        "75"
+    );
     assert!(path.exists());
     assert!(!lock_path.exists());
     fs::remove_file(path).unwrap();

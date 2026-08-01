@@ -231,10 +231,11 @@ fn checkpoint_path() -> PathBuf {
 
 #[tokio::test]
 async fn raw_score_matches_rate_segment_golden_vector() {
-    let (alice, alice_metrics) = earned_score_of(&rpc(), &cfg(), ka(ALICE), 10, 1000, 1000)
-        .await
-        .unwrap();
-    let (bob, _) = earned_score_of(&rpc(), &cfg(), ka(BOB), 10, 1000, 1000)
+    let (alice, alice_metrics) =
+        earned_score_of(&rpc(), &cfg().scored_tokens, ka(ALICE), 10, 1000, 1000)
+            .await
+            .unwrap();
+    let (bob, _) = earned_score_of(&rpc(), &cfg().scored_tokens, ka(BOB), 10, 1000, 1000)
         .await
         .unwrap();
     assert_eq!(alice, BigUint::from(900u16));
@@ -257,7 +258,7 @@ async fn ephemeral_bulk_matches_raw_for_multiple_users_and_historical_rate_segme
     .await
     .unwrap();
     for user in [ka(ALICE), ka(BOB)] {
-        let (raw, _) = earned_score_of(rpc.as_ref(), &cfg(), user, 10, 1_000, 1_000)
+        let (raw, _) = earned_score_of(rpc.as_ref(), &cfg().scored_tokens, user, 10, 1_000, 1_000)
             .await
             .unwrap();
         assert_eq!(bulk.gross_score_of(user).await.unwrap(), raw);
@@ -593,9 +594,16 @@ async fn checkpoint_matches_raw_for_more_than_18_decimals() {
     .collect();
     let rpc = Arc::new(score_rpc(vec![transfer(ZERO, ALICE, 15, 1, 0)], balances));
     let config = score_config(19, 1_000_000_000_000_000_000, 1);
-    let (raw, _) = earned_score_of(rpc.as_ref(), &config, ka(ALICE), 10, 1_000, 1_000)
-        .await
-        .unwrap();
+    let (raw, _) = earned_score_of(
+        rpc.as_ref(),
+        &config.scored_tokens,
+        ka(ALICE),
+        10,
+        1_000,
+        1_000,
+    )
+    .await
+    .unwrap();
     assert_eq!(raw, BigUint::from(13u8));
     let path = checkpoint_path();
     let checkpoint =
@@ -628,9 +636,16 @@ async fn score_divides_once_after_summing_all_token_numerators() {
     .collect();
     let rpc = Arc::new(score_rpc(vec![transfer(ZERO, ALICE, 1, 1, 0)], balances));
     let config = score_config(18, 600_000_000_000_000_000, 2);
-    let (raw, _) = earned_score_of(rpc.as_ref(), &config, ka(ALICE), 2, 1_000, 1_000)
-        .await
-        .unwrap();
+    let (raw, _) = earned_score_of(
+        rpc.as_ref(),
+        &config.scored_tokens,
+        ka(ALICE),
+        2,
+        1_000,
+        1_000,
+    )
+    .await
+    .unwrap();
     assert_eq!(raw, BigUint::from(1u8));
     let path = checkpoint_path();
     let checkpoint =
