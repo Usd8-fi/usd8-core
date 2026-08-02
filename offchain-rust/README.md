@@ -510,6 +510,14 @@ KMS `Decrypt` must be granted only to the EC2 instance role **with**
 The parent role must not have ordinary plaintext `kms:Decrypt`. The stable signer
 address is derived from the KMS-wrapped key and must match the Registry signer.
 
+The final KMS policy deliberately separates runtime and cloud administration.
+Only the attested instance role may decrypt; the ordinary release operator uses
+`deploy/operator-persistent-policy.json`, which cannot decrypt, rewrite the key
+policy, read signer ciphertext, or mutate runtime IAM. AWS account root/security
+administration remains trusted and can recover or rotate the KMS policy. Broad
+`deploy/operator-bootstrap-policy.json` access is temporary ceremony access and
+must be removed after each release before the release is considered final.
+
 The Rust `job-api` implements the Lambda/S3/EC2 control plane, one-shot parent,
 bounded vsock protocol, fixed KMS/RPC proxies, Nitro NSM recipient attestation,
 KMS decryption, enclave-local settlement verification and secp256k1 signing.

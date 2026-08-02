@@ -49,7 +49,7 @@ __pycache__/
 **/.DS_Store
 
 # Off-chain settlement package
-offchain-rust/target/
+offchain-rust/**/target/
 offchain-rust/**/__pycache__/
 offchain-rust/**/*.pyc
 offchain-rust/state/

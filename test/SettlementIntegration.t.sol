@@ -47,6 +47,15 @@ contract SettlementIntegrationTest is Test {
     uint256 constant TEE_PK = 0x7EE;
     bytes32 constant TEE_PCR_HASH = keccak256("integration-PCR0-PCR1-PCR2");
 
+    struct ScarcityFixture {
+        address[] users;
+        uint256[] claimIds;
+        uint256[][] amounts;
+        uint256[] scores;
+        uint256[] eligibles;
+        bytes rootPayload;
+    }
+
     function setUp() public {
         vm.roll(1000);
         vm.etch(FEED, hex"00");
@@ -203,6 +212,45 @@ contract SettlementIntegrationTest is Test {
         assertEq(registry.scoreSpent(carol), 40);
     }
 
+    function test_UnderfundedManyClaimantsMatchLocalOracleAndBondOutcomes() public {
+        if (!vm.envOr("RUN_INTEGRATION", false)) {
+            vm.skip(true);
+            return;
+        }
+
+        vm.prank(admin);
+        uint256 incidentId = defi.openClaimIncident(IERC20(address(lp)), uint64(block.number - 1));
+        ScarcityFixture memory f = _scarcityFixture(incidentId);
+        address observer = address(0x3000);
+        assertEq(defi.claimIdByIncidentAndUser(incidentId, observer), 0, "non-filer unexpectedly registered");
+
+        bytes32 root = abi.decode(_ffi("root", f.rootPayload, ""), (bytes32));
+        uint256 grossBudget;
+        for (uint256 i = 0; i < 10; i++) {
+            grossBudget += f.amounts[i][0] * 10_000 / 8_000;
+        }
+        assertEq(grossBudget, 499_999_990, "local gross-budget oracle changed");
+
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(claimDeadline + 1);
+        uint256[] memory poolBudget = _u256(grossBudget);
+        defi.settleIncident(root, poolBudget, _teeSign(incidentId, root, poolBudget));
+        vm.warp(block.timestamp + defi.incidentPhaseWindow(incidentId) + 1);
+
+        (uint256 acceptedGross, uint256 acceptedNet) = _acceptScarcityClaims(f);
+        _resolveIneligibleScarcityClaim(f, observer);
+
+        (,,,, uint64 correctionDeadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(uint256(correctionDeadline) + defi.incidentPhaseWindow(incidentId) + 1);
+        _resolveNoShowScarcityClaim(f);
+
+        assertEq(pool.totalAssets(), 1_000e6 - acceptedGross, "pool draw != accepted gross payouts");
+        assertEq(usdc.balanceOf(admin), acceptedGross - acceptedNet, "protocol fee mismatch");
+        assertEq(defi.incidentPoolBudget(incidentId)[0], grossBudget - acceptedGross, "unused offer redistributed");
+        (,,,,,, uint256 unresolved,,,) = defi.incidents(incidentId);
+        assertEq(unresolved, 0, "claims remain unresolved");
+    }
+
     /// @dev Golden-vector check: the selected FFI EIP-712 settlement digest must
     ///      equal the contract's _hashTypedDataV4 digest byte-for-byte, over 0/1/N
     ///      pools. Covers the whole digest — domain separator, typehash,
@@ -317,6 +365,65 @@ contract SettlementIntegrationTest is Test {
         usd8.approve(address(defi), 10e18);
         claimId = defi.fileClaim(IERC20(address(lp)), amount, score, 0, 0, "");
         vm.stopPrank();
+    }
+
+    function _scarcityFixture(uint256 incidentId) internal returns (ScarcityFixture memory f) {
+        f.users = new address[](11);
+        f.claimIds = new uint256[](11);
+        f.amounts = new uint256[][](11);
+        f.scores = new uint256[](11);
+        f.eligibles = new uint256[](11);
+
+        for (uint256 i = 0; i < 10; i++) {
+            f.users[i] = address(uint160(0x1000 + i));
+            f.scores[i] = (i + 1) * 10;
+            f.eligibles[i] = (50 + i * 10) * 1e18;
+            f.claimIds[i] = _join(f.users[i], uint128(f.eligibles[i]), f.scores[i]);
+            f.amounts[i] = _u256(400e6 * f.scores[i] / 550);
+            assertLt(f.amounts[i][0], f.eligibles[i] * 8_000 / 10_000 / 1e12, "claim hit coverage cap");
+        }
+
+        f.users[10] = address(0x2000);
+        f.claimIds[10] = _join(f.users[10], 150e18, 1_000);
+        f.amounts[10] = _u256(0);
+        f.rootPayload = abi.encode(incidentId, f.claimIds, f.users, f.amounts, f.scores, f.scores, f.eligibles);
+    }
+
+    function _acceptScarcityClaims(ScarcityFixture memory f)
+        internal
+        returns (uint256 acceptedGross, uint256 acceptedNet)
+    {
+        for (uint256 i = 0; i < 10; i++) {
+            if (i == 8) continue;
+            bytes32[] memory proof = abi.decode(_ffi("proof", f.rootPayload, vm.toString(f.claimIds[i])), (bytes32[]));
+            vm.prank(f.users[i]);
+            defi.finalizeClaim(f.claimIds[i], true, f.amounts[i], f.scores[i], f.scores[i], f.eligibles[i], proof);
+            assertEq(usdc.balanceOf(f.users[i]), f.amounts[i][0], "actual payout != local oracle");
+            assertEq(registry.scoreSpent(f.users[i]), f.scores[i], "actual score spend != local oracle");
+            acceptedNet += f.amounts[i][0];
+            acceptedGross += f.amounts[i][0] * 10_000 / 8_000;
+        }
+    }
+
+    function _resolveIneligibleScarcityClaim(ScarcityFixture memory f, address resolver) internal {
+        uint256 treasuryBondBefore = usd8.balanceOf(admin);
+        bytes32[] memory proof = abi.decode(_ffi("proof", f.rootPayload, vm.toString(f.claimIds[10])), (bytes32[]));
+        vm.prank(resolver);
+        defi.finalizeClaim(f.claimIds[10], false, f.amounts[10], 0, 0, 0, proof);
+        assertEq(lp.balanceOf(f.users[10]), 150e18, "ineligible escrow not returned");
+        assertEq(usd8.balanceOf(f.users[10]), 0, "ineligible bond incorrectly refunded");
+        assertEq(usd8.balanceOf(admin), treasuryBondBefore + defi.claimBondAmount(), "bond not forfeited");
+        assertEq(registry.scoreSpent(f.users[10]), 0, "ineligible score consumed");
+    }
+
+    function _resolveNoShowScarcityClaim(ScarcityFixture memory f) internal {
+        bytes32[] memory proof = abi.decode(_ffi("proof", f.rootPayload, vm.toString(f.claimIds[8])), (bytes32[]));
+        vm.prank(f.users[8]);
+        defi.finalizeClaim(f.claimIds[8], false, f.amounts[8], f.scores[8], f.scores[8], f.eligibles[8], proof);
+        assertEq(usdc.balanceOf(f.users[8]), 0, "expired offer paid");
+        assertEq(lp.balanceOf(f.users[8]), f.eligibles[8], "eligible no-show escrow not returned");
+        assertEq(usd8.balanceOf(f.users[8]), defi.claimBondAmount(), "eligible no-show bond not refunded");
+        assertEq(registry.scoreSpent(f.users[8]), 0, "declined score consumed");
     }
 
     function _ffi(string memory cmd, bytes memory payload, string memory arg) internal returns (bytes memory) {

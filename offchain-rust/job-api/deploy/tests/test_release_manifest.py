@@ -100,6 +100,19 @@ class ReleaseManifestTest(unittest.TestCase):
             handler.redirect_request(None, None, 302, "https://redirect.invalid", {}, None)
         raised.exception.close()
 
+    def test_live_rpc_sets_explicit_user_agent(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"jsonrpc":"2.0","id":1,"result":"0xaa36a7"}'
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(VERIFY_MODULE.urllib.request, "build_opener", return_value=opener):
+            self.assertEqual(
+                VERIFY_MODULE.rpc_json("https://sepolia.example.invalid", "eth_chainId", []),
+                "0xaa36a7",
+            )
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.get_header("User-agent"), "usd8-release-verifier/1.0")
+
     def test_live_chain_preflight_accepts_manifest_bound_registry_and_signer(self) -> None:
         manifest = self.chain_manifest()
         with mock.patch.object(VERIFY_MODULE, "rpc_json", side_effect=self.chain_rpc(manifest)) as rpc:

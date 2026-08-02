@@ -188,7 +188,7 @@ contract DefiInsurance is
 
     /// @notice Off-chain settlement windows, archive-read at {Incident.openBlock}.
     /// @param twapLookbackBlocks Pre-incident token-to-underlying TWAP lookback.
-    /// @param minHoldingRequired Window used to prove minimum pre-incident holdings.
+    /// @param minHoldingRequired Window used to prove holdings and mature insurance score.
     /// @param sampleStepBlocks TWAP sampling stride; eligibility replay is exact.
     struct SettlementParams {
         uint64 twapLookbackBlocks;

@@ -229,7 +229,7 @@ contract PoolHandler is Test {
         asset.mint(actor, amount);
         vm.startPrank(actor);
         asset.approve(address(pool), amount);
-        vm.expectRevert(SingleAssetCoverPool.PoolFrozen.selector);
+        vm.expectRevert(abi.encodeWithSignature("ERC4626ExceededMaxDeposit(address,uint256,uint256)", actor, amount, 0));
         pool.deposit(amount, actor);
         vm.stopPrank();
 

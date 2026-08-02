@@ -71,3 +71,35 @@ fn request_retention_outlives_terminal_retention() {
     assert_eq!(days("ExpireRequests"), 31);
     assert_eq!(days("ExpireTerminal"), 30);
 }
+
+#[test]
+fn final_kms_policy_separates_cloud_administration_from_the_release_operator() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../deploy/kms-key-policy.json")).unwrap();
+    let encoded = serde_json::to_string(&policy).unwrap();
+
+    assert!(!encoded.contains("hermes-tee-agent"));
+    assert!(encoded.contains("arn:aws:iam::919437049909:root"));
+    assert!(encoded.contains("kms:PutKeyPolicy"));
+    assert!(encoded.contains("kms:Decrypt"));
+    assert!(encoded.contains("kms:RecipientAttestation:ImageSha384"));
+    assert!(encoded.contains("kms:RecipientAttestation:PCR3"));
+}
+
+#[test]
+fn persistent_operator_policy_cannot_bypass_the_enclave_boundary() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../deploy/operator-persistent-policy.json")).unwrap();
+    let encoded = serde_json::to_string(&policy).unwrap();
+
+    for forbidden in [
+        "kms:PutKeyPolicy",
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "iam:PutRolePolicy",
+        "iam:AttachRolePolicy",
+        "secrets/*",
+    ] {
+        assert!(!encoded.contains(forbidden));
+    }
+}

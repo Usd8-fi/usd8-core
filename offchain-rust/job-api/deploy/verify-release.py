@@ -324,7 +324,10 @@ def rpc_json(rpc_url: str, method: str, params: list[Any]) -> Any:
     request = urllib.request.Request(
         rpc_url,
         data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "usd8-release-verifier/1.0",
+        },
         method="POST",
     )
     try:

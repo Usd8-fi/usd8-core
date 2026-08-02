@@ -2,9 +2,9 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "KeyAdministrationAndWrapping",
+      "Sid": "TrustedCloudKeyAdministration",
       "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::919437049909:user/hermes-tee-agent"},
+      "Principal": {"AWS": "arn:aws:iam::919437049909:root"},
       "Action": [
         "kms:CancelKeyDeletion",
         "kms:CreateAlias",
@@ -12,15 +12,12 @@
         "kms:DescribeKey",
         "kms:DisableKey",
         "kms:EnableKey",
-        "kms:Encrypt",
         "kms:GetKeyPolicy",
         "kms:GetKeyRotationStatus",
         "kms:ListAliases",
         "kms:ListKeyPolicies",
         "kms:ListResourceTags",
         "kms:PutKeyPolicy",
-        "kms:ReEncryptFrom",
-        "kms:ReEncryptTo",
         "kms:ScheduleKeyDeletion",
         "kms:TagResource",
         "kms:UntagResource",

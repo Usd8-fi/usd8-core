@@ -97,7 +97,7 @@
       "signature": "editInsuredToken(address,uint256,address,address,bytes)",
       "selector": "0xaab15516",
       "evidence": {
-        "test": "DefiInsuranceConfigKontrolTest::test_insuredTokenConfigAndDynamicBytesAreStoredExactly(uint16,bytes4)",
+        "test": "DefiInsuranceConfigKontrolTest::test_insuredTokenConfigAndRepresentativeDynamicBytesAreStoredExactly(uint16)",
         "assertions": [
           "production call succeeds or fails at the specified boundary",
           "return value and representative state transition are asserted"
@@ -152,7 +152,7 @@
       "signature": "getInsuredToken(address)",
       "selector": "0x3f962199",
       "evidence": {
-        "test": "DefiInsuranceConfigKontrolTest::test_insuredTokenConfigAndDynamicBytesAreStoredExactly(uint16,bytes4)",
+        "test": "DefiInsuranceConfigKontrolTest::test_insuredTokenConfigAndRepresentativeDynamicBytesAreStoredExactly(uint16)",
         "assertions": [
           "production call succeeds or fails at the specified boundary",
           "return value and representative state transition are asserted"

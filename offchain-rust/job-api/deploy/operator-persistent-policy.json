@@ -1,0 +1,96 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadCallerIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadFrankfurtRuntimeState",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSnapshots",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeTags",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVpcs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RemoveTaggedEphemeralWorkers",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:eu-central-1:919437049909:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/Project": ["USD8-TEE", "USD8-TEE-Build"]
+        }
+      }
+    },
+    {
+      "Sid": "RemoveTaggedOrphanVolumes",
+      "Effect": "Allow",
+      "Action": "ec2:DeleteVolume",
+      "Resource": "arn:aws:ec2:eu-central-1:919437049909:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/Project": ["USD8-TEE", "USD8-TEE-Build"]
+        }
+      }
+    },
+    {
+      "Sid": "ReadFixedRuntimeRoles",
+      "Effect": "Allow",
+      "Action": ["iam:GetRole", "iam:GetRolePolicy", "iam:GetInstanceProfile"],
+      "Resource": [
+        "arn:aws:iam::919437049909:role/USD8TeeInstanceRole",
+        "arn:aws:iam::919437049909:role/USD8TeeLambdaRole",
+        "arn:aws:iam::919437049909:role/USD8TeeJanitorRole",
+        "arn:aws:iam::919437049909:instance-profile/USD8TeeInstanceProfile"
+      ]
+    },
+    {
+      "Sid": "ReadOwnOperatorBindings",
+      "Effect": "Allow",
+      "Action": ["iam:ListAttachedUserPolicies", "iam:ListUserPolicies"],
+      "Resource": "arn:aws:iam::919437049909:user/hermes-tee-agent"
+    },
+    {
+      "Sid": "ReadSepoliaReleaseKey",
+      "Effect": "Allow",
+      "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:ListResourceTags"],
+      "Resource": "arn:aws:kms:eu-central-1:919437049909:key/87d313c1-7b18-4ce0-be4d-87059d35e6e6"
+    },
+    {
+      "Sid": "ReadAndInvokeFixedLambdas",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:GetFunctionUrlConfig",
+        "lambda:GetPolicy",
+        "lambda:InvokeFunction",
+        "lambda:InvokeFunctionUrl"
+      ],
+      "Resource": [
+        "arn:aws:lambda:eu-central-1:919437049909:function:usd8-tee-job-api",
+        "arn:aws:lambda:eu-central-1:919437049909:function:usd8-tee-janitor"
+      ]
+    },
+    {
+      "Sid": "ReadFixedJanitorRule",
+      "Effect": "Allow",
+      "Action": "events:DescribeRule",
+      "Resource": "arn:aws:events:eu-central-1:919437049909:rule/usd8-tee-janitor"
+    }
+  ]
+}

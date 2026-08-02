@@ -6,6 +6,69 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/// @notice Configurable mintable asset for disposable Sepolia cover-pool rehearsals.
+/// @dev Staging only. It has no production or mainnet use.
+contract SepoliaTestToken is ERC20 {
+    address public immutable admin;
+
+    error Unauthorized();
+    error ZeroAddress();
+
+    constructor(string memory name_, string memory symbol_, address admin_) ERC20(name_, symbol_) {
+        if (admin_ == address(0)) revert ZeroAddress();
+        admin = admin_;
+    }
+
+    function mint(address to, uint256 amount) external {
+        if (msg.sender != admin) revert Unauthorized();
+        if (to == address(0)) revert ZeroAddress();
+        _mint(to, amount);
+    }
+}
+
+/// @notice Mutable Chainlink-compatible USD feed for disposable Sepolia rehearsals.
+/// @dev Staging only. Every update creates a fresh timestamped round.
+contract SepoliaTestUsdFeed {
+    address public immutable admin;
+    uint8 public immutable decimals;
+
+    uint80 internal roundId;
+    int256 internal answer;
+    uint256 internal startedAt;
+    uint256 internal updatedAt;
+
+    error Unauthorized();
+    error ZeroAddress();
+    error InvalidAnswer();
+    error InvalidDecimals();
+
+    constructor(int256 answer_, uint8 decimals_, address admin_) {
+        if (admin_ == address(0)) revert ZeroAddress();
+        if (answer_ <= 0) revert InvalidAnswer();
+        if (decimals_ > 18) revert InvalidDecimals();
+        admin = admin_;
+        decimals = decimals_;
+        _setAnswer(answer_);
+    }
+
+    function setAnswer(int256 answer_) external {
+        if (msg.sender != admin) revert Unauthorized();
+        if (answer_ <= 0) revert InvalidAnswer();
+        _setAnswer(answer_);
+    }
+
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        return (roundId, answer, startedAt, updatedAt, roundId);
+    }
+
+    function _setAnswer(int256 answer_) private {
+        roundId += 1;
+        answer = answer_;
+        startedAt = block.timestamp;
+        updatedAt = block.timestamp;
+    }
+}
+
 /// @notice Agent-administered test token for a public Sepolia loss rehearsal.
 /// @dev Staging only. It has no production or mainnet use.
 contract SepoliaLossToken is ERC20 {

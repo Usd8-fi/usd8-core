@@ -23,6 +23,8 @@ contract DeploySepoliaFastE2ESystemScript is Script {
     uint64 internal constant INCIDENT_PHASE_WINDOW = 30 minutes;
     uint64 internal constant MAX_REFERENCE_BLOCK_AGE = 43_200;
     uint128 internal constant USD8_SCORE_RATE = 138888888888889;
+    uint64 internal constant BOOSTER_ID = 1;
+    uint16 internal constant BOOSTER_BOOST_BPS = 100;
     uint256 internal constant POOL_SEED = 0.01 ether;
     address internal constant SEED_SINK = 0x000000000000000000000000000000000000dEaD;
 
@@ -43,12 +45,14 @@ contract DeploySepoliaFastE2ESystemScript is Script {
         address coverAsset = vm.envAddress("SEPOLIA_COVER_ASSET");
         address coverAssetUsdOracle = vm.envAddress("SEPOLIA_COVER_ASSET_USD_ORACLE");
         address usdcUsdOracle = vm.envAddress("SEPOLIA_USDC_USD_ORACLE");
+        address booster = vm.envAddress("SEPOLIA_BOOSTER");
         require(msg.sender == admin, "broadcaster/admin mismatch");
         require(usdc.code.length != 0 && coverAsset.code.length != 0, "missing mock asset");
         require(coverAssetUsdOracle.code.length != 0 && usdcUsdOracle.code.length != 0, "missing mock feed");
+        require(booster.code.length != 0, "missing booster");
 
         vm.startBroadcast();
-        s = _deploy(admin, usdc, coverAsset, coverAssetUsdOracle, usdcUsdOracle);
+        s = _deploy(admin, usdc, coverAsset, coverAssetUsdOracle, usdcUsdOracle, booster);
         vm.stopBroadcast();
         _log(s);
     }
@@ -58,19 +62,26 @@ contract DeploySepoliaFastE2ESystemScript is Script {
         address usdc,
         address coverAsset,
         address coverAssetUsdOracle,
-        address usdcUsdOracle
-    ) private returns (System memory s) {
+        address usdcUsdOracle,
+        address booster
+    ) internal returns (System memory s) {
         address[] memory proposers = new address[](1);
         proposers[0] = admin;
         address[] memory executors = new address[](1);
         executors[0] = address(0);
         s.timelock = new TimelockController(TIMELOCK_DELAY, proposers, executors, address(0));
 
-        s.registry = Registry(address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin)))));
+        s.registry = Registry(
+            address(new ERC1967Proxy(address(new Registry()), abi.encodeCall(Registry.initialize, (admin, admin))))
+        );
         s.usd8 = USD8(address(new ERC1967Proxy(address(new USD8()), abi.encodeCall(USD8.initialize, (s.registry)))));
         s.registry.setUsd8(address(s.usd8));
         s.treasury = Treasury(
-            address(new ERC1967Proxy(address(new Treasury()), abi.encodeCall(Treasury.initialize, (s.registry, IERC20(usdc)))))
+            address(
+                new ERC1967Proxy(
+                    address(new Treasury()), abi.encodeCall(Treasury.initialize, (s.registry, IERC20(usdc)))
+                )
+            )
         );
         s.registry.setTreasury(address(s.treasury));
 
@@ -92,17 +103,28 @@ contract DeploySepoliaFastE2ESystemScript is Script {
         require(s.pool.balanceOf(SEED_SINK) != 0, "cover seed missing");
         s.registry.addPool(address(s.pool), coverAssetUsdOracle);
         s.registry.setScoredToken(IERC20(address(s.usd8)), USD8_SCORE_RATE);
+        s.registry.setBoosterConfig(booster, BOOSTER_ID, BOOSTER_BOOST_BPS);
 
         s.insurance = DefiInsurance(
-            address(new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (s.registry))))
+            address(
+                new ERC1967Proxy(address(new DefiInsurance()), abi.encodeCall(DefiInsurance.initialize, (s.registry)))
+            )
         );
         s.registry.setDefiInsurance(address(s.insurance));
-        s.registry.setIncidentTimingConfig(
-            Registry.IncidentTimingConfig({phaseWindow: INCIDENT_PHASE_WINDOW, maxReferenceBlockAge: MAX_REFERENCE_BLOCK_AGE})
-        );
-        s.insurance.editInsuredToken(
-            IERC20(address(s.usd8)), 8000, usdcUsdOracle, address(s.treasury), abi.encodeCall(Treasury.usd8ToUsdcRate, ())
-        );
+        s.registry
+            .setIncidentTimingConfig(
+                Registry.IncidentTimingConfig({
+                    phaseWindow: INCIDENT_PHASE_WINDOW, maxReferenceBlockAge: MAX_REFERENCE_BLOCK_AGE
+                })
+            );
+        s.insurance
+            .editInsuredToken(
+                IERC20(address(s.usd8)),
+                8000,
+                usdcUsdOracle,
+                address(s.treasury),
+                abi.encodeCall(Treasury.usd8ToUsdcRate, ())
+            );
         // Temporary E2E-only signer. A later fast-timelock operation revokes it after resolution.
         s.insurance.setTeeSigner(admin, true);
 

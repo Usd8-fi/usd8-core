@@ -31,6 +31,7 @@ contract TreasuryHandler is Test {
     uint256 public ghostHarvested;
     uint256 public ghostPendingRevenue;
     uint256 public ghostDistributedRevenue;
+    uint256 public ghostProtocolFees;
     uint256 public ghostBurned;
     uint256 public ghostReserve;
 
@@ -186,23 +187,27 @@ contract TreasuryHandler is Test {
         uint256 supplyBefore = usd8.totalSupply();
         uint256 reserveBefore = treasury.getReserveBalance();
         uint256 treasuryRevenueBefore = usd8.balanceOf(address(treasury));
-        uint256 receiverBefore = usd8.balanceOf(yieldReceiver);
+        Registry.ProtocolFeeConfig memory feeConfig = registry.protocolFeeConfig();
         uint256 retain = supplyBefore + supplyBefore / treasury.HARVEST_BUFFER_DIVISOR();
         uint256 reserveInUsd8 = reserveBefore * SCALE;
         uint256 expectedHarvest = reserveInUsd8 > retain ? reserveInUsd8 - retain : 0;
         uint256 expectedDistribution = treasuryRevenueBefore + expectedHarvest;
+        uint256 expectedProtocolFee = Math.mulDiv(expectedDistribution, feeConfig.reserveYieldFeeBps, 10_000);
+        uint256 expectedReceiverDistribution = expectedDistribution - expectedProtocolFee;
 
         vm.prank(admin);
         (uint256 harvested, uint256 distributed) = treasury.harvestAndDistribute();
         ghostHarvested += expectedHarvest;
-        ghostDistributedRevenue += expectedDistribution;
+        ghostDistributedRevenue += expectedReceiverDistribution;
+        ghostProtocolFees += expectedProtocolFee;
         ghostPendingRevenue = 0;
 
         assertEq(harvested, expectedHarvest, "harvest formula");
         assertEq(distributed, expectedDistribution, "distribution formula");
         assertEq(usd8.totalSupply(), supplyBefore + expectedHarvest, "harvest supply delta");
         assertEq(treasury.getReserveBalance(), reserveBefore, "harvest moved reserve");
-        assertEq(usd8.balanceOf(yieldReceiver), receiverBefore + expectedDistribution, "receiver delta");
+        assertEq(usd8.balanceOf(yieldReceiver), ghostDistributedRevenue, "receiver delta");
+        assertEq(usd8.balanceOf(feeConfig.receiver), ghostProtocolFees, "fee receiver delta");
         assertEq(usd8.balanceOf(address(treasury)), 0, "revenue stranded");
     }
 
@@ -422,6 +427,7 @@ contract TreasuryInvariantTest is StdInvariant, Test {
 
     function invariant_harvestedRevenueReachedReceiver() public view {
         assertEq(usd8.balanceOf(YIELD_RECEIVER), handler.ghostDistributedRevenue(), "receiver distribution mismatch");
+        assertEq(usd8.balanceOf(ADMIN), handler.ghostProtocolFees(), "protocol fee distribution mismatch");
     }
 
     function invariant_noRevenueIsStrandedInTreasury() public view {
@@ -429,7 +435,7 @@ contract TreasuryInvariantTest is StdInvariant, Test {
     }
 
     function invariant_allUsd8IsAccountedFor() public view {
-        uint256 accounted = usd8.balanceOf(YIELD_RECEIVER) + usd8.balanceOf(address(treasury));
+        uint256 accounted = usd8.balanceOf(YIELD_RECEIVER) + usd8.balanceOf(ADMIN) + usd8.balanceOf(address(treasury));
         for (uint256 i = 0; i < 5; i++) {
             accounted += usd8.balanceOf(handler.actorAt(i));
         }

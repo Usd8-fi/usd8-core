@@ -36,19 +36,31 @@ contract ScheduleSepoliaFastE2EFixtureScript is Script {
         private
         returns (bytes32 id)
     {
-        address[] memory targets = new address[](1); uint256[] memory values = new uint256[](1); bytes[] memory payloads = new bytes[](1);
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory payloads = new bytes[](1);
         targets[0] = address(i);
-        payloads[0] = abi.encodeCall(DefiInsurance.editInsuredToken, (IERC20(vault), 8000, oracle, vault, abi.encodeCall(IERC4626.convertToAssets, (1e18))));
+        payloads[0] = abi.encodeCall(
+            DefiInsurance.editInsuredToken,
+            (IERC20(vault), 8000, oracle, vault, abi.encodeCall(IERC4626.convertToAssets, (1e18)))
+        );
         id = t.hashOperationBatch(targets, values, payloads, bytes32(0), LIST_SALT);
         require(!t.isOperation(id), "listing exists");
-        vm.startBroadcast(); t.scheduleBatch(targets, values, payloads, bytes32(0), LIST_SALT, t.getMinDelay()); vm.stopBroadcast();
+        vm.startBroadcast();
+        t.scheduleBatch(targets, values, payloads, bytes32(0), LIST_SALT, t.getMinDelay());
+        vm.stopBroadcast();
     }
 
     function _scheduleRevoke(TimelockController t, DefiInsurance i, address admin) private returns (bytes32 id) {
-        address[] memory targets = new address[](1); uint256[] memory values = new uint256[](1); bytes[] memory payloads = new bytes[](1);
-        targets[0] = address(i); payloads[0] = abi.encodeCall(DefiInsurance.setTeeSigner, (admin, false));
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory payloads = new bytes[](1);
+        targets[0] = address(i);
+        payloads[0] = abi.encodeCall(DefiInsurance.setTeeSigner, (admin, false));
         id = t.hashOperationBatch(targets, values, payloads, bytes32(0), REVOKE_SALT);
         require(!t.isOperation(id), "revoke exists");
-        vm.startBroadcast(); t.scheduleBatch(targets, values, payloads, bytes32(0), REVOKE_SALT, t.getMinDelay()); vm.stopBroadcast();
+        vm.startBroadcast();
+        t.scheduleBatch(targets, values, payloads, bytes32(0), REVOKE_SALT, t.getMinDelay());
+        vm.stopBroadcast();
     }
 }

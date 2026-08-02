@@ -252,6 +252,95 @@ fn relative_payouts_use_boosted_not_raw_scores() {
 }
 
 #[test]
+fn many_claimants_share_an_underfunded_pool_by_score_with_ineligible_rows_excluded() {
+    let mut claims = Vec::new();
+    for index in 0u64..10 {
+        let score = (index + 1) * 10;
+        claims.push(ClaimInput {
+            claim_id: (index + 1).into(),
+            user: address(&format!("0x{value:040x}", value = 0x1000 + index)),
+            escrow_amount: wad(50 + index * 10),
+            min_held: wad(50 + index * 10),
+            gross_earned_score: score.into(),
+            spent_score: 0u8.into(),
+            score_to_spend: score.into(),
+            booster_amount: 0u8.into(),
+        });
+    }
+    claims.push(ClaimInput {
+        claim_id: 11u8.into(),
+        user: address("0x0000000000000000000000000000000000002000"),
+        escrow_amount: wad(150),
+        min_held: 0u8.into(),
+        gross_earned_score: 1_000u16.into(),
+        spent_score: 0u8.into(),
+        score_to_spend: 1_000u16.into(),
+        booster_amount: 100u8.into(),
+    });
+
+    let output = allocate(&KernelInput {
+        incident_id: 77u8.into(),
+        coverage_bps: 8_000u16.into(),
+        booster_boost_bps: 100u8.into(),
+        insured_decimals: 18,
+        twap_ratio: wad(1),
+        underlying_usd: wad(1),
+        max_cover_pool_payout_bps: 5_000u16.into(),
+        protocol_fee_share_bps: 2_000u16.into(),
+        pools: vec![PoolInput {
+            balance: n("1000000000"),
+            asset_usd: wad(1),
+            asset_decimals: 6,
+        }],
+        claims,
+    })
+    .unwrap();
+
+    assert_eq!(output.rows.len(), 11);
+
+    // Independent integer oracle: the pool has $1,000, the incident may draw 50%
+    // gross, and claimants receive 80% after the snapshotted protocol share.
+    // Therefore $400 is distributed across the eligible score denominator 550.
+    let claimant_capacity = wad(400);
+    let score_denominator = BigUint::from(550u16);
+    let usdc_scale = n("1000000000000");
+    let mut expected_gross_pool_payout = BigUint::from(0u8);
+    for (index, row) in output.rows.iter().take(10).enumerate() {
+        let score = BigUint::from((index as u64 + 1) * 10);
+        let expected_payout_usd = (&claimant_capacity * &score) / &score_denominator;
+        let expected_usdc = &expected_payout_usd / &usdc_scale;
+        let claim_amount = wad(50 + index as u64 * 10);
+        let individual_cap = (&claim_amount * BigUint::from(8_000u16)) / BigUint::from(10_000u16);
+
+        assert_eq!(row.eligible_amount, claim_amount);
+        assert_eq!(row.score_spent, score);
+        assert_eq!(row.boosted_score, score);
+        assert_eq!(row.payout_usd, expected_payout_usd);
+        assert_eq!(row.amounts, vec![expected_usdc.clone()]);
+        assert!(
+            row.payout_usd < individual_cap,
+            "claim unexpectedly hit its coverage cap"
+        );
+        expected_gross_pool_payout +=
+            (&expected_usdc * BigUint::from(10_000u16)) / BigUint::from(8_000u16);
+    }
+
+    let ineligible = &output.rows[10];
+    assert_eq!(ineligible.eligible_amount, BigUint::from(0u8));
+    assert_eq!(ineligible.score_spent, BigUint::from(0u8));
+    assert_eq!(ineligible.boosted_score, BigUint::from(0u8));
+    assert_eq!(ineligible.payout_usd, BigUint::from(0u8));
+    assert_eq!(ineligible.amounts, vec![BigUint::from(0u8)]);
+    assert!(output.proofs.contains_key(&BigUint::from(11u8)));
+
+    // A non-filer is absent altogether: no row, payout, score spend, or bond.
+    let non_filer = address("0x0000000000000000000000000000000000003000");
+    assert!(output.rows.iter().all(|row| row.user != non_filer));
+    assert_eq!(expected_gross_pool_payout, n("499999990"));
+    assert_eq!(output.pool_payouts, vec![expected_gross_pool_payout]);
+}
+
+#[test]
 fn standard_merkle_root_and_proofs_match_golden_vectors() {
     let rows = vec![
         MerkleRow {

@@ -16,14 +16,22 @@ contract ExecuteSepoliaFastE2EFixtureListingScript is Script {
         DefiInsurance insurance = DefiInsurance(vm.envAddress("SEPOLIA_DEFI_INSURANCE"));
         address vault = vm.envAddress("SEPOLIA_LOSS_VAULT");
         address oracle = vm.envAddress("SEPOLIA_USDC_USD_ORACLE");
-        address[] memory targets = new address[](1); uint256[] memory values = new uint256[](1); bytes[] memory payloads = new bytes[](1);
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory payloads = new bytes[](1);
         targets[0] = address(insurance);
-        payloads[0] = abi.encodeCall(DefiInsurance.editInsuredToken, (IERC20(vault), 8000, oracle, vault, abi.encodeCall(IERC4626.convertToAssets, (1e18))));
+        payloads[0] = abi.encodeCall(
+            DefiInsurance.editInsuredToken,
+            (IERC20(vault), 8000, oracle, vault, abi.encodeCall(IERC4626.convertToAssets, (1e18)))
+        );
         bytes32 id = timelock.hashOperationBatch(targets, values, payloads, bytes32(0), LIST_SALT);
         require(timelock.isOperationReady(id), "listing not ready");
         require(!insurance.isInsuredToken(IERC20(vault)), "fixture already listed");
-        vm.startBroadcast(); timelock.executeBatch(targets, values, payloads, bytes32(0), LIST_SALT); vm.stopBroadcast();
+        vm.startBroadcast();
+        timelock.executeBatch(targets, values, payloads, bytes32(0), LIST_SALT);
+        vm.stopBroadcast();
         require(insurance.isInsuredToken(IERC20(vault)), "listing failed");
-        console2.log("Executed fast E2E fixture listing"); console2.logBytes32(id);
+        console2.log("Executed fast E2E fixture listing");
+        console2.logBytes32(id);
     }
 }

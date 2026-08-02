@@ -85,7 +85,9 @@ contract ScheduleSepoliaLossE2EScript is Script {
         targets[1] = address(registry);
         payloads[1] = abi.encodeCall(
             Registry.setIncidentTimingConfig,
-            (Registry.IncidentTimingConfig({phaseWindow: TESTNET_PHASE_WINDOW, maxReferenceBlockAge: MAX_REFERENCE_BLOCK_AGE}))
+            (Registry.IncidentTimingConfig({
+                    phaseWindow: TESTNET_PHASE_WINDOW, maxReferenceBlockAge: MAX_REFERENCE_BLOCK_AGE
+                }))
         );
     }
 
@@ -100,7 +102,9 @@ contract ScheduleSepoliaLossE2EScript is Script {
         targets[0] = address(registry);
         payloads[0] = abi.encodeCall(
             Registry.setIncidentTimingConfig,
-            (Registry.IncidentTimingConfig({phaseWindow: CANONICAL_PHASE_WINDOW, maxReferenceBlockAge: MAX_REFERENCE_BLOCK_AGE}))
+            (Registry.IncidentTimingConfig({
+                    phaseWindow: CANONICAL_PHASE_WINDOW, maxReferenceBlockAge: MAX_REFERENCE_BLOCK_AGE
+                }))
         );
     }
 }

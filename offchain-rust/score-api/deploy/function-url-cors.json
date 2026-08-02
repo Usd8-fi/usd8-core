@@ -1,0 +1,8 @@
+{
+  "AllowOrigins": ["https://usd8-fi.github.io"],
+  "AllowMethods": ["GET"],
+  "AllowHeaders": ["content-type"],
+  "ExposeHeaders": ["cache-control", "x-usd8-score-cache"],
+  "MaxAge": 300,
+  "AllowCredentials": false
+}
