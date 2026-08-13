@@ -3946,6 +3946,22 @@ contract SingleAssetCoverPoolTest is Test {
         defi.adminCorrectSettlement(corrRoot, pp);
     }
 
+    function test_FinalizationOpensImmediatelyAfterSettlementWhenBetaEnded() public {
+        vm.prank(admin); // admin == timelock in this harness
+        registry.endBetaMode();
+
+        uint256 claimId = _registerClaim(bob, lp1, 50e18);
+        vm.warp(block.timestamp + 5 days + 1);
+        uint256[] memory amounts = _amounts(0);
+        _settle(1, _leaf(1, claimId, bob, amounts));
+
+        vm.warp(block.timestamp + 1);
+        _finalize(claimId, amounts, 0);
+
+        (,,,,, bool resolved) = defi.claims(claimId);
+        assertTrue(resolved);
+    }
+
     function test_EndBetaModeRejectedDuringActiveIncident() public {
         _registerClaim(bob, lp1, 50e18);
 

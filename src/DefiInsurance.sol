@@ -109,7 +109,7 @@ contract DefiInsurance is
     /// @param referenceBlock Pre-incident valuation block.
     /// @param openBlock Block used to archive-read settlement configuration.
     /// @param phaseDeadline Current phase deadline. It is the claim deadline while
-    ///        `root == 0`, then the correction deadline after settlement.
+    ///        `root == 0`, then the correction deadline during beta or settlement time after beta.
 
     /// @param root Standing settlement Merkle root, or zero.
     /// @param unresolvedClaims Number of live claims; zero resolves the incident.
@@ -712,8 +712,8 @@ contract DefiInsurance is
         emit IncidentCorrected(incidentId, root);
     }
 
-    /// @dev Commit a root and capped per-pool budgets, start its correction window, and
-    ///      delist the affected token.
+    /// @dev Commit a root and capped per-pool budgets, start its beta correction window, and
+    ///      delist the affected token. Finalization opens immediately after beta.
     function _commitRoot(uint256 incidentId, Incident storage inc, bytes32 root, uint256[] calldata poolPayouts)
         private
     {
@@ -728,7 +728,8 @@ contract DefiInsurance is
         inc.poolBudget = poolPayouts;
 
         inc.root = root;
-        inc.phaseDeadline = uint64(block.timestamp) + incidentPhaseWindow[incidentId];
+        inc.phaseDeadline =
+            registry().betaMode() ? uint64(block.timestamp) + incidentPhaseWindow[incidentId] : uint64(block.timestamp);
         _delistInsuredToken(inc.insuredToken);
     }
 
