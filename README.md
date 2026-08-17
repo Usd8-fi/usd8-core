@@ -190,7 +190,7 @@ Settlement artifacts, Merkle leaves, pricing anchors, TEE attestation, RPC compl
 
 USD8 currently relies on its timelock and defined admin roles, which are trusted by design.
 
-- The timelock controls upgrades, strategy and swap-route approval, insured-token configuration, settlement parameters, TEE signers, and permanent beta termination.
+- The timelock controls upgrades, strategy approval, insured-token configuration, settlement parameters, TEE signers, and permanent beta termination.
 - Admins retain immediate operational powers including pauses, reserve operations, and profit routing. During beta, an admin or the timelock may also correct settlement roots.
 - Any authorized TEE signer can authorize an incident open or sign a settlement root. Results are independently reproducible from the open-source Rust runtime.
 - Pool, token, strategy, oracle, and profit-routing configuration must be reviewed operationally; the contracts do not attempt to defend against every trusted-role misconfiguration.

@@ -69,7 +69,6 @@ contract RegistryTopologyHandler is Test {
     bool public ghostManagedAdmin;
     bool public ghostBetaMode = true;
     bool public ghostModuleInstalled = true;
-    bool public ghostSwapRoute;
 
     uint256 public ghostMaxPayoutBps = 5_000;
     uint64 public ghostMaxOracleStaleness = 36 hours;
@@ -245,12 +244,6 @@ contract RegistryTopologyHandler is Test {
         successfulBetaEnd++;
     }
 
-    function setSwapRoute(bool allowed) external {
-        vm.prank(currentTimelock);
-        registry.setSwapRoute(address(0x5151), address(0x5252), allowed);
-        ghostSwapRoute = allowed;
-    }
-
     function frozenMutationsRemainAtomic() external {
         if (!registry.payoutIncidentActive()) return;
         uint256 bpsBefore = registry.maxCoverPoolPayoutBps();
@@ -339,7 +332,7 @@ contract RegistryTopologyInvariantTest is StdInvariant, Test {
 
         handler = new RegistryTopologyHandler(registry, module, TIMELOCK, ADMIN, MANAGED_ADMIN, tokens, pools, feeds);
 
-        bytes4[] memory selectors = new bytes4[](14);
+        bytes4[] memory selectors = new bytes4[](13);
         selectors[0] = RegistryTopologyHandler.togglePool.selector;
         selectors[1] = RegistryTopologyHandler.appendScoredRate.selector;
         selectors[2] = RegistryTopologyHandler.setIncidentActive.selector;
@@ -352,8 +345,7 @@ contract RegistryTopologyInvariantTest is StdInvariant, Test {
         selectors[9] = RegistryTopologyHandler.rotateTimelock.selector;
         selectors[10] = RegistryTopologyHandler.recordScore.selector;
         selectors[11] = RegistryTopologyHandler.endBetaMode.selector;
-        selectors[12] = RegistryTopologyHandler.setSwapRoute.selector;
-        selectors[13] = RegistryTopologyHandler.frozenMutationsRemainAtomic.selector;
+        selectors[12] = RegistryTopologyHandler.frozenMutationsRemainAtomic.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -473,9 +465,5 @@ contract RegistryTopologyInvariantTest is StdInvariant, Test {
             total += actual;
         }
         assertEq(total, handler.ghostScoreSpent(), "score total drift");
-    }
-
-    function invariant_swapRouteMatchesGhost() public view {
-        assertEq(registry.approvedSwapRoute(address(0x5151), address(0x5252)), handler.ghostSwapRoute());
     }
 }

@@ -142,12 +142,6 @@ contract Registry is Initializable, UUPSUpgradeable {
     ///         Global by design; governance admits only feeds whose heartbeat fits.
     uint64 public maxOracleStaleness;
 
-    /// @notice Timelock-approved `(call target, token approval spender)` pairs
-    ///         that strategies may use for reward-token swaps. The addresses are
-    ///         separate because aggregators such as 0x can execute through one
-    ///         contract while pulling tokens through another.
-    mapping(address target => mapping(address spender => bool allowed)) public approvedSwapRoute;
-
     /// @notice Global timing used by future insurance incidents.
     struct IncidentTimingConfig {
         uint64 phaseWindow;
@@ -221,7 +215,7 @@ contract Registry is Initializable, UUPSUpgradeable {
     event Usd8PriceOracleSet(address indexed oldOracle, address indexed newOracle);
     event AssetUsdFeedSet(IERC20 indexed asset, address indexed oldFeed, address indexed newFeed);
     event MaxOracleStalenessSet(uint64 oldStaleness, uint64 newStaleness);
-    event SwapRouteSet(address indexed target, address indexed spender, bool allowed);
+
     event IncidentTimingConfigSet(IncidentTimingConfig config);
     event ExitTimingConfigSet(ExitTimingConfig config);
     event IncidentOpenPriceConfigSet(IncidentOpenPriceConfig config);
@@ -364,16 +358,6 @@ contract Registry is Initializable, UUPSUpgradeable {
         if (account == address(0)) revert ZeroAddress();
         isAdmin[account] = allowed;
         emit AdminSet(account, allowed);
-    }
-
-    /// @notice Approve or revoke an aggregator execution-target / allowance-
-    ///         spender pair used by strategies. Timelock only; admins may execute
-    ///         swaps but cannot widen the contracts that receive calls or approvals.
-    function setSwapRoute(address target, address spender, bool allowed) external {
-        _requireTimelock(msg.sender);
-        if (target == address(0) || spender == address(0)) revert ZeroAddress();
-        approvedSwapRoute[target][spender] = allowed;
-        emit SwapRouteSet(target, spender, allowed);
     }
 
     /// @notice Set the exact enclave-code PCR commitment accepted by settlement.

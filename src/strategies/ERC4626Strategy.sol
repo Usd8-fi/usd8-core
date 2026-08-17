@@ -15,14 +15,13 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IStrategy} from "../interfaces/IStrategy.sol";
 import {Registry} from "../Registry.sol";
-import {ITreasuryReserveAsset, StrategyBase} from "./StrategyBase.sol";
+import {StrategyBase} from "./StrategyBase.sol";
 
 /// @title ERC4626Strategy
 /// @notice Treasury adapter for a fixed ERC-4626 vault whose asset is USDC.
 /// @dev Only Treasury can deploy or withdraw principal. Deposits reject zero shares
 ///      and value loss beyond ERC-4626 rounding. Withdrawals must deliver the full
 ///      requested USDC atomically. Current value is the vault value of held shares.
-///      Swap routes remain limited by {StrategyBase} and Registry approval.
 /// @custom:security-contact rick@usd8.fi
 contract ERC4626Strategy is IStrategy, StrategyBase {
     using SafeERC20 for IERC20;
@@ -50,11 +49,9 @@ contract ERC4626Strategy is IStrategy, StrategyBase {
     event Withdrawn(uint256 amount);
 
     /// @param _treasury The Treasury contract that owns this strategy.
-    /// @param _registry Shared role and approved-swap-route registry.
+    /// @param _registry Shared role and pause registry.
     /// @param _vault    The ERC-4626 vault to deposit into. Must report asset() == USDC.
-    constructor(address _treasury, Registry _registry, IERC4626 _vault)
-        StrategyBase(_treasury, _registry, ITreasuryReserveAsset(_treasury).USDC())
-    {
+    constructor(address _treasury, Registry _registry, IERC4626 _vault) StrategyBase(_treasury, _registry) {
         if (address(_vault) == address(0)) revert ZeroAddress();
         address vaultAsset = _vault.asset();
         if (vaultAsset != address(USDC)) revert VaultAssetMismatch(address(USDC), vaultAsset);
@@ -107,13 +104,5 @@ contract ERC4626Strategy is IStrategy, StrategyBase {
     ///      and any fee-share dilution at the current vault share price.
     function totalAssets() public view returns (uint256) {
         return vault.convertToAssets(vault.balanceOf(address(this)));
-    }
-
-    function _isPositionToken(address token) internal view override returns (bool) {
-        return token == address(vault);
-    }
-
-    function _principalBalance() internal view override returns (uint256) {
-        return vault.balanceOf(address(this));
     }
 }
