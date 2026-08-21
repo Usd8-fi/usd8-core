@@ -137,6 +137,11 @@ async fn http_transport_retries_without_counting_extra_logical_requests() {
             .iter()
             .all(|request| request.contains("eth_chainId"))
     );
+    assert!(captured.iter().all(|request| {
+        request
+            .to_ascii_lowercase()
+            .contains("user-agent: usd8-settlement/0.1")
+    }));
 }
 
 #[tokio::test]

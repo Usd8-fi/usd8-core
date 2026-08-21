@@ -12,6 +12,7 @@ use thiserror::Error;
 
 const TRUSTED_DRPC_HOSTS: [&str; 2] = ["lb.drpc.org", "lb.drpc.live"];
 const DRPC_HEADER: HeaderName = HeaderName::from_static("drpc-key");
+const RPC_USER_AGENT: &str = "usd8-settlement/0.1";
 const MAX_RPC_TIMEOUT_MS: u64 = 120_000;
 const MAX_RPC_RETRIES: u32 = 8;
 const MAX_RPC_RETRY_DELAY_MS: u64 = 10_000;
@@ -221,6 +222,7 @@ impl HttpRpc {
         }
         let mut client_builder = reqwest::Client::builder()
             .default_headers(headers)
+            .user_agent(RPC_USER_AGENT)
             .redirect(Policy::none())
             .timeout(Duration::from_millis(timeout_ms));
         if let Some(proxy_url) = proxy_url {
