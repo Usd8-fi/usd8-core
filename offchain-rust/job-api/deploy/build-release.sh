@@ -4,12 +4,16 @@ set -euo pipefail
 EXPECTED_SIGNER=${EXPECTED_SIGNER:?set EXPECTED_SIGNER}
 NETWORK=${NETWORK:?set NETWORK to sepolia}
 REGISTRY=${REGISTRY:?set REGISTRY}
+DEFI_INSURANCE=${DEFI_INSURANCE:?set DEFI_INSURANCE}
 OUT=${OUT_DIR:?set OUT_DIR to a new release-build directory}
 [[ "$EXPECTED_SIGNER" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
   echo 'EXPECTED_SIGNER must be a 20-byte 0x hex address' >&2; exit 2;
 }
 [[ "$REGISTRY" =~ ^0x[0-9a-fA-F]{40}$ && "$REGISTRY" != 0x0000000000000000000000000000000000000000 ]] || {
   echo 'REGISTRY must be a nonzero 20-byte 0x hex address' >&2; exit 2;
+}
+[[ "$DEFI_INSURANCE" =~ ^0x[0-9a-fA-F]{40}$ && "$DEFI_INSURANCE" != 0x0000000000000000000000000000000000000000 ]] || {
+  echo 'DEFI_INSURANCE must be a nonzero 20-byte 0x hex address' >&2; exit 2;
 }
 [[ "$NETWORK" == sepolia ]] || { echo 'NETWORK must be sepolia' >&2; exit 2; }
 ROOT_FEATURES=(--features sepolia)
@@ -138,7 +142,7 @@ jq -n \
   --arg pcr0 "$PCR0" --arg pcr1 "$PCR1" --arg pcr2 "$PCR2" --arg pcr3 "$PCR3" \
   --arg teePcrHash "$TEE_PCR_HASH" \
   --arg network "$NETWORK" --argjson chainId "$CHAIN_ID" \
-  --arg registry "$REGISTRY" --arg signer "$EXPECTED_SIGNER" \
+  --arg registry "$REGISTRY" --arg defiInsurance "$DEFI_INSURANCE" --arg signer "$EXPECTED_SIGNER" \
   --arg eif "$EIF_SHA256" --arg parent "$PARENT_SHA256" \
   --arg settlement "$SETTLEMENT_SHA256" --arg lambda "$LAMBDA_SHA256" \
   --arg janitor "$JANITOR_SHA256" --arg kmsPolicy "$KMS_POLICY_SHA256" \
@@ -154,6 +158,7 @@ jq -n \
     chainId: $chainId,
     network: $network,
     registry: $registry,
+    defiInsurance: $defiInsurance,
     teePcrHash: $teePcrHash,
     signer: $signer,
     artifacts: {

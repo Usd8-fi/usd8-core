@@ -373,6 +373,8 @@ def verify_live_chain(manifest: dict[str, Any], rpc_url: str) -> None:
     defi_insurance = "0x" + defi_insurance_word[-40:]
     if int(defi_insurance, 16) == 0:
         fail("live Registry defiInsurance is zero")
+    if defi_insurance.lower() != manifest["defiInsurance"].lower():
+        fail("live Registry defiInsurance differs from manifest")
     defi_insurance_code = rpc_json(rpc_url, "eth_getCode", [defi_insurance, "latest"])
     if not isinstance(defi_insurance_code, str) or not re.fullmatch(r"0x(?:[0-9a-fA-F]{2})+", defi_insurance_code):
         fail("live DefiInsurance has no bytecode")
@@ -493,6 +495,8 @@ def verify(
         fail("release network must be Sepolia (chain ID 11155111)")
     if not ADDRESS.fullmatch(str(manifest.get("registry", ""))) or int(manifest["registry"], 16) == 0:
         fail("registry is invalid")
+    if not ADDRESS.fullmatch(str(manifest.get("defiInsurance", ""))) or int(manifest["defiInsurance"], 16) == 0:
+        fail("defiInsurance is invalid")
     if not ADDRESS.fullmatch(str(manifest.get("signer", ""))) or int(manifest["signer"], 16) == 0:
         fail("signer is invalid")
     measurements = manifest.get("Measurements", {})

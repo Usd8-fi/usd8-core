@@ -27,12 +27,20 @@ class ReleaseManifestTest(unittest.TestCase):
         return {
             "chainId": 11155111,
             "registry": "0x" + "9" * 40,
+            "defiInsurance": "0x" + "c" * 40,
             "teePcrHash": "0x" + "a" * 64,
             "signer": "0x" + "b" * 40,
         }
 
-    def chain_rpc(self, manifest: dict, *, pcr: Optional[str] = None, signer_authorized: bool = True):
-        defi_insurance = "0x" + "c" * 40
+    def chain_rpc(
+        self,
+        manifest: dict,
+        *,
+        pcr: Optional[str] = None,
+        signer_authorized: bool = True,
+        defi_insurance: Optional[str] = None,
+    ):
+        defi_insurance = defi_insurance or manifest["defiInsurance"]
 
         def request(_rpc_url: str, method: str, params: list):
             if method == "eth_chainId":
@@ -131,6 +139,16 @@ class ReleaseManifestTest(unittest.TestCase):
             side_effect=self.chain_rpc(manifest, pcr="0x" + "d" * 64),
         ):
             with self.assertRaisesRegex(SystemExit, "teePcrHash differs"):
+                VERIFY_MODULE.verify_live_chain(manifest, "https://sepolia.example.invalid")
+
+    def test_live_chain_preflight_rejects_unexpected_defi_insurance(self) -> None:
+        manifest = self.chain_manifest()
+        with mock.patch.object(
+            VERIFY_MODULE,
+            "rpc_json",
+            side_effect=self.chain_rpc(manifest, defi_insurance="0x" + "d" * 40),
+        ):
+            with self.assertRaisesRegex(SystemExit, "defiInsurance differs"):
                 VERIFY_MODULE.verify_live_chain(manifest, "https://sepolia.example.invalid")
 
     def test_live_chain_preflight_rejects_unauthorized_manifest_signer(self) -> None:
@@ -258,6 +276,7 @@ class ReleaseManifestTest(unittest.TestCase):
             "chainId": 11155111,
             "network": "sepolia",
             "registry": "0x" + "9" * 40,
+            "defiInsurance": "0x" + "c" * 40,
             "teePcrHash": TEE_PCR_HASH,
             "signer": "0x" + "b" * 40,
             "artifacts": entries,
