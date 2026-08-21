@@ -13,11 +13,17 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use lambda_http::{Body, Error, Request, Response, service_fn};
 use std::env;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use usd8_settlement::Address;
+use usd8_settlement::incident_open::{
+    IncidentOpenError, IncidentOpenPrecheck, precheck_incident_open,
+};
+use usd8_settlement::rpc::HttpRpc;
 use usd8_tee_job_api::{
-    App, AppConfig, CreateOutcome, InstanceLauncher, JobPaths, JobStore, LaunchTemplate,
-    ServiceError, WorkerCapabilities,
+    App, AppConfig, CanonicalRequest, CreateOutcome, InstanceLauncher, JobPaths, JobStore,
+    LaunchTemplate, ServiceError, WorkerCapabilities, canonicalize_open_request,
 };
 
 const MAX_REQUEST_BYTES: usize = 4096;
@@ -25,6 +31,45 @@ const CAPABILITY_BOOT_MARGIN_SECONDS: u64 = 900;
 const MAX_S3_PRESIGN_TTL_SECONDS: u64 = 604_800;
 const SIGNER_OBJECT: &str = "secrets/signer.bin";
 const DRPC_OBJECT: &str = "secrets/drpc.bin";
+const PRECHECK_TIMEOUT_SECONDS: u64 = 24;
+
+struct OpenPrechecker {
+    rpc: HttpRpc,
+    registry: Address,
+    configured_registry: String,
+}
+
+impl OpenPrechecker {
+    async fn check(&self, body: &[u8]) -> Result<IncidentOpenPrecheck, OpenPrecheckError> {
+        let request = canonicalize_open_request(body, &self.configured_registry)
+            .map_err(|_| OpenPrecheckError::InvalidRequest)?;
+        let CanonicalRequest::Open(request) = request else {
+            return Err(OpenPrecheckError::InvalidRequest);
+        };
+        let insured_token = Address::from_str(&request.insured_token)
+            .map_err(|_| OpenPrecheckError::InvalidRequest)?;
+        tokio::time::timeout(
+            Duration::from_secs(PRECHECK_TIMEOUT_SECONDS),
+            precheck_incident_open(&self.rpc, self.registry, insured_token),
+        )
+        .await
+        .map_err(|_| OpenPrecheckError::Unavailable)?
+        .map_err(OpenPrecheckError::Incident)
+    }
+}
+
+fn open_job_key(precheck: &IncidentOpenPrecheck) -> String {
+    format!(
+        "open:{}:{}",
+        precheck.insured_token, precheck.reference_block
+    )
+}
+
+enum OpenPrecheckError {
+    InvalidRequest,
+    Incident(IncidentOpenError),
+    Unavailable,
+}
 
 struct S3Store {
     client: aws_sdk_s3::Client,
@@ -326,8 +371,28 @@ fn error_response(error: ServiceError) -> Result<Response<Body>, Error> {
     json_response(status, &serde_json::json!({ "error": code }))
 }
 
+fn precheck_error_response(error: OpenPrecheckError) -> Result<Response<Body>, Error> {
+    let (status, code) = match error {
+        OpenPrecheckError::InvalidRequest => (400, "INVALID_REQUEST"),
+        OpenPrecheckError::Incident(IncidentOpenError::InsufficientPriceDrop { .. }) => {
+            (422, "PRICE_DROP_NOT_DETECTED")
+        }
+        OpenPrecheckError::Incident(IncidentOpenError::ActiveIncident) => {
+            (409, "INCIDENT_ALREADY_ACTIVE")
+        }
+        OpenPrecheckError::Incident(IncidentOpenError::UnapprovedToken) => {
+            (400, "UNAPPROVED_TOKEN")
+        }
+        OpenPrecheckError::Incident(_) | OpenPrecheckError::Unavailable => {
+            (503, "PRICE_PRECHECK_UNAVAILABLE")
+        }
+    };
+    json_response(status, &serde_json::json!({ "error": code }))
+}
+
 async fn handle(
     app: Arc<App<S3Store, Ec2Launcher>>,
+    open_prechecker: Arc<OpenPrechecker>,
     request: Request,
 ) -> Result<Response<Body>, Error> {
     let method = request.method().as_str();
@@ -342,7 +407,12 @@ async fn handle(
         match key {
             Ok(key) if request.body().as_ref().len() <= MAX_REQUEST_BYTES => {
                 let submitted = if path == "/jobs/open" {
-                    app.submit_open(key, request.body().as_ref()).await
+                    let precheck = match open_prechecker.check(request.body().as_ref()).await {
+                        Ok(precheck) => precheck,
+                        Err(error) => return precheck_error_response(error),
+                    };
+                    app.submit_open(&open_job_key(&precheck), request.body().as_ref())
+                        .await
                 } else {
                     app.submit(key, request.body().as_ref()).await
                 };
@@ -386,9 +456,21 @@ async fn main() -> Result<(), Error> {
         .region(Region::new(region.clone()))
         .load()
         .await;
+    let registry = required("USD8_REGISTRY")?;
+    let open_prechecker = Arc::new(OpenPrechecker {
+        rpc: HttpRpc::new_with_retry_delay(
+            &required("USD8_PRECHECK_RPC_URL")?,
+            None,
+            3_000,
+            1,
+            100,
+        )?,
+        registry: Address::from_str(&registry).map_err(|_| "USD8_REGISTRY is invalid")?,
+        configured_registry: registry.clone(),
+    });
     let app = Arc::new(App::new(
         AppConfig {
-            registry: required("USD8_REGISTRY")?,
+            registry,
             job_secret: secret,
             max_result_bytes: 16 * 1024 * 1024,
             max_inline_result_bytes: 5 * 1024 * 1024,
@@ -412,17 +494,59 @@ async fn main() -> Result<(), Error> {
             capability_ttl_seconds,
         }),
     )?);
-    lambda_http::run(service_fn(move |request| handle(app.clone(), request))).await
+    lambda_http::run(service_fn(move |request| {
+        handle(app.clone(), open_prechecker.clone(), request)
+    }))
+    .await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::capability_ttl_seconds;
+    use super::{OpenPrecheckError, capability_ttl_seconds, open_job_key, precheck_error_response};
+    use lambda_http::Body;
+    use usd8_settlement::incident_open::{IncidentOpenError, IncidentOpenPrecheck};
 
     #[test]
     fn capability_ttl_outlives_maximum_job_lifetime() {
         let ttl = capability_ttl_seconds(86_400).unwrap();
         assert!(ttl > 86_400);
         assert!(ttl <= 604_800);
+    }
+
+    #[test]
+    fn price_drop_rejection_is_safe_and_specific() {
+        let response = precheck_error_response(OpenPrecheckError::Incident(
+            IncidentOpenError::InsufficientPriceDrop {
+                minimum_drop_bps: 2_000,
+            },
+        ))
+        .unwrap();
+        assert_eq!(response.status(), 422);
+        assert_eq!(
+            response.body(),
+            &Body::Text(r#"{"error":"PRICE_DROP_NOT_DETECTED"}"#.to_owned())
+        );
+    }
+
+    #[test]
+    fn successful_prechecks_share_one_job_per_token_and_reference_block() {
+        let precheck = IncidentOpenPrecheck {
+            chain_id: 11_155_111,
+            registry: "0x1111111111111111111111111111111111111111".to_owned(),
+            defi_insurance: "0x2222222222222222222222222222222222222222".to_owned(),
+            insured_token: "0x3333333333333333333333333333333333333333".to_owned(),
+            reference_block: 12_345_678,
+            observation_block: 12_352_878,
+            baseline_twap: "100".to_owned(),
+            distress_twap: "79".to_owned(),
+            sample_count: 24,
+            twap_blocks: 7_200,
+            sample_step_blocks: 300,
+            minimum_drop_bps: 2_000,
+        };
+        assert_eq!(
+            open_job_key(&precheck),
+            "open:0x3333333333333333333333333333333333333333:12345678"
+        );
     }
 }

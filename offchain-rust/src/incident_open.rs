@@ -94,6 +94,23 @@ fn big(value: U256) -> BigUint {
     BigUint::from_bytes_be(&value.to_be_bytes::<32>())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncidentOpenPrecheck {
+    pub chain_id: u64,
+    pub registry: String,
+    pub defi_insurance: String,
+    pub insured_token: String,
+    pub reference_block: u64,
+    pub observation_block: u64,
+    pub baseline_twap: String,
+    pub distress_twap: String,
+    pub sample_count: u64,
+    pub twap_blocks: u64,
+    pub sample_step_blocks: u64,
+    pub minimum_drop_bps: u16,
+}
+
 struct TwapSelection {
     reference_block: u64,
     baseline_sum: BigUint,
@@ -195,6 +212,151 @@ async fn discover_incident_open_twap<R: Rpc + ?Sized>(
         }
     }
     selected.ok_or(IncidentOpenError::InsufficientPriceDrop { minimum_drop_bps })
+}
+
+/// Runs the same bounded price-drop discovery used by incident authorization without
+/// producing a digest or signature. This is only a cost-saving admission check; callers
+/// must rerun authoritative verification inside the measured enclave before signing.
+pub async fn precheck_incident_open<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    insured_token: Address,
+) -> Result<IncidentOpenPrecheck, IncidentOpenError> {
+    let actual_chain_id = chain_id(rpc).await?;
+    if actual_chain_id != CHAIN_ID {
+        return Err(IncidentOpenError::ChainId {
+            actual: actual_chain_id,
+            expected: CHAIN_ID,
+        });
+    }
+    let finalized = finalized_block(rpc).await?;
+    let head = latest_block(rpc).await?;
+    if finalized.number > head.number {
+        return Err(IncidentOpenError::FinalizedAheadOfLatest {
+            finalized: finalized.number,
+            latest: head.number,
+        });
+    }
+    let at = Some(head.number);
+    let defi_insurance = defi_insurance_at(rpc, registry, at).await?;
+    let reverse_registry = local_address(
+        contract_call(rpc, defi_insurance, &IDefiInsurance::registryCall {}, at).await?,
+    );
+    if reverse_registry != registry {
+        return Err(IncidentOpenError::RegistryMismatch);
+    }
+
+    let next_incident = contract_call(
+        rpc,
+        defi_insurance,
+        &IDefiInsurance::nextIncidentIdCall {},
+        at,
+    )
+    .await?;
+    if next_incident == 0 {
+        return Err(IncidentOpenError::ZeroIncidentId);
+    }
+    if next_incident > 1 {
+        let previous_id = U256::from(next_incident - 1);
+        let previous = incident_at(rpc, defi_insurance, big(previous_id), at).await?;
+        let phase_window = contract_call(
+            rpc,
+            defi_insurance,
+            &IDefiInsurance::incidentPhaseWindowCall {
+                incidentId: previous_id,
+            },
+            at,
+        )
+        .await?;
+        let head_timestamp = U256::from(head.timestamp);
+        let phase_deadline = U256::from(previous.phase_deadline);
+        let active = if head_timestamp <= phase_deadline {
+            true
+        } else if previous.unresolved_claims.is_zero() {
+            false
+        } else {
+            head_timestamp <= phase_deadline + U256::from(phase_window)
+        };
+        if active {
+            return Err(IncidentOpenError::ActiveIncident);
+        }
+    }
+
+    let timing = contract_call(rpc, registry, &IRegistry::incidentTimingConfigCall {}, at).await?;
+    let max_age = timing.maxReferenceBlockAge;
+    let price_config = contract_call(
+        rpc,
+        registry,
+        &IRegistry::incidentOpenPriceConfigCall {},
+        at,
+    )
+    .await?;
+    if price_config.twapBlocks == 0
+        || price_config.sampleStepBlocks == 0
+        || price_config.sampleStepBlocks > price_config.twapBlocks
+        || price_config.twapBlocks % price_config.sampleStepBlocks != 0
+        || price_config.twapBlocks / price_config.sampleStepBlocks < 2
+        || price_config.twapBlocks / price_config.sampleStepBlocks > MAX_INCIDENT_OPEN_SAMPLES
+        || price_config.minimumDropBps == 0
+        || price_config.minimumDropBps >= 10_000
+        || price_config.twapBlocks >= max_age
+    {
+        return Err(IncidentOpenError::InvalidPriceConfig);
+    }
+    let token = contract_call(
+        rpc,
+        defi_insurance,
+        &IDefiInsurance::getInsuredTokenCall {
+            token: AlloyAddress::from(insured_token.into_bytes()),
+        },
+        at,
+    )
+    .await?;
+    if token.maxCoverageBps == 0 {
+        return Err(IncidentOpenError::UnapprovedToken);
+    }
+
+    let selection = discover_incident_open_twap(
+        rpc,
+        local_address(token.underlyingConversionAddress),
+        token.underlyingConversionCallData.as_ref(),
+        DiscoveryPolicy {
+            latest_block: head.number,
+            finalized_block: finalized.number,
+            max_age,
+            twap_blocks: price_config.twapBlocks,
+            sample_step_blocks: price_config.sampleStepBlocks,
+            minimum_drop_bps: price_config.minimumDropBps,
+        },
+    )
+    .await?;
+    if block_by_number(rpc, finalized.number).await?.hash != finalized.hash {
+        return Err(IncidentOpenError::FinalizedHeadChanged);
+    }
+    if block_by_number(rpc, head.number).await?.hash != head.hash {
+        return Err(IncidentOpenError::HeadChanged);
+    }
+    let observation_block = selection
+        .reference_block
+        .checked_add(price_config.twapBlocks)
+        .ok_or(IncidentOpenError::InvalidPriceConfig)?;
+    let sample_count_big = BigUint::from(selection.sample_count);
+    let baseline_twap = &selection.baseline_sum / &sample_count_big;
+    let distress_twap = &selection.distress_sum / sample_count_big;
+    Ok(IncidentOpenPrecheck {
+        chain_id: actual_chain_id,
+        registry: registry.to_string(),
+        defi_insurance: defi_insurance.to_string(),
+        insured_token: insured_token.to_string(),
+        reference_block: selection.reference_block,
+        observation_block,
+        baseline_twap: baseline_twap.to_string(),
+        distress_twap: distress_twap.to_string(),
+        sample_count: selection.sample_count,
+        twap_blocks: price_config.twapBlocks,
+        sample_step_blocks: price_config.sampleStepBlocks,
+        minimum_drop_bps: price_config.minimumDropBps,
+    })
 }
 
 pub async fn build_incident_open<R: Rpc + ?Sized>(

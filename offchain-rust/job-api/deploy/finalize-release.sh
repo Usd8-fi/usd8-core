@@ -25,6 +25,7 @@ SUBNET_ID=${SUBNET_ID:?set SUBNET_ID}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:?set SECURITY_GROUP_ID}
 JANITOR_MAX_AGE_SECONDS=${JANITOR_MAX_AGE_SECONDS:?set JANITOR_MAX_AGE_SECONDS}
 USD8_JOB_HMAC_KEY_B64=${USD8_JOB_HMAC_KEY_B64:?set USD8_JOB_HMAC_KEY_B64}
+USD8_PRECHECK_RPC_URL=${USD8_PRECHECK_RPC_URL:?set USD8_PRECHECK_RPC_URL}
 
 [[ "$AMI_ID" =~ ^ami-[0-9a-f]+$ ]] || { echo 'invalid AMI_ID' >&2; exit 2; }
 [[ "$AWS_REGION" == eu-central-1 ]] || { echo 'AWS_REGION must be eu-central-1' >&2; exit 2; }
@@ -97,6 +98,7 @@ print(base64.b64encode(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).di
 PY
 )
 JOB_HMAC_KEY_SHA256=$(printf '%s' "$USD8_JOB_HMAC_KEY_B64" | sha256sum | cut -d' ' -f1)
+PRECHECK_RPC_URL_SHA256=$(printf '%s' "$USD8_PRECHECK_RPC_URL" | sha256sum | cut -d' ' -f1)
 TMP_MANIFEST="$RELEASE/release-manifest.json.tmp"
 jq \
   --arg region "$AWS_REGION" --arg ami "$AMI_ID" \
@@ -111,6 +113,7 @@ jq \
   --arg instanceProfile "$INSTANCE_PROFILE" --arg subnet "$SUBNET_ID" \
   --arg securityGroup "$SECURITY_GROUP_ID" --arg janitorMaxAge "$JANITOR_MAX_AGE_SECONDS" \
   --arg jobHmacKeySha256 "$JOB_HMAC_KEY_SHA256" \
+  --arg precheckRpcUrlSha256 "$PRECHECK_RPC_URL_SHA256" \
   --arg kmsPolicyHash "$KMS_POLICY_SHA256" --arg instancePolicyHash "$INSTANCE_POLICY_SHA256" \
   --arg lambdaPolicyHash "$LAMBDA_POLICY_SHA256" --arg janitorPolicyHash "$JANITOR_POLICY_SHA256" '
   .status = "final"
@@ -149,7 +152,10 @@ jq \
         USD8_TEE_SUBNET_ID: $subnet,
         USD8_TEE_SECURITY_GROUP_ID: $securityGroup
       },
-      lambdaSecretEnvironmentSha256: {USD8_JOB_HMAC_KEY_B64: $jobHmacKeySha256},
+      lambdaSecretEnvironmentSha256: {
+        USD8_JOB_HMAC_KEY_B64: $jobHmacKeySha256,
+        USD8_PRECHECK_RPC_URL: $precheckRpcUrlSha256
+      },
       janitorEnvironment: {USD8_TEE_MAX_AGE_SECONDS: $janitorMaxAge}
     }
 ' "$RELEASE/release-manifest.json" > "$TMP_MANIFEST"

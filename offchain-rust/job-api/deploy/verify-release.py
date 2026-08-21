@@ -558,7 +558,10 @@ def verify(
         }
         if set(aws["lambdaEnvironment"]) != expected_lambda_environment:
             fail("Lambda environment manifest is incomplete or unknown")
-        expected_lambda_secret_environment = {"USD8_JOB_HMAC_KEY_B64"}
+        expected_lambda_secret_environment = {
+            "USD8_JOB_HMAC_KEY_B64",
+            "USD8_PRECHECK_RPC_URL",
+        }
         if (
             set(aws["lambdaSecretEnvironmentSha256"]) != expected_lambda_secret_environment
             or not all(HEX64.fullmatch(str(value)) for value in aws["lambdaSecretEnvironmentSha256"].values())

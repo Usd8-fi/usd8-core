@@ -47,6 +47,13 @@ class MeasuredRegistryTest(unittest.TestCase):
         self.assertIn('--arg kmsKey "$KMS_KEY_ARN"', source)
         self.assertIn('.Resource = $kmsKeyArn', source)
 
+    def test_finalization_commits_to_precheck_rpc_without_storing_it(self) -> None:
+        source = FINALIZE_RELEASE.read_text()
+        self.assertIn('USD8_PRECHECK_RPC_URL=${USD8_PRECHECK_RPC_URL:', source)
+        self.assertIn('PRECHECK_RPC_URL_SHA256=', source)
+        self.assertIn('USD8_PRECHECK_RPC_URL: $precheckRpcUrlSha256', source)
+        self.assertNotIn('USD8_PRECHECK_RPC_URL: $USD8_PRECHECK_RPC_URL', source)
+
     def test_finalization_labels_output_as_a_candidate_pending_live_verification(self) -> None:
         source = FINALIZE_RELEASE.read_text()
         self.assertIn('RELEASE_CANDIDATE_CREATED=', source)
