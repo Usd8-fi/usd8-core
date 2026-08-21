@@ -32,6 +32,8 @@ const MAX_S3_PRESIGN_TTL_SECONDS: u64 = 604_800;
 const SIGNER_OBJECT: &str = "secrets/signer.bin";
 const DRPC_OBJECT: &str = "secrets/drpc.bin";
 const PRECHECK_TIMEOUT_SECONDS: u64 = 24;
+const PRECHECK_RPC_RETRIES: u32 = 4;
+const PRECHECK_RPC_RETRY_DELAY_MS: u64 = 1_000;
 
 struct OpenPrechecker {
     rpc: HttpRpc,
@@ -462,8 +464,8 @@ async fn main() -> Result<(), Error> {
             &required("USD8_PRECHECK_RPC_URL")?,
             None,
             3_000,
-            1,
-            100,
+            PRECHECK_RPC_RETRIES,
+            PRECHECK_RPC_RETRY_DELAY_MS,
         )?,
         registry: Address::from_str(&registry).map_err(|_| "USD8_REGISTRY is invalid")?,
         configured_registry: registry.clone(),
@@ -502,8 +504,22 @@ async fn main() -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenPrecheckError, capability_ttl_seconds, open_job_key, precheck_error_response};
+    use super::{
+        OpenPrecheckError, PRECHECK_RPC_RETRIES, PRECHECK_RPC_RETRY_DELAY_MS,
+        PRECHECK_TIMEOUT_SECONDS, capability_ttl_seconds, open_job_key, precheck_error_response,
+    };
     use lambda_http::Body;
+
+    #[test]
+    fn precheck_rpc_retries_429_with_bounded_backoff() {
+        assert_eq!(PRECHECK_RPC_RETRIES, 4);
+        assert_eq!(PRECHECK_RPC_RETRY_DELAY_MS, 1_000);
+        let cumulative_backoff_ms: u64 = (0..PRECHECK_RPC_RETRIES)
+            .map(|attempt| PRECHECK_RPC_RETRY_DELAY_MS * (1_u64 << attempt))
+            .sum();
+        assert_eq!(cumulative_backoff_ms, 15_000);
+        assert!(cumulative_backoff_ms < PRECHECK_TIMEOUT_SECONDS * 1_000);
+    }
     use usd8_settlement::incident_open::{IncidentOpenError, IncidentOpenPrecheck};
 
     #[test]
