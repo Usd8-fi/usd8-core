@@ -26,6 +26,10 @@ class MeasuredRegistryTest(unittest.TestCase):
         self.assertIn('[[ "$NETWORK" == sepolia ]]', script)
         self.assertNotIn('NETWORK must be ethereum or sepolia', script)
 
+    def test_release_build_compiles_lambda_with_sepolia_chain_id(self) -> None:
+        script = BUILD_RELEASE.read_text()
+        self.assertIn('--features lambda,janitor,sepolia', script)
+
     def test_release_build_discards_unmanifested_measurements_sidecar(self) -> None:
         script = BUILD_RELEASE.read_text()
         self.assertIn('rm -f "$RELEASE/measurements.json"', script)

@@ -75,7 +75,7 @@ cd job-api
 USD8_REGISTRY="$REGISTRY" CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release --locked \
   --features "$JOB_FEATURES" --bin usd8-tee-enclave --bin usd8-tee-parent
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release --locked \
-  --features lambda,janitor --bin usd8-tee-job-lambda --bin usd8-tee-janitor
+  --features lambda,janitor,sepolia --bin usd8-tee-job-lambda --bin usd8-tee-janitor
 
 install -m 0555 target/release/usd8-tee-enclave "$CONTEXT/usd8-tee-enclave"
 install -m 0444 deploy/Dockerfile.enclave "$CONTEXT/Dockerfile"
