@@ -104,9 +104,8 @@ class ReleaseManifestTest(unittest.TestCase):
 
     def test_live_rpc_refuses_redirects(self) -> None:
         handler = VERIFY_MODULE.NoRedirect()
-        with self.assertRaises(urllib.error.HTTPError) as raised:
+        with self.assertRaises(urllib.error.HTTPError):
             handler.redirect_request(None, None, 302, "https://redirect.invalid", {}, None)
-        raised.exception.close()
 
     def test_live_rpc_sets_explicit_user_agent(self) -> None:
         response = mock.MagicMock()
