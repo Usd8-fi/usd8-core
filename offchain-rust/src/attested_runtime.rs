@@ -30,12 +30,12 @@ fn address(value: &str) -> Result<Address, AttestedRuntimeError> {
 
 fn rpc(
     rpc_url: &str,
-    drpc_key: &str,
+    drpc_key: Option<&str>,
     proxy_url: Option<&str>,
 ) -> Result<HttpRpc, AttestedRuntimeError> {
     match proxy_url {
-        Some(proxy) => HttpRpc::new_with_https_proxy(rpc_url, Some(drpc_key), 30_000, proxy),
-        None => HttpRpc::new(rpc_url, Some(drpc_key), 30_000),
+        Some(proxy) => HttpRpc::new_with_https_proxy(rpc_url, drpc_key, 30_000, proxy),
+        None => HttpRpc::new(rpc_url, drpc_key, 30_000),
     }
     .map_err(fail)
 }
@@ -80,7 +80,7 @@ fn bounded_artifact(artifact: Value, maximum: usize) -> Result<Value, AttestedRu
 
 pub async fn settlement_artifact(
     rpc_url: &str,
-    drpc_key: &str,
+    drpc_key: Option<&str>,
     registry: &str,
     incident_id: &str,
     score_mode: ScoreMode,
@@ -109,7 +109,7 @@ pub async fn settlement_artifact(
 
 pub async fn incident_open_artifact(
     rpc_url: &str,
-    drpc_key: &str,
+    drpc_key: Option<&str>,
     registry: &str,
     insured_token: &str,
     expected_signer: &str,

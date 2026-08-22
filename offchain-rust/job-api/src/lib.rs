@@ -40,18 +40,28 @@ pub const fn settlement_rpc_url() -> &'static str {
 }
 
 #[cfg(not(feature = "sepolia"))]
+pub const fn settlement_rpc_requires_drpc_key() -> bool {
+    true
+}
+
+#[cfg(not(feature = "sepolia"))]
 pub const fn settlement_rpc_authority() -> &'static str {
     "lb.drpc.org:443"
 }
 
 #[cfg(feature = "sepolia")]
 pub const fn settlement_rpc_url() -> &'static str {
-    "https://lb.drpc.live/ogrpc?network=sepolia"
+    "https://ethereum-sepolia-rpc.publicnode.com"
+}
+
+#[cfg(feature = "sepolia")]
+pub const fn settlement_rpc_requires_drpc_key() -> bool {
+    false
 }
 
 #[cfg(feature = "sepolia")]
 pub const fn settlement_rpc_authority() -> &'static str {
-    "lb.drpc.live:443"
+    "ethereum-sepolia-rpc.publicnode.com:443"
 }
 
 type HmacSha256 = Hmac<Sha256>;

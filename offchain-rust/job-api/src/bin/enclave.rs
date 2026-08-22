@@ -84,8 +84,9 @@ mod linux {
         MAX_SESSION_TOKEN_BYTES, MAX_WIRE_REQUEST_BYTES, TerminalEnvelope,
         canonicalize_open_request, canonicalize_request, connect_proxy_port,
         decrypt_kms_recipient_envelope, enclave_timeout_seconds, extract_attested_digest,
-        parse_kms_recipient_cms, read_frame_async, settlement_rpc_url, sign_digest,
-        stored_request_is_live, verify_job_request_binding, write_frame_async,
+        parse_kms_recipient_cms, read_frame_async, settlement_rpc_requires_drpc_key,
+        settlement_rpc_url, sign_digest, stored_request_is_live, verify_job_request_binding,
+        write_frame_async,
     };
     use zeroize::{Zeroize, Zeroizing};
 
@@ -315,13 +316,14 @@ mod linux {
     async fn compute(request: &JobWireRequest, drpc_key: &str) -> Result<serde_json::Value, Error> {
         let request_timeout =
             Duration::from_secs(enclave_timeout_seconds(&request.stored_request.request));
+        let rpc_key = settlement_rpc_requires_drpc_key().then_some(drpc_key);
         match &request.stored_request.request {
             CanonicalRequest::Settlement(settlement) => {
                 let result = timeout(
                     request_timeout,
                     usd8_settlement::attested_runtime::settlement_artifact(
                         settlement_rpc_url(),
-                        drpc_key,
+                        rpc_key,
                         &settlement.registry,
                         &settlement.incident_id,
                         super::settlement_score_mode(),
@@ -338,7 +340,7 @@ mod linux {
                 request_timeout,
                 usd8_settlement::attested_runtime::incident_open_artifact(
                     settlement_rpc_url(),
-                    drpc_key,
+                    rpc_key,
                     &open.registry,
                     &open.insured_token,
                     &env::var("USD8_EXPECTED_SIGNER")?,
