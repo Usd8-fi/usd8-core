@@ -1,0 +1,13 @@
+[advisories]
+# `derivative` is absent from the all-target dependency tree. `paste` is a
+# compile-time Alloy proc-macro dependency. `serde_cbor` is an unmaintained
+# transitive dependency of AWS NSM API 0.5.2.
+# RUSTSEC-2023-0071 has no fixed release. The enclave generates a fresh RSA key
+# for each KMS recipient request and performs exactly one OAEP decrypt, so the
+# repeated adaptive timing oracle required by Marvin is unavailable.
+ignore = [
+  "RUSTSEC-2021-0127",
+  "RUSTSEC-2023-0071",
+  "RUSTSEC-2024-0388",
+  "RUSTSEC-2024-0436",
+]

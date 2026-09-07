@@ -1,0 +1,856 @@
+use crate::abi::IRegistry;
+use crate::chain::{
+    BlockAnchor, ChainError, Incident, SettlementAnchors, assert_anchors_unchanged,
+    assert_contract_code_at, chain_id, contract_call, decimals_at, defi_insurance_at,
+    derive_bootstrap_config_at, earned_score_of, finalized_settlement_anchors, incident_at,
+    incident_claim_deadline_at, incident_config_at, incident_tee_pcr_hash_at,
+    max_cover_pool_payout_bps_at, min_balances_over, min_erc1155_balance_over, pool_state_at,
+    pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
+};
+use crate::checkpoint::{BulkScoreSource, CheckpointError, CheckpointScoreSource};
+use crate::config::{BootstrapConfig, ConfigError, LOG_RESULT_CAP, MAX_LOG_RANGE};
+use crate::rpc::{LogMetrics, Rpc, RpcMetrics};
+use crate::typed_data::{SettlementDigestInput, TypedDataError, settlement_digest};
+use crate::{
+    Address, ClaimEvent, ClaimInput, EventKind, KernelError, KernelInput, KernelOutput, PoolInput,
+    allocate_with_events, replay_claim_set,
+};
+use num_bigint::BigUint;
+use num_traits::Zero;
+use serde_json::{Value, json};
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::sync::Arc;
+use thiserror::Error;
+
+const ZERO_ROOT: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+#[derive(Clone)]
+pub enum ScoreMode {
+    Raw,
+    Bulk,
+    Checkpoint {
+        path: PathBuf,
+        integrity_key: Vec<u8>,
+    },
+}
+
+impl std::fmt::Debug for ScoreMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw => formatter.write_str("Raw"),
+            Self::Bulk => formatter.write_str("Bulk"),
+            Self::Checkpoint { path, .. } => formatter
+                .debug_struct("Checkpoint")
+                .field("path", path)
+                .field("integrity_key", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum EngineError {
+    #[error(transparent)]
+    Chain(#[from] ChainError),
+    #[error(transparent)]
+    Checkpoint(#[from] CheckpointError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Kernel(#[from] KernelError),
+    #[error(transparent)]
+    TypedData(#[from] TypedDataError),
+    #[error("settlement invariant failed: {0}")]
+    Invariant(String),
+}
+
+#[derive(Clone, Debug)]
+pub enum ScoreSourceMetadata {
+    Raw {
+        as_of_block: u64,
+    },
+    Bulk {
+        as_of_block: u64,
+        as_of_block_hash: String,
+        indexed_transfers: usize,
+        indexed_tokens: usize,
+        tracked_accounts: usize,
+    },
+    Checkpoint {
+        path: PathBuf,
+        as_of_block: u64,
+        as_of_block_hash: String,
+        indexed_transfers: usize,
+        indexed_tokens: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct SettlementRun {
+    pub incident_id: BigUint,
+    pub incident: Incident,
+    pub window_incident: Incident,
+    pub latest_incident: Incident,
+    pub anchors: SettlementAnchors,
+    pub config_hash: String,
+    pub tee_pcr_hash: String,
+    pub pool_order: Vec<Address>,
+    pub pool_addrs: Vec<Address>,
+    pub twap_ratio: BigUint,
+    pub underlying_usd: BigUint,
+    pub events: Vec<ClaimEvent>,
+    pub output: KernelOutput,
+    pub digest: String,
+    pub score_source: ScoreSourceMetadata,
+    pub rpc_metrics: RpcMetrics,
+    pub log_metrics: LogMetrics,
+}
+
+fn anchor_json(anchor: &BlockAnchor) -> Value {
+    json!({
+        "number": anchor.number.to_string(),
+        "timestamp": anchor.timestamp.to_string(),
+        "hash": anchor.hash,
+    })
+}
+
+fn metrics_json(metrics: RpcMetrics) -> Value {
+    json!({
+        "logicalRequests": metrics.logical_requests,
+        "transportAttempts": metrics.transport_attempts,
+        "transportResponses": metrics.transport_responses,
+        "transportRetries": metrics.transport_retries,
+    })
+}
+
+fn log_metrics_json(metrics: LogMetrics) -> Value {
+    json!({
+        "requests": metrics.requests,
+        "bisections": metrics.bisections,
+        "errors": metrics.errors,
+        "elapsedMs": metrics.elapsed_ms,
+    })
+}
+
+impl SettlementRun {
+    pub fn is_unsettled(&self) -> bool {
+        self.latest_incident.root.eq_ignore_ascii_case(ZERO_ROOT)
+    }
+
+    pub fn root_matches(&self) -> bool {
+        self.output
+            .root
+            .eq_ignore_ascii_case(&self.latest_incident.root)
+    }
+
+    pub fn artifact(&self, config: &BootstrapConfig, include_proofs: bool) -> Value {
+        let rows = self
+            .output
+            .rows
+            .iter()
+            .map(|row| {
+                let mut value = json!({
+                    "claimId": row.claim_id.to_string(),
+                    "user": row.user.to_string(),
+                    "escrowAmount": row.escrow_amount.to_string(),
+                    "eligibleAmount": row.eligible_amount.to_string(),
+                    "lossUsd": row.loss_usd.to_string(),
+                    "grossEarnedScore": row.gross_earned_score.to_string(),
+                    "earnedScore": row.earned_score.to_string(),
+                    "scoreSpent": row.score_spent.to_string(),
+                    "boostedScore": row.boosted_score.to_string(),
+                    "boosterAmount": row.booster_amount.to_string(),
+                    "eligibleBoosterAmount": row.eligible_booster_amount.to_string(),
+                    "payoutUsd": row.payout_usd.to_string(),
+                    "amounts": row.amounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    "acceptPayoutRecommended": row.amounts.iter().any(|amount| !amount.is_zero()),
+                });
+                if include_proofs {
+                    value["proof"] = json!(
+                        self.output
+                            .proofs
+                            .get(&row.claim_id)
+                            .cloned()
+                            .unwrap_or_default()
+                    );
+                }
+                value
+            })
+            .collect::<Vec<_>>();
+        let input_rows = self
+            .output
+            .rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "user": row.user.to_string(),
+                    "grossEarnedScore": row.gross_earned_score.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let score_source = match &self.score_source {
+            ScoreSourceMetadata::Raw { as_of_block } => {
+                json!({ "kind": "raw-rpc", "asOfBlock": as_of_block.to_string() })
+            }
+            ScoreSourceMetadata::Bulk {
+                as_of_block,
+                as_of_block_hash,
+                indexed_transfers,
+                indexed_tokens,
+                tracked_accounts,
+            } => json!({
+                "kind": "ephemeral-bulk-rpc",
+                "asOfBlock": as_of_block.to_string(),
+                "asOfBlockHash": as_of_block_hash,
+                "indexedTransfers": indexed_transfers,
+                "indexedTokens": indexed_tokens,
+                "trackedAccounts": tracked_accounts,
+            }),
+            ScoreSourceMetadata::Checkpoint {
+                path,
+                as_of_block,
+                as_of_block_hash,
+                indexed_transfers,
+                indexed_tokens,
+            } => json!({
+                "kind": "checkpoint",
+                "path": path,
+                "asOfBlock": as_of_block.to_string(),
+                "asOfBlockHash": as_of_block_hash,
+                "indexedTransfers": indexed_transfers,
+                "indexedTokens": indexed_tokens,
+            }),
+        };
+        json!({
+            "schemaVersion": 2,
+            "configVersion": config.version,
+            "configHash": self.config_hash,
+            "bootstrapConfig": {
+                "version": config.version,
+                "chainId": config.chain_id.to_string(),
+                "registry": config.registry.to_string(),
+                "defiInsurance": config.defi_insurance.to_string(),
+                "boosterId": config.booster_id.to_string(),
+                "boosterBoostBps": config.booster_boost_bps.to_string(),
+                "assetUsdFeed": config.asset_usd_feed.iter().map(|(asset, feed)| {
+                    vec![asset.to_string(), feed.to_string()]
+                }).collect::<Vec<_>>(),
+                "maxOracleStaleness": config.max_oracle_staleness.to_string(),
+                "maxLogRange": crate::config::MAX_LOG_RANGE.to_string(),
+                "logResultCap": crate::config::LOG_RESULT_CAP.to_string(),
+                "anchorBlock": self.anchors.open.number.to_string(),
+            },
+            "teePcrHash": self.tee_pcr_hash,
+            "claimSetHash": self.output.claim_set_hash,
+            "settlementInputHash": self.output.settlement_input_hash,
+            "settlementInputRows": input_rows,
+            "chainId": config.chain_id,
+            "blockAnchors": {
+                "finalizedHead": anchor_json(&self.anchors.finalized_head),
+                "open": anchor_json(&self.anchors.open),
+                "reference": anchor_json(&self.anchors.reference),
+                "windowEnd": anchor_json(&self.anchors.window_end),
+            },
+            "rpcMetrics": metrics_json(self.rpc_metrics),
+            "historicalLogMetrics": log_metrics_json(self.log_metrics),
+            "scoreSource": score_source,
+            "registry": config.registry.to_string(),
+            "defiInsurance": config.defi_insurance.to_string(),
+            "incidentId": self.incident_id.to_string(),
+            "referenceBlock": self.incident.reference_block.to_string(),
+            "windowEndBlock": self.anchors.window_end.number.to_string(),
+            "twapRatio": self.twap_ratio.to_string(),
+            "underlyingUsd": self.underlying_usd.to_string(),
+            "root": self.output.root,
+            "onchainRoot": self.latest_incident.root,
+            "rootMatches": self.root_matches(),
+            "settlementDigest": self.digest,
+            "unresolvedClaims": self.window_incident.unresolved_claims.to_string(),
+            "protocolFeeShareBps": self.incident.protocol_fee_share_bps.to_string(),
+            "poolOrder": self.pool_order.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "poolAddrs": self.pool_addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "poolPayouts": self.output.pool_payouts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "rows": rows,
+        })
+    }
+}
+
+fn merge_metrics(left: LogMetrics, right: LogMetrics) -> LogMetrics {
+    LogMetrics {
+        requests: left.requests.saturating_add(right.requests),
+        bisections: left.bisections.saturating_add(right.bisections),
+        errors: left.errors.saturating_add(right.errors),
+        elapsed_ms: left.elapsed_ms.saturating_add(right.elapsed_ms),
+    }
+}
+
+async fn assert_code<R: Rpc + ?Sized>(
+    rpc: &R,
+    address: Address,
+    label: &str,
+    block: u64,
+) -> Result<(), EngineError> {
+    assert_contract_code_at(rpc, &address.to_string(), label, block).await?;
+    Ok(())
+}
+
+fn assert_incident_anchors(
+    provisional: &Incident,
+    finalized: &Incident,
+) -> Result<(), EngineError> {
+    if provisional.insured_token != finalized.insured_token
+        || provisional.reference_block != finalized.reference_block
+        || provisional.open_block != finalized.open_block
+        || provisional.protocol_fee_share_bps != finalized.protocol_fee_share_bps
+    {
+        return Err(EngineError::Invariant(format!(
+            "provisional incident anchors differ from finalized state: provisional={provisional:?}, finalized={finalized:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn settlement_config_from_registry<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    incident_id: &BigUint,
+) -> Result<BootstrapConfig, EngineError> {
+    let actual_chain = chain_id(rpc).await?;
+    if actual_chain != crate::config::CHAIN_ID {
+        return Err(EngineError::Invariant(format!(
+            "wrong chain: RPC reports {actual_chain}, expected {}",
+            crate::config::CHAIN_ID
+        )));
+    }
+    let defi_insurance = defi_insurance_at(rpc, registry, None).await?;
+    if defi_insurance.is_zero() {
+        return Err(EngineError::Invariant(
+            "Registry defiInsurance is zero".to_owned(),
+        ));
+    }
+    let incident = incident_at(rpc, defi_insurance, incident_id.clone(), None).await?;
+    if incident.insured_token.is_zero() {
+        return Err(EngineError::Invariant(format!(
+            "incident {incident_id} does not exist"
+        )));
+    }
+    derive_bootstrap_config_at(rpc, registry, defi_insurance, incident.open_block)
+        .await
+        .map_err(EngineError::from)
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn build_settlement<R: Rpc + ?Sized>(
+    rpc: Arc<R>,
+    config: &BootstrapConfig,
+    incident_id: BigUint,
+    score_mode: ScoreMode,
+) -> Result<SettlementRun, EngineError> {
+    let actual_chain = chain_id(rpc.as_ref()).await?;
+    if actual_chain != config.chain_id {
+        return Err(EngineError::Invariant(format!(
+            "wrong chain: RPC reports {actual_chain}, expected {}",
+            config.chain_id
+        )));
+    }
+
+    let provisional = incident_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        incident_id.clone(),
+        None,
+    )
+    .await?;
+    if provisional.insured_token.is_zero() {
+        return Err(EngineError::Invariant(format!(
+            "incident {incident_id} does not exist"
+        )));
+    }
+    let claim_deadline = incident_claim_deadline_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        &incident_id,
+        provisional.open_block,
+    )
+    .await?;
+    let anchors = finalized_settlement_anchors(
+        rpc.as_ref(),
+        provisional.reference_block,
+        provisional.open_block,
+        claim_deadline,
+    )
+    .await?;
+    if provisional.root.eq_ignore_ascii_case(ZERO_ROOT) {
+        let phase_window = claim_deadline
+            .checked_sub(anchors.open.timestamp)
+            .filter(|window| *window != 0)
+            .ok_or_else(|| {
+                EngineError::Invariant("invalid snapshotted incident phase window".to_owned())
+            })?;
+        let settlement_deadline = claim_deadline
+            .checked_add(phase_window)
+            .ok_or_else(|| EngineError::Invariant("settlement deadline overflow".to_owned()))?;
+        if anchors.finalized_head.timestamp <= claim_deadline {
+            return Err(EngineError::Invariant(format!(
+                "settlement phase is not open: finalized timestamp {} is not after claim deadline {claim_deadline}",
+                anchors.finalized_head.timestamp
+            )));
+        }
+        if anchors.finalized_head.timestamp > settlement_deadline {
+            return Err(EngineError::Invariant(format!(
+                "settlement phase expired: finalized timestamp {} exceeds deadline {settlement_deadline}",
+                anchors.finalized_head.timestamp
+            )));
+        }
+    }
+    let finalized_incident = incident_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        incident_id.clone(),
+        Some(anchors.finalized_head.number),
+    )
+    .await?;
+    assert_incident_anchors(&provisional, &finalized_incident)?;
+    assert_code(
+        rpc.as_ref(),
+        config.registry,
+        "Registry",
+        provisional.open_block,
+    )
+    .await?;
+    let tee_pcr_hash = incident_tee_pcr_hash_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        &incident_id,
+        provisional.open_block,
+    )
+    .await?;
+    assert_code(
+        rpc.as_ref(),
+        config.defi_insurance,
+        "DefiInsurance",
+        provisional.open_block,
+    )
+    .await?;
+    assert_code(
+        rpc.as_ref(),
+        provisional.insured_token,
+        "insured token",
+        provisional.open_block,
+    )
+    .await?;
+
+    let (events, event_metrics) = read_input_events(
+        rpc.as_ref(),
+        config.defi_insurance,
+        &incident_id,
+        provisional.open_block,
+        anchors.window_end.number,
+        MAX_LOG_RANGE,
+        LOG_RESULT_CAP,
+    )
+    .await?;
+    let window_incident = incident_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        incident_id.clone(),
+        Some(anchors.window_end.number),
+    )
+    .await?;
+    assert_incident_anchors(&provisional, &window_incident)?;
+    if window_incident.phase_deadline != claim_deadline {
+        return Err(EngineError::Invariant(format!(
+            "historical claim deadline mismatch: reconstructed {claim_deadline}, on-chain {}",
+            window_incident.phase_deadline
+        )));
+    }
+    let replay = replay_claim_set(&events)?;
+    if BigUint::from(replay.unresolved_claims) != window_incident.unresolved_claims {
+        return Err(EngineError::Invariant(format!(
+            "unresolved claim count mismatch: replayed {}, on-chain {}",
+            replay.unresolved_claims, window_incident.unresolved_claims
+        )));
+    }
+    if !replay
+        .hash
+        .eq_ignore_ascii_case(&window_incident.claim_set_hash)
+    {
+        return Err(EngineError::Invariant(format!(
+            "claim-set hash mismatch: replayed {}, on-chain {}",
+            replay.hash, window_incident.claim_set_hash
+        )));
+    }
+
+    let incident_config = incident_config_at(
+        rpc.as_ref(),
+        config,
+        provisional.insured_token,
+        provisional.open_block,
+    )
+    .await?;
+    assert_code(
+        rpc.as_ref(),
+        incident_config.underlying_price_oracle,
+        "underlying USD oracle",
+        anchors.window_end.number,
+    )
+    .await?;
+    if !incident_config.conversion_address.is_zero() {
+        assert_code(
+            rpc.as_ref(),
+            incident_config.conversion_address,
+            "underlying conversion",
+            provisional.reference_block,
+        )
+        .await?;
+    }
+    for scored in &incident_config.scored_tokens {
+        assert_code(
+            rpc.as_ref(),
+            scored.token,
+            "scored token",
+            provisional.reference_block,
+        )
+        .await?;
+    }
+
+    let insured_decimals = decimals_at(
+        rpc.as_ref(),
+        provisional.insured_token,
+        provisional.open_block,
+    )
+    .await?;
+    let topology = pools_at(rpc.as_ref(), config, provisional.open_block).await?;
+    let mut pools = Vec::with_capacity(topology.pool_addrs.len());
+    for (index, (asset, pool)) in topology
+        .assets
+        .iter()
+        .copied()
+        .zip(topology.pool_addrs.iter().copied())
+        .enumerate()
+    {
+        let feed = config.asset_feed(asset)?;
+        assert_code(
+            rpc.as_ref(),
+            pool,
+            &format!("cover pool {index}"),
+            provisional.open_block,
+        )
+        .await?;
+        assert_code(
+            rpc.as_ref(),
+            asset,
+            &format!("pool asset {index}"),
+            anchors.window_end.number,
+        )
+        .await?;
+        assert_code(
+            rpc.as_ref(),
+            feed,
+            &format!("USD feed for pool asset {index}"),
+            anchors.window_end.number,
+        )
+        .await?;
+        let state =
+            pool_state_at(rpc.as_ref(), config, asset, pool, anchors.window_end.number).await?;
+        pools.push(PoolInput {
+            balance: state.balance,
+            asset_usd: state.asset_usd,
+            asset_decimals: u32::from(state.asset_decimals),
+        });
+    }
+
+    let max_payout_bps =
+        max_cover_pool_payout_bps_at(rpc.as_ref(), config.registry, provisional.open_block).await?;
+    if max_payout_bps > BigUint::from(10_000u16) {
+        return Err(EngineError::Invariant(format!(
+            "maxCoverPoolPayoutBps exceeds 10000: {max_payout_bps}"
+        )));
+    }
+    let twap_ratio =
+        twap_ratio_before(rpc.as_ref(), &incident_config, provisional.reference_block).await?;
+    let underlying_usd = price_usd_1e18(
+        rpc.as_ref(),
+        incident_config.underlying_price_oracle,
+        anchors.window_end.number,
+        config.max_oracle_staleness,
+    )
+    .await?;
+
+    let registrations = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Register))
+        .map(|event| (event.claim_id.clone(), event))
+        .collect::<HashMap<_, _>>();
+    let claimant_users = replay
+        .live_claim_ids
+        .iter()
+        .map(|claim_id| {
+            registrations
+                .get(claim_id)
+                .map(|event| event.user)
+                .ok_or_else(|| {
+                    EngineError::Invariant(format!(
+                        "missing registration for live claim {claim_id}"
+                    ))
+                })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
+    // Score must mature for the same pre-reference period that the insured token must be held.
+    let score_cutoff_block =
+        if provisional.reference_block > incident_config.params.holding_margin_blocks {
+            provisional.reference_block - incident_config.params.holding_margin_blocks
+        } else {
+            1
+        };
+
+    let (mut checkpoint_source, checkpoint_integrity_key, bulk_source) = match score_mode {
+        ScoreMode::Raw => (None, None, None),
+        ScoreMode::Bulk => {
+            let source = BulkScoreSource::open(
+                rpc.clone(),
+                &incident_config,
+                score_cutoff_block,
+                claimant_users,
+                config.chain_id,
+                MAX_LOG_RANGE,
+                LOG_RESULT_CAP,
+            )
+            .await?;
+            (None, None, Some(source))
+        }
+        ScoreMode::Checkpoint {
+            path,
+            integrity_key,
+        } => {
+            let source = CheckpointScoreSource::open(
+                rpc.clone(),
+                &incident_config,
+                score_cutoff_block,
+                path,
+                config.chain_id,
+                &integrity_key,
+                MAX_LOG_RANGE,
+                LOG_RESULT_CAP,
+            )
+            .await?;
+            (Some(source), Some(integrity_key), None)
+        }
+    };
+    let score_source = if let Some(source) = &bulk_source {
+        ScoreSourceMetadata::Bulk {
+            as_of_block: source.metadata.as_of_block,
+            as_of_block_hash: source.metadata.as_of_block_hash.clone(),
+            indexed_transfers: source.metadata.indexed_transfers,
+            indexed_tokens: source.metadata.indexed_tokens,
+            tracked_accounts: source.metadata.tracked_accounts,
+        }
+    } else if let Some(source) = &checkpoint_source {
+        ScoreSourceMetadata::Checkpoint {
+            path: source.metadata.path.clone(),
+            as_of_block: source.metadata.as_of_block,
+            as_of_block_hash: source.metadata.as_of_block_hash.clone(),
+            indexed_transfers: source.metadata.indexed_transfers,
+            indexed_tokens: source.metadata.indexed_tokens,
+        }
+    } else {
+        ScoreSourceMetadata::Raw {
+            as_of_block: score_cutoff_block,
+        }
+    };
+    let mut log_metrics = if let Some(source) = &bulk_source {
+        merge_metrics(event_metrics, source.metadata.log_metrics)
+    } else if let Some(source) = &checkpoint_source {
+        merge_metrics(event_metrics, source.metadata.log_metrics)
+    } else {
+        event_metrics
+    };
+    let hold_from = score_cutoff_block;
+    let live_events = replay
+        .live_claim_ids
+        .iter()
+        .map(|claim_id| {
+            registrations.get(claim_id).ok_or_else(|| {
+                EngineError::Invariant(format!("missing registration for live claim {claim_id}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let claimant_accounts = live_events
+        .iter()
+        .map(|event| event.user)
+        .collect::<BTreeSet<_>>();
+    let (minimums, eligibility_metrics) = min_balances_over(
+        rpc.as_ref(),
+        provisional.insured_token,
+        &claimant_accounts,
+        hold_from,
+        provisional.reference_block,
+        MAX_LOG_RANGE,
+        LOG_RESULT_CAP,
+    )
+    .await?;
+    log_metrics = merge_metrics(log_metrics, eligibility_metrics);
+
+    let booster = if live_events
+        .iter()
+        .any(|event| !event.booster_amount.is_zero())
+    {
+        Some(
+            contract_call(
+                rpc.as_ref(),
+                config.registry,
+                &IRegistry::boosterConfigCall {},
+                Some(provisional.open_block),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let mut claims = Vec::with_capacity(live_events.len());
+    for event in live_events {
+        let min_held = minimums.get(&event.user).cloned().ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "missing eligibility replay for claimant {}",
+                event.user
+            ))
+        })?;
+        let booster_held = if let Some(booster) = &booster {
+            if event.booster_amount.is_zero() {
+                BigUint::zero()
+            } else {
+                let (minimum, metrics) = min_erc1155_balance_over(
+                    rpc.as_ref(),
+                    Address::from_bytes(booster.collection.into_array()),
+                    event.user,
+                    &BigUint::from(booster.tokenId),
+                    hold_from,
+                    provisional.reference_block,
+                    MAX_LOG_RANGE,
+                    LOG_RESULT_CAP,
+                )
+                .await?;
+                log_metrics = merge_metrics(log_metrics, metrics);
+                minimum
+            }
+        } else {
+            BigUint::zero()
+        };
+        let gross_earned_score = if let Some(source) = &bulk_source {
+            source.gross_score_of(event.user).await?
+        } else if let Some(source) = &checkpoint_source {
+            source.gross_score_of(event.user).await?
+        } else {
+            let (score, score_metrics) = earned_score_of(
+                rpc.as_ref(),
+                &incident_config.scored_tokens,
+                event.user,
+                score_cutoff_block,
+                MAX_LOG_RANGE,
+                LOG_RESULT_CAP,
+            )
+            .await?;
+            log_metrics = merge_metrics(log_metrics, score_metrics);
+            score
+        };
+        let spent_score = spent_score_at(
+            rpc.as_ref(),
+            config.registry,
+            event.user,
+            provisional.open_block,
+        )
+        .await?;
+        claims.push(ClaimInput {
+            claim_id: event.claim_id.clone(),
+            user: event.user,
+            escrow_amount: event.amount.clone(),
+            min_held,
+            gross_earned_score,
+            spent_score,
+            score_to_spend: event.score_to_spend.clone(),
+            booster_amount: event.booster_amount.clone(),
+            booster_held,
+        });
+    }
+
+    let kernel_input = KernelInput {
+        incident_id: incident_id.clone(),
+        coverage_bps: incident_config.coverage_bps,
+        booster_boost_bps: config.booster_boost_bps.into(),
+        insured_decimals: u32::from(insured_decimals),
+        twap_ratio: twap_ratio.clone(),
+        underlying_usd: underlying_usd.clone(),
+        max_cover_pool_payout_bps: max_payout_bps,
+        protocol_fee_share_bps: provisional.protocol_fee_share_bps.clone(),
+        pools,
+        claims,
+    };
+    let output = allocate_with_events(&kernel_input, &events)?;
+    if !output
+        .claim_set_hash
+        .eq_ignore_ascii_case(&window_incident.claim_set_hash)
+    {
+        return Err(EngineError::Invariant(
+            "kernel claim-set commitment differs after allocation".to_owned(),
+        ));
+    }
+    let config_hash = config.hash()?;
+    let digest = settlement_digest(&SettlementDigestInput {
+        chain_id: config.chain_id,
+        verifying_contract: config.defi_insurance,
+        incident_id: incident_id.clone(),
+        root: output.root.clone(),
+        unresolved_claims: window_incident.unresolved_claims.clone(),
+        pool_payouts: output.pool_payouts.clone(),
+        pool_addrs: topology.pool_addrs.clone(),
+        claim_set: output.claim_set_hash.clone(),
+        tee_pcr_hash: tee_pcr_hash.clone(),
+    })?;
+    let latest_incident = incident_at(
+        rpc.as_ref(),
+        config.defi_insurance,
+        incident_id.clone(),
+        None,
+    )
+    .await?;
+    assert_anchors_unchanged(rpc.as_ref(), &anchors).await?;
+
+    let run = SettlementRun {
+        incident_id,
+        incident: provisional,
+        window_incident,
+        latest_incident,
+        anchors,
+        config_hash,
+        tee_pcr_hash,
+        pool_order: topology.assets,
+        pool_addrs: topology.pool_addrs,
+        twap_ratio,
+        underlying_usd,
+        events,
+        output,
+        digest,
+        score_source,
+        rpc_metrics: rpc.metrics(),
+        log_metrics,
+    };
+    if !run.latest_incident.root.eq_ignore_ascii_case(ZERO_ROOT) && !run.root_matches() {
+        return Err(EngineError::Invariant(format!(
+            "standing settlement root mismatch: on-chain {}, recomputed {}",
+            run.latest_incident.root, run.output.root
+        )));
+    }
+    crate::artifact::verify_run(&run, config).map_err(|error| {
+        EngineError::Invariant(format!("internal artifact verification failed: {error}"))
+    })?;
+    if let Some(source) = checkpoint_source.take() {
+        let integrity_key = checkpoint_integrity_key.as_deref().ok_or_else(|| {
+            EngineError::Invariant("checkpoint integrity key disappeared before commit".to_owned())
+        })?;
+        source.commit(integrity_key)?;
+    }
+    Ok(run)
+}

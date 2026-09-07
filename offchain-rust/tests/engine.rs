@@ -1,0 +1,867 @@
+use alloy_primitives::aliases::U80;
+use alloy_primitives::{Address as AlloyAddress, Bytes, I256, U256};
+use alloy_sol_types::{SolCall, SolEvent};
+use async_trait::async_trait;
+use num_bigint::BigUint;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use usd8_settlement::abi::{
+    IAggregatorV3, IDefiInsurance, IERC20, IERC1155, IRegistry, ISingleAssetCoverPool,
+};
+use usd8_settlement::artifact::{verify_run, write_atomic_json};
+use usd8_settlement::attested_runtime::artifact_for_attestation;
+use usd8_settlement::config::BootstrapConfig;
+use usd8_settlement::engine::{ScoreMode, build_settlement};
+use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
+use usd8_settlement::{Address, ClaimEvent, EventKind, claim_set_hash};
+
+const DEFI: &str = "0x0000000000000000000000000000000000002000";
+const REGISTRY: &str = "0x0000000000000000000000000000000000001000";
+const INSURED: &str = "0x0000000000000000000000000000000000003000";
+const ORACLE: &str = "0x0000000000000000000000000000000000004000";
+const SCORED: &str = "0x0000000000000000000000000000000000005000";
+const POOL: &str = "0x0000000000000000000000000000000000006000";
+const ASSET: &str = "0x0000000000000000000000000000000000007000";
+const FEED: &str = "0x0000000000000000000000000000000000008000";
+const USER: &str = "0x0000000000000000000000000000000000009000";
+const BOOSTER: &str = "0x000000000000000000000000000000000000a000";
+const BOOSTER_ID: u64 = 9;
+
+fn aa(value: &str) -> AlloyAddress {
+    AlloyAddress::from_str(value).unwrap()
+}
+
+fn ka(value: &str) -> Address {
+    Address::from_str(value).unwrap()
+}
+
+fn encoded<C: SolCall>(value: &C::Return) -> Value {
+    json!(format!("0x{}", hex::encode(C::abi_encode_returns(value))))
+}
+
+fn event_log<E: SolEvent>(address: &str, event: &E, block: u64, index: u64) -> Value {
+    let encoded = event.encode_log_data();
+    json!({
+        "address": address,
+        "topics": encoded.topics().iter().map(|topic| format!("{topic:#x}")).collect::<Vec<_>>(),
+        "data": format!("0x{}", hex::encode(encoded.data.as_ref())),
+        "blockNumber": format!("0x{block:x}"),
+        "transactionHash": format!("0x{:064x}", index + 1),
+        "logIndex": format!("0x{index:x}"),
+        "removed": false
+    })
+}
+
+fn topic_matches(filter: &Value, topic: &Value) -> bool {
+    if filter.is_null() {
+        true
+    } else if let Some(expected) = filter.as_str() {
+        topic
+            .as_str()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+    } else if let Some(options) = filter.as_array() {
+        options.iter().any(|option| topic_matches(option, topic))
+    } else {
+        false
+    }
+}
+
+#[derive(Clone)]
+struct EngineRpc {
+    responses: Arc<HashMap<(String, String), Value>>,
+    balances: Arc<HashMap<(String, u64), U256>>,
+    logs: Arc<Vec<Value>>,
+    calls: Arc<Mutex<Vec<String>>>,
+    fail_latest_incident: bool,
+    window_incident: Value,
+    finalized_number: u64,
+}
+
+#[async_trait]
+impl Rpc for EngineRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.calls.lock().unwrap().push(method.to_owned());
+        match method {
+            "eth_chainId" => Ok(json!(format!("0x{:x}", usd8_settlement::config::CHAIN_ID))),
+            "eth_getCode" => Ok(json!("0x01")),
+            "eth_getBlockByNumber" => {
+                if params[0] == "finalized" {
+                    let number = self.finalized_number;
+                    return Ok(json!({
+                        "number": format!("0x{number:x}"),
+                        "timestamp": format!("0x{:x}", number * 10),
+                        "hash": format!("0x{:064x}", number + 1_000),
+                    }));
+                }
+                let number =
+                    u64::from_str_radix(params[0].as_str().unwrap().trim_start_matches("0x"), 16)
+                        .unwrap();
+                Ok(json!({
+                    "number": format!("0x{number:x}"),
+                    "timestamp": format!("0x{:x}", number * 10),
+                    "hash": format!("0x{:064x}", number + 1_000),
+                }))
+            }
+            "eth_call" => {
+                let to = params[0]["to"].as_str().unwrap().to_ascii_lowercase();
+                let data = params[0]["data"].as_str().unwrap();
+                let selector = data[..10].to_owned();
+                let incident_selector =
+                    format!("0x{}", hex::encode(IDefiInsurance::incidentsCall::SELECTOR));
+                if self.fail_latest_incident
+                    && params[1] == "latest"
+                    && selector == incident_selector
+                {
+                    return Err(RpcError::JsonRpc {
+                        code: -32000,
+                        message: "late latest-state failure".to_owned(),
+                    });
+                }
+                if selector == incident_selector && params[1] == "0x5f" {
+                    return Ok(self.window_incident.clone());
+                }
+                let balance_selector =
+                    format!("0x{}", hex::encode(IERC20::balanceOfCall::SELECTOR));
+                let booster_selector =
+                    format!("0x{}", hex::encode(IERC1155::balanceOfCall::SELECTOR));
+                if selector == balance_selector || selector == booster_selector {
+                    if selector == booster_selector {
+                        let call =
+                            IERC1155::balanceOfCall::abi_decode(&hex::decode(&data[2..]).unwrap())
+                                .unwrap();
+                        assert_eq!(to, BOOSTER);
+                        assert_eq!(call.account, aa(USER));
+                        assert_eq!(call.id, U256::from(BOOSTER_ID));
+                    }
+                    let block = u64::from_str_radix(
+                        params[1].as_str().unwrap().trim_start_matches("0x"),
+                        16,
+                    )
+                    .unwrap();
+                    let balance = self.balances.get(&(to, block)).copied().ok_or_else(|| {
+                        RpcError::JsonRpc {
+                            code: -32000,
+                            message: "missing historical balance".to_owned(),
+                        }
+                    })?;
+                    return Ok(json!(format!(
+                        "0x{}",
+                        hex::encode(IERC20::balanceOfCall::abi_encode_returns(&balance))
+                    )));
+                }
+                self.responses
+                    .get(&(to, selector))
+                    .cloned()
+                    .ok_or_else(|| RpcError::JsonRpc {
+                        code: -32000,
+                        message: "missing canned call".to_owned(),
+                    })
+            }
+            "eth_getLogs" => {
+                let filter = &params[0];
+                let address = filter["address"].as_str().unwrap();
+                let from = u64::from_str_radix(
+                    filter["fromBlock"]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap();
+                let to = u64::from_str_radix(
+                    filter["toBlock"].as_str().unwrap().trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap();
+                let topics = filter["topics"].as_array().cloned().unwrap_or_default();
+                Ok(Value::Array(
+                    self.logs
+                        .iter()
+                        .filter(|log| {
+                            let block = u64::from_str_radix(
+                                log["blockNumber"]
+                                    .as_str()
+                                    .unwrap()
+                                    .trim_start_matches("0x"),
+                                16,
+                            )
+                            .unwrap();
+                            address.eq_ignore_ascii_case(log["address"].as_str().unwrap())
+                                && (from..=to).contains(&block)
+                                && topics.iter().enumerate().all(|(index, wanted)| {
+                                    log["topics"]
+                                        .get(index)
+                                        .is_some_and(|actual| topic_matches(wanted, actual))
+                                })
+                        })
+                        .cloned()
+                        .collect(),
+                ))
+            }
+            _ => panic!("unexpected RPC method {method}"),
+        }
+    }
+
+    fn metrics(&self) -> RpcMetrics {
+        RpcMetrics::default()
+    }
+}
+
+fn fixture_with_min_claim_and_root(
+    _min_claim_amount: u128,
+    root: [u8; 32],
+) -> (EngineRpc, BootstrapConfig) {
+    fixture_with_boosters(root, 0)
+}
+
+fn fixture_with_boosters(root: [u8; 32], booster_amount: u64) -> (EngineRpc, BootstrapConfig) {
+    let registration = ClaimEvent {
+        kind: EventKind::Register,
+        claim_id: BigUint::from(1u8),
+        user: ka(USER),
+        amount: BigUint::from(100u8),
+        score_to_spend: BigUint::from(60u8),
+        booster_amount: BigUint::from(booster_amount),
+        block_number: 92,
+        log_index: 0,
+    };
+    let claim_set = claim_set_hash(std::slice::from_ref(&registration)).unwrap();
+    let claim_set_bytes: [u8; 32] = hex::decode(claim_set.trim_start_matches("0x"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let mut responses = HashMap::new();
+    let mut insert = |to: &str, selector: [u8; 4], value: Value| {
+        responses.insert(
+            (
+                to.to_ascii_lowercase(),
+                format!("0x{}", hex::encode(selector)),
+            ),
+            value,
+        );
+    };
+    let incident = |phase_deadline| {
+        encoded::<IDefiInsurance::incidentsCall>(&IDefiInsurance::incidentsReturn {
+            insuredToken: aa(INSURED),
+            resolvedAt: 0,
+            referenceBlock: 80,
+            openBlock: 90,
+            phaseDeadline: phase_deadline,
+            root: root.into(),
+            unresolvedClaims: U256::from(1),
+            claimSetHash: claim_set_bytes.into(),
+            teePcrHash: [0x44; 32].into(),
+            protocolFeeShareBps: 2_000,
+        })
+    };
+    let window_incident = incident(950);
+    insert(
+        DEFI,
+        IDefiInsurance::incidentsCall::SELECTOR,
+        // Simulate post-root state: the mutable field is now the correction
+        // deadline, while the historical claim cutoff remains 950.
+        incident(990),
+    );
+    insert(
+        DEFI,
+        IDefiInsurance::incidentPhaseWindowCall::SELECTOR,
+        encoded::<IDefiInsurance::incidentPhaseWindowCall>(&50),
+    );
+    insert(
+        DEFI,
+        IDefiInsurance::getInsuredTokenCall::SELECTOR,
+        encoded::<IDefiInsurance::getInsuredTokenCall>(&IDefiInsurance::InsuredToken {
+            maxCoverageBps: 8_000,
+            underlyingPriceOracle: aa(ORACLE),
+            underlyingConversionAddress: AlloyAddress::ZERO,
+            underlyingConversionCallData: Bytes::new(),
+        }),
+    );
+    insert(
+        DEFI,
+        IDefiInsurance::settlementParamsCall::SELECTOR,
+        encoded::<IDefiInsurance::settlementParamsCall>(&IDefiInsurance::settlementParamsReturn {
+            twapLookbackBlocks: 10,
+            minHoldingRequired: 5,
+            sampleStepBlocks: 2,
+        }),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::boosterConfigCall::SELECTOR,
+        encoded::<IRegistry::boosterConfigCall>(&IRegistry::boosterConfigReturn {
+            collection: aa(BOOSTER),
+            tokenId: BOOSTER_ID,
+            boostBps: 100,
+        }),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::getScoredTokensCall::SELECTOR,
+        encoded::<IRegistry::getScoredTokensCall>(&vec![aa(SCORED)]),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::getScoredRateHistoryCall::SELECTOR,
+        encoded::<IRegistry::getScoredRateHistoryCall>(&vec![IRegistry::RatePoint {
+            fromBlock: 1,
+            rate: 1_000_000_000_000_000_000,
+        }]),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::coverPoolsCall::SELECTOR,
+        encoded::<IRegistry::coverPoolsCall>(&IRegistry::coverPoolsReturn {
+            assets: vec![aa(ASSET)],
+            poolAddrs: vec![aa(POOL)],
+        }),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::maxCoverPoolPayoutBpsCall::SELECTOR,
+        encoded::<IRegistry::maxCoverPoolPayoutBpsCall>(&U256::from(3_000)),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::scoreSpentCall::SELECTOR,
+        encoded::<IRegistry::scoreSpentCall>(&U256::ZERO),
+    );
+    for token in [INSURED, SCORED, ASSET] {
+        insert(
+            token,
+            IERC20::decimalsCall::SELECTOR,
+            encoded::<IERC20::decimalsCall>(&0),
+        );
+    }
+    insert(
+        POOL,
+        ISingleAssetCoverPool::assetCall::SELECTOR,
+        encoded::<ISingleAssetCoverPool::assetCall>(&aa(ASSET)),
+    );
+    insert(
+        POOL,
+        ISingleAssetCoverPool::totalAssetsCall::SELECTOR,
+        encoded::<ISingleAssetCoverPool::totalAssetsCall>(&U256::from(1_000)),
+    );
+    for oracle in [ORACLE, FEED] {
+        insert(
+            oracle,
+            IAggregatorV3::latestRoundDataCall::SELECTOR,
+            encoded::<IAggregatorV3::latestRoundDataCall>(&IAggregatorV3::latestRoundDataReturn {
+                roundId: U80::from(7),
+                answer: I256::try_from(100_000_000i64).unwrap(),
+                startedAt: U256::from(900),
+                updatedAt: U256::from(900),
+                answeredInRound: U80::from(7),
+            }),
+        );
+        insert(
+            oracle,
+            IAggregatorV3::decimalsCall::SELECTOR,
+            encoded::<IAggregatorV3::decimalsCall>(&8),
+        );
+    }
+
+    let logs = vec![
+        event_log(
+            DEFI,
+            &IDefiInsurance::ClaimRegistered {
+                claimId: U256::from(1),
+                incidentId: U256::from(7),
+                user: aa(USER),
+                insuredTokenAmount: 100,
+                scoreToSpend: U256::from(60),
+                boosterAmount: U256::from(booster_amount),
+            },
+            92,
+            0,
+        ),
+        event_log(
+            SCORED,
+            &IERC20::Transfer {
+                from: AlloyAddress::ZERO,
+                to: aa(USER),
+                value: U256::from(100),
+            },
+            10,
+            1,
+        ),
+    ];
+    let balances = [
+        ((INSURED.to_ascii_lowercase(), 75), U256::from(100)),
+        ((INSURED.to_ascii_lowercase(), 80), U256::from(100)),
+        ((SCORED.to_ascii_lowercase(), 1), U256::ZERO),
+        ((SCORED.to_ascii_lowercase(), 75), U256::from(100)),
+        ((SCORED.to_ascii_lowercase(), 80), U256::from(100)),
+    ]
+    .into_iter()
+    .collect();
+    let config = BootstrapConfig::derived(
+        Address::from_str(REGISTRY).unwrap(),
+        Address::from_str(DEFI).unwrap(),
+        BOOSTER_ID,
+        100,
+        [(
+            Address::from_str(ASSET).unwrap(),
+            Address::from_str(FEED).unwrap(),
+        )]
+        .into_iter()
+        .collect(),
+        129_600,
+    )
+    .unwrap();
+    (
+        EngineRpc {
+            responses: Arc::new(responses),
+            balances: Arc::new(balances),
+            logs: Arc::new(logs),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail_latest_incident: false,
+            window_incident,
+            finalized_number: 100,
+        },
+        config,
+    )
+}
+
+fn fixture_with_min_claim(min_claim_amount: u128) -> (EngineRpc, BootstrapConfig) {
+    fixture_with_min_claim_and_root(min_claim_amount, [0u8; 32])
+}
+
+fn fixture() -> (EngineRpc, BootstrapConfig) {
+    fixture_with_min_claim(1)
+}
+
+fn artifact_path() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "usd8-engine-artifact-{}-{nonce}.json",
+        std::process::id()
+    ))
+}
+
+#[test]
+fn checkpoint_integrity_key_is_redacted_from_debug_output() {
+    let mode = ScoreMode::Checkpoint {
+        path: PathBuf::from("state.json"),
+        integrity_key: b"definitely-secret-checkpoint-key".to_vec(),
+    };
+    let debug = format!("{mode:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("definitely-secret"));
+}
+
+#[tokio::test]
+async fn boosters_use_the_same_preincident_window_and_historical_minimum() {
+    // The insured-token window is [75, 80]. Endpoint balances alone would miss the dip.
+    for (escrowed, start, end, transfers, expected) in [
+        (10, 10, 10, vec![(77, false, 7), (79, true, 7)], 3u64),
+        (2, 10, 10, vec![], 2),
+        (10, 0, 10, vec![(78, true, 10)], 0),
+        (10, 0, 0, vec![(85, true, 10)], 0),
+    ] {
+        let (mut rpc, config) = fixture_with_boosters([0u8; 32], escrowed);
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 75), U256::from(start));
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 80), U256::from(end));
+        for (block, incoming, amount) in transfers {
+            Arc::make_mut(&mut rpc.logs).push(event_log(
+                BOOSTER,
+                &IERC1155::TransferSingle {
+                    operator: aa(USER),
+                    from: if incoming {
+                        AlloyAddress::ZERO
+                    } else {
+                        aa(USER)
+                    },
+                    to: if incoming {
+                        aa(USER)
+                    } else {
+                        AlloyAddress::ZERO
+                    },
+                    id: U256::from(BOOSTER_ID),
+                    value: U256::from(amount),
+                },
+                block,
+                block,
+            ));
+        }
+        let run = build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .unwrap();
+        let row = &run.output.rows[0];
+        assert_eq!(row.eligible_booster_amount, BigUint::from(expected));
+        assert_eq!(
+            row.boosted_score,
+            BigUint::from(60 * (100 + expected) / 100)
+        );
+        assert_eq!(row.eligible_amount, BigUint::from(100u8));
+        assert_eq!(row.score_spent, BigUint::from(60u8));
+        verify_run(&run, &config).unwrap();
+        let artifact = run.artifact(&config, true);
+        assert_eq!(artifact["schemaVersion"], 2);
+        assert_eq!(artifact["rows"][0]["boosterAmount"], escrowed.to_string());
+        assert_eq!(
+            artifact["rows"][0]["eligibleBoosterAmount"],
+            expected.to_string()
+        );
+    }
+}
+
+#[tokio::test]
+async fn booster_acquired_at_cutoff_qualifies_but_cutoff_plus_one_does_not() {
+    // The required holding window starts at block 75 (post-block state).
+    // A mint in block 75 is held throughout; a mint in block 76 is too late.
+    const CUTOFF: u64 = 75;
+    for (mint_block, starting_balance, expected) in [(CUTOFF, 10u64, 10u64), (CUTOFF + 1, 0, 0)] {
+        let (mut rpc, config) = fixture_with_boosters([0u8; 32], 10);
+        Arc::make_mut(&mut rpc.balances)
+            .insert((BOOSTER.to_owned(), CUTOFF), U256::from(starting_balance));
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), CUTOFF + 1), U256::from(10));
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 80), U256::from(10));
+        Arc::make_mut(&mut rpc.logs).push(event_log(
+            BOOSTER,
+            &IERC1155::TransferSingle {
+                operator: aa(USER),
+                from: AlloyAddress::ZERO,
+                to: aa(USER),
+                id: U256::from(BOOSTER_ID),
+                value: U256::from(10),
+            },
+            mint_block,
+            0,
+        ));
+        let run = build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .unwrap();
+        let row = &run.output.rows[0];
+        assert_eq!(
+            row.eligible_booster_amount,
+            BigUint::from(expected),
+            "mint block {mint_block}"
+        );
+        assert_eq!(
+            row.boosted_score,
+            BigUint::from(60 * (100 + expected) / 100)
+        );
+        assert_eq!(row.score_spent, BigUint::from(60u8));
+        assert_eq!(row.eligible_amount, BigUint::from(100u8));
+        verify_run(&run, &config).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unavailable_or_inconsistent_booster_history_fails_closed() {
+    let (mut rpc, config) = fixture_with_boosters([0u8; 32], 10);
+    assert!(
+        build_settlement(Arc::new(rpc.clone()), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .is_err()
+    );
+    Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 75), U256::from(10));
+    Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 80), U256::from(3));
+    // Missing transfer logs must not turn uncertain history into an eligible quantity.
+    assert!(
+        build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
+    let (rpc, config) = fixture();
+    let run = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+    assert_eq!(run.output.rows.len(), 1);
+    assert_eq!(run.output.rows[0].eligible_amount, BigUint::from(100u8));
+    assert_eq!(run.output.rows[0].score_spent, BigUint::from(60u8));
+    assert_eq!(run.output.rows[0].boosted_score, BigUint::from(60u8));
+    assert_eq!(run.output.rows[0].amounts, vec![BigUint::from(80u8)]);
+    assert_eq!(run.output.pool_payouts, vec![BigUint::from(100u8)]);
+    assert_eq!(run.tee_pcr_hash, format!("0x{}", "44".repeat(32)));
+    assert!(!run.root_matches());
+    verify_run(&run, &config).unwrap();
+
+    let artifact = run.artifact(&config, true);
+    let attested_artifact = artifact_for_attestation(&run, &config);
+    let compact = run.artifact(&config, false);
+    assert_eq!(artifact["rows"][0]["acceptPayoutRecommended"], true);
+    assert!(attested_artifact["rows"][0].get("proof").is_none());
+    assert_eq!(attested_artifact["rows"], compact["rows"]);
+    assert!(compact["rows"][0].get("proof").is_none());
+    assert_eq!(compact["root"], artifact["root"]);
+    assert_eq!(compact["digest"], artifact["digest"]);
+    let path = artifact_path();
+    write_atomic_json(&path, &artifact).unwrap();
+    let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted, artifact);
+    assert_eq!(persisted["protocolFeeShareBps"], "2000");
+    assert_eq!(persisted["teePcrHash"], format!("0x{}", "44".repeat(32)));
+    assert_eq!(
+        persisted["bootstrapConfig"]["registry"],
+        config.registry.to_string()
+    );
+    assert_eq!(
+        persisted["bootstrapConfig"]["maxOracleStaleness"],
+        config.max_oracle_staleness.to_string()
+    );
+    assert_eq!(persisted["bootstrapConfig"]["anchorBlock"], "90");
+    assert_eq!(
+        persisted["bootstrapConfig"]["assetUsdFeed"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(persisted["rows"][0]["amounts"][0], "80");
+    assert!(persisted["rows"][0]["proof"].is_array());
+    fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn raw_score_stops_at_the_insured_holding_window_start() {
+    let (rpc, config) = fixture();
+    let run = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run.output.rows[0].gross_earned_score,
+        BigUint::from(6_500u16) * BigUint::from(10u8).pow(18)
+    );
+    assert_eq!(
+        run.artifact(&config, false)["scoreSource"]["asOfBlock"],
+        "75"
+    );
+}
+
+#[tokio::test]
+async fn historical_claim_deadline_mismatch_fails_closed() {
+    let (mut rpc, config) = fixture();
+    let incident_selector = format!("0x{}", hex::encode(IDefiInsurance::incidentsCall::SELECTOR));
+    rpc.window_incident = rpc
+        .responses
+        .get(&(DEFI.to_ascii_lowercase(), incident_selector))
+        .unwrap()
+        .clone();
+
+    let error = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("historical claim deadline mismatch: reconstructed 950, on-chain 990")
+    );
+}
+
+#[tokio::test]
+async fn settlement_at_claim_deadline_is_not_authorizable() {
+    let (mut rpc, config) = fixture();
+    rpc.finalized_number = 95;
+
+    let error = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("settlement phase is not open"));
+}
+
+#[tokio::test]
+async fn settlement_after_snapshotted_phase_window_is_not_authorizable() {
+    let (mut rpc, config) = fixture();
+    rpc.finalized_number = 101;
+
+    let error = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("settlement phase expired"));
+}
+
+#[tokio::test]
+async fn standing_settlement_root_mismatch_fails_closed() {
+    let (rpc, config) = fixture_with_min_claim_and_root(1, [0x99; 32]);
+
+    let error = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("standing settlement root mismatch")
+    );
+}
+
+#[tokio::test]
+async fn matching_standing_root_is_verification_only() {
+    let (rpc, config) = fixture();
+    let initial = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+    let root: [u8; 32] = hex::decode(initial.output.root.trim_start_matches("0x"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let (rpc, config) = fixture_with_min_claim_and_root(1, root);
+    let replay = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+
+    assert!(replay.root_matches());
+    assert!(!replay.is_unsettled());
+}
+
+#[tokio::test]
+async fn all_zero_amount_row_is_explicitly_decline_only() {
+    let (rpc, config) = fixture();
+    let mut run = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+    assert!(run.output.rows[0].eligible_amount > BigUint::from(0u8));
+    run.output.rows[0].amounts.fill(BigUint::from(0u8));
+    run.output.rows[0].payout_usd = BigUint::from(0u8);
+    run.output.pool_payouts.fill(BigUint::from(0u8));
+
+    let artifact = run.artifact(&config, true);
+    assert_eq!(artifact["rows"][0]["acceptPayoutRecommended"], false);
+    assert!(artifact["rows"][0]["proof"].is_array());
+}
+
+#[tokio::test]
+async fn ephemeral_bulk_matches_raw_full_engine_and_records_safe_provenance() {
+    let (raw_rpc, config) = fixture();
+    let (bulk_rpc, _) = fixture();
+    let raw = build_settlement(
+        Arc::new(raw_rpc),
+        &config,
+        BigUint::from(7u8),
+        ScoreMode::Raw,
+    )
+    .await
+    .unwrap();
+    let bulk = build_settlement(
+        Arc::new(bulk_rpc),
+        &config,
+        BigUint::from(7u8),
+        ScoreMode::Bulk,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(bulk.output.rows, raw.output.rows);
+    assert_eq!(
+        bulk.output.settlement_input_hash,
+        raw.output.settlement_input_hash
+    );
+    assert_eq!(bulk.output.root, raw.output.root);
+    assert_eq!(bulk.output.pool_payouts, raw.output.pool_payouts);
+    assert_eq!(bulk.digest, raw.digest);
+    let artifact = bulk.artifact(&config, false);
+    let source = &artifact["scoreSource"];
+    assert_eq!(source["kind"], "ephemeral-bulk-rpc");
+    assert_eq!(source["trackedAccounts"], 1);
+    assert!(source.get("path").is_none());
+    assert!(source.get("authentication").is_none());
+}
+
+#[tokio::test]
+async fn artifact_verifier_recomputes_config_hash_independently() {
+    let (rpc, config) = fixture();
+    let mut run = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+    run.config_hash = format!("0x{}", "11".repeat(32));
+
+    let error = verify_run(&run, &config).unwrap_err();
+    assert!(error.to_string().contains("config hash"));
+}
+
+#[tokio::test]
+async fn registered_claim_is_not_rechecked_against_join_time_minimum() {
+    let (rpc, config) = fixture_with_min_claim(101);
+    let run = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+
+    assert_eq!(run.output.rows.len(), 1);
+    assert_eq!(run.output.rows[0].escrow_amount, BigUint::from(100u8));
+}
+
+#[tokio::test]
+async fn anchor_recheck_is_last_rpc_operation() {
+    let (rpc, config) = fixture();
+    let calls = rpc.calls.clone();
+    build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        calls.lock().unwrap().last().map(String::as_str),
+        Some("eth_getBlockByNumber")
+    );
+}
+
+#[tokio::test]
+async fn verified_checkpoint_run_commits_and_releases_lock() {
+    let (rpc, config) = fixture();
+    let path = artifact_path();
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let run = build_settlement(
+        Arc::new(rpc),
+        &config,
+        BigUint::from(7u8),
+        ScoreMode::Checkpoint {
+            path: path.clone(),
+            integrity_key: vec![7u8; 32],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        run.output.rows[0].gross_earned_score,
+        BigUint::from(6_500u16) * BigUint::from(10u8).pow(18)
+    );
+    assert_eq!(
+        run.artifact(&config, false)["scoreSource"]["asOfBlock"],
+        "75"
+    );
+    assert!(path.exists());
+    assert!(!lock_path.exists());
+    fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn late_rpc_failure_does_not_commit_checkpoint() {
+    let (mut rpc, config) = fixture();
+    rpc.fail_latest_incident = true;
+    let path = artifact_path();
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let error = build_settlement(
+        Arc::new(rpc),
+        &config,
+        BigUint::from(7u8),
+        ScoreMode::Checkpoint {
+            path: path.clone(),
+            integrity_key: vec![9u8; 32],
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("late latest-state failure"));
+    assert!(!path.exists());
+    assert!(!lock_path.exists());
+}

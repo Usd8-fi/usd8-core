@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AttestedDecryptOnly",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:eu-central-1:919437049909:key/87d313c1-7b18-4ce0-be4d-87059d35e6e6",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:ImageSha384": "03a117faac28842c59ef241ec504e9ecbc1034e16fea4311786fdc7e7766bb9198aa15a36a6abc975d5bf5e0a80bdbf0",
+          "kms:RecipientAttestation:PCR3": "1dc0aeefd8ca0b888ba8ed140ea3a1793eafd569a833d8b19a176e2a2cf8e95919561e4369d635546f97e1107c981c6b"
+        }
+      }
+    }
+  ]
+}

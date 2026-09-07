@@ -1,0 +1,134 @@
+name: CI
+
+permissions: {}
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Compile-time sentinel for Linux enclave CI only; release builds require REGISTRY.
+  USD8_REGISTRY: "0x0000000000000000000000000000000000000001"
+
+jobs:
+  check:
+    name: Foundry project
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.5.1
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+
+      - name: Install TEE job API Rust
+        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt,clippy
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Run Forge fmt
+        run: forge fmt --check
+
+      - name: Run Forge build
+        run: forge build --sizes
+
+      - name: Check Rust-consumed Solidity ABI parity
+        run: |
+          python3 script/check_offchain_abi.py --self-test
+          python3 script/check_offchain_abi.py --artifacts out
+
+      - name: Verify published Sepolia source freeze
+        run: python3 script/check_sepolia_source_freeze.py
+
+      - name: Check Rust formatting
+        working-directory: offchain-rust
+        run: cargo fmt --check
+
+      - name: Lint Rust
+        working-directory: offchain-rust
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test Rust settlement runtime (mainnet and Sepolia)
+        working-directory: offchain-rust
+        run: |
+          cargo test --locked
+          cargo test --locked --features sepolia
+
+      - name: Verify Rust package is standalone
+        run: |
+          mkdir -p "$RUNNER_TEMP/usd8-rust-standalone"
+          git archive HEAD offchain-rust | tar -x -C "$RUNNER_TEMP/usd8-rust-standalone"
+          cd "$RUNNER_TEMP/usd8-rust-standalone/offchain-rust"
+          cargo test --locked
+          cargo build --release --locked
+
+      - name: Build Rust settlement runtime
+        working-directory: offchain-rust
+        run: cargo build --release --locked
+
+      - name: Audit Rust dependencies
+        working-directory: offchain-rust
+        run: cargo audit --deny warnings
+
+      - name: Check TEE job API formatting
+        working-directory: offchain-rust/job-api
+        run: cargo +1.94.1 fmt --check
+
+      - name: Lint TEE job API
+        working-directory: offchain-rust/job-api
+        run: cargo +1.94.1 clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test TEE job API
+        working-directory: offchain-rust/job-api
+        run: |
+          cargo +1.94.1 test --locked --all-features
+          python3 -m unittest discover -s deploy/tests -v
+
+      - name: Audit TEE job API dependencies
+        working-directory: offchain-rust/job-api
+        run: cargo +1.94.1 audit --deny warnings
+
+      - name: Test standalone real-history helpers
+        working-directory: offchain-rust
+        run: python3 -m unittest bench/test_real_history.py -v
+
+      - name: Run Forge tests
+        run: forge test --no-match-contract SettlementIntegrationTest -vvv
+
+      - name: Compile formal harnesses against production ABI
+        env:
+          FOUNDRY_PROFILE: kontrol
+        run: forge build
+
+      - name: Run formal properties as Forge regressions
+        env:
+          FOUNDRY_PROFILE: kontrol
+        run: forge test --summary
+
+      - name: Run Solidity ↔ Rust FFI parity tests
+        env:
+          RUN_INTEGRATION: "1"
+        run: forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vvv
+
+      - name: Check generated-file hygiene
+        run: |
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
