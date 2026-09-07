@@ -22,7 +22,18 @@ HEX96 = re.compile(r"^[0-9a-fA-F]{96}$")
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 AMI = re.compile(r"^ami-[0-9a-f]+$")
 IAM_ROLE_ARN = re.compile(r"^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$")
-REQUIRED_ARTIFACTS = {"eif", "parent", "settlement", "lambda", "janitor", "kmsPolicy", "instancePolicy"}
+REQUIRED_ARTIFACTS = {
+    "eif", "parent", "settlement", "lambda", "janitor", "kmsPolicy", "instancePolicy",
+    "bucketCors",
+}
+BUCKET_CORS_ORIGINS = {
+    "https://usd8.fi",
+    "https://usd8-fi.github.io",
+    "http://127.0.0.1:4173",
+    "http://localhost:4173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+}
 ABI_WORD = re.compile(r"^0x[0-9a-fA-F]{64}$")
 TEE_PCR_HASH_SELECTOR = "0x235c9c7b"
 DEFI_INSURANCE_SELECTOR = "0xa4119c10"
@@ -68,6 +79,38 @@ def sha256(path: pathlib.Path) -> str:
 def canonical_sha256(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_bucket_cors(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"CORSRules"}:
+        fail("bucket CORS configuration is malformed")
+    rules = value["CORSRules"]
+    if not isinstance(rules, list) or len(rules) != 1 or not isinstance(rules[0], dict):
+        fail("bucket CORS must contain exactly one rule")
+    rule = rules[0]
+    if set(rule) != {"AllowedMethods", "AllowedOrigins", "ExposeHeaders", "MaxAgeSeconds"}:
+        fail("bucket CORS rule contains missing or unknown fields")
+    methods = rule["AllowedMethods"]
+    origins = rule["AllowedOrigins"]
+    exposed = rule["ExposeHeaders"]
+    if methods != ["GET"]:
+        fail("bucket CORS must allow only GET")
+    if (
+        not isinstance(origins, list)
+        or len(origins) != len(BUCKET_CORS_ORIGINS)
+        or set(origins) != BUCKET_CORS_ORIGINS
+    ):
+        fail("bucket CORS origins differ from the reviewed allowlist")
+    if exposed != ["Content-Length"] or rule["MaxAgeSeconds"] != 300:
+        fail("bucket CORS response headers or max age differ from reviewed values")
+    return {
+        "CORSRules": [{
+            "AllowedMethods": ["GET"],
+            "AllowedOrigins": sorted(origins),
+            "ExposeHeaders": ["Content-Length"],
+            "MaxAgeSeconds": 300,
+        }],
+    }
 
 
 def rotate_left_64(value: int, count: int) -> int:
@@ -282,6 +325,7 @@ def verify_policy_bindings(manifest: dict[str, Any], paths: dict[str, pathlib.Pa
         encoded = json.dumps(policy, sort_keys=True)
         if encoded.count(ami_id) != 1:
             fail("lambda policy must bind the manifest AMI exactly once")
+    normalize_bucket_cors(load_json(paths["bucketCors"]))
 
 
 def aws_json(args: list[str], region: str) -> Any:
@@ -294,6 +338,16 @@ def aws_json(args: list[str], region: str) -> Any:
     except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)
         fail(f"AWS query failed: {detail.strip()}")
+
+
+def verify_live_bucket_cors(manifest: dict[str, Any], paths: dict[str, pathlib.Path]) -> None:
+    aws = manifest["aws"]
+    region = aws["region"]
+    bucket = aws["lambdaEnvironment"]["USD8_JOB_BUCKET"]
+    expected = normalize_bucket_cors(load_json(paths["bucketCors"]))
+    live = aws_json(["s3api", "get-bucket-cors", "--bucket", bucket], region)
+    if normalize_bucket_cors(live) != expected:
+        fail("live job-bucket CORS differs from release")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -400,6 +454,7 @@ def verify_live(
     verify_live_chain(manifest, rpc_url)
     aws = manifest["aws"]
     region = aws["region"]
+    verify_live_bucket_cors(manifest, paths)
     image_doc = aws_json(["ec2", "describe-images", "--image-ids", aws["amiId"]], region)
     images = image_doc.get("Images", [])
     if len(images) != 1:
@@ -558,7 +613,10 @@ def verify(
         }
         if set(aws["lambdaEnvironment"]) != expected_lambda_environment:
             fail("Lambda environment manifest is incomplete or unknown")
-        expected_lambda_secret_environment = {"USD8_JOB_HMAC_KEY_B64"}
+        expected_lambda_secret_environment = {
+            "USD8_JOB_HMAC_KEY_B64",
+            "USD8_PRECHECK_RPC_URL",
+        }
         if (
             set(aws["lambdaSecretEnvironmentSha256"]) != expected_lambda_secret_environment
             or not all(HEX64.fullmatch(str(value)) for value in aws["lambdaSecretEnvironmentSha256"].values())

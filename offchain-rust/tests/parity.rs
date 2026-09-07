@@ -47,6 +47,7 @@ fn payout_entitlement_is_proportional_to_boosted_score() {
                 spent_score: 0u8.into(),
                 score_to_spend: 60u8.into(),
                 booster_amount: 0u8.into(),
+                booster_held: 0u8.into(),
             },
             ClaimInput {
                 claim_id: 2u8.into(),
@@ -57,6 +58,7 @@ fn payout_entitlement_is_proportional_to_boosted_score() {
                 spent_score: 0u8.into(),
                 score_to_spend: 40u8.into(),
                 booster_amount: 0u8.into(),
+                booster_held: 0u8.into(),
             },
         ],
     };
@@ -94,6 +96,7 @@ fn unused_entitlement_remains_in_cover_pools() {
                 spent_score: 0u8.into(),
                 score_to_spend: 50u8.into(),
                 booster_amount: 0u8.into(),
+                booster_held: 0u8.into(),
             },
             ClaimInput {
                 claim_id: 2u8.into(),
@@ -104,6 +107,7 @@ fn unused_entitlement_remains_in_cover_pools() {
                 spent_score: 0u8.into(),
                 score_to_spend: 50u8.into(),
                 booster_amount: 0u8.into(),
+                booster_held: 0u8.into(),
             },
         ],
     };
@@ -141,6 +145,7 @@ fn zero_eligible_claim_is_signed_but_excluded_from_payout_allocation() {
                 spent_score: 0u8.into(),
                 score_to_spend: 50u8.into(),
                 booster_amount: 0u8.into(),
+                booster_held: 0u8.into(),
             },
             ClaimInput {
                 claim_id: 2u8.into(),
@@ -151,6 +156,7 @@ fn zero_eligible_claim_is_signed_but_excluded_from_payout_allocation() {
                 spent_score: 0u8.into(),
                 score_to_spend: 50u8.into(),
                 booster_amount: 10u8.into(),
+                booster_held: 10u8.into(),
             },
         ],
     };
@@ -193,6 +199,7 @@ fn configured_booster_rate_changes_payout_score_without_inflating_raw_score_spen
             spent_score: 40u8.into(),
             score_to_spend: 1_000u16.into(),
             booster_amount: 2u8.into(),
+            booster_held: 2u8.into(),
         }],
     };
 
@@ -229,6 +236,7 @@ fn relative_payouts_use_boosted_not_raw_scores() {
                 spent_score: 0u8.into(),
                 score_to_spend: 100u8.into(),
                 booster_amount: 0u8.into(),
+                booster_held: 0u8.into(),
             },
             ClaimInput {
                 claim_id: 2u8.into(),
@@ -239,6 +247,7 @@ fn relative_payouts_use_boosted_not_raw_scores() {
                 spent_score: 0u8.into(),
                 score_to_spend: 100u8.into(),
                 booster_amount: 10u8.into(),
+                booster_held: 10u8.into(),
             },
         ],
     };
@@ -265,6 +274,7 @@ fn many_claimants_share_an_underfunded_pool_by_score_with_ineligible_rows_exclud
             spent_score: 0u8.into(),
             score_to_spend: score.into(),
             booster_amount: 0u8.into(),
+            booster_held: 0u8.into(),
         });
     }
     claims.push(ClaimInput {
@@ -276,6 +286,7 @@ fn many_claimants_share_an_underfunded_pool_by_score_with_ineligible_rows_exclud
         spent_score: 0u8.into(),
         score_to_spend: 1_000u16.into(),
         booster_amount: 100u8.into(),
+        booster_held: 100u8.into(),
     });
 
     let output = allocate(&KernelInput {
@@ -350,6 +361,7 @@ fn standard_merkle_root_and_proofs_match_golden_vectors() {
             score_spent: 60u8.into(),
             boosted_score: 61u8.into(),
             eligible_amount: wad(100),
+            eligible_booster_amount: 2u8.into(),
         },
         MerkleRow {
             claim_id: 2u8.into(),
@@ -358,20 +370,21 @@ fn standard_merkle_root_and_proofs_match_golden_vectors() {
             score_spent: 40u8.into(),
             boosted_score: 40u8.into(),
             eligible_amount: wad(100),
+            eligible_booster_amount: 0u8.into(),
         },
     ];
     let tree = SettlementTree::new(&1u8.into(), &rows).unwrap();
     assert_eq!(
         tree.root_hex(),
-        "0xf1856ac31823baefec4176cc5c01403c974256e16e0f03572ce8da482595a695"
+        "0x89c088a453f7afe99231a70d216a8a333ee10173e16b001db43d12900128513e"
     );
     assert_eq!(
         tree.proof_hex(&1u8.into()).unwrap(),
-        vec!["0x83b69733304617e45b299fb7cbbce4257c570a16409cced96d5af3bb632f8c7c"]
+        vec!["0x7be61f8e01ccb59acef4f858a22b7245c586f6c212caaae91962f828c5829543"]
     );
     assert_eq!(
         tree.proof_hex(&2u8.into()).unwrap(),
-        vec!["0x4c007f1bddb62260585589d89bd932ab65daafafb39744cd88ba5b5d667d5c59"]
+        vec!["0x191200136966f6069dc1137a8adb8c2d3cdcc331255d9b25fc300ef800597ad2"]
     );
 }
 

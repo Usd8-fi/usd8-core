@@ -120,13 +120,27 @@ RPC/log metrics, score-source provenance, claim-set and settlement-input
 commitments, ordered pools and payouts, root/on-chain root/match flag, EIP-712
 digest, canonical score input rows, payout rows, and optional proofs. Before any
 output, Rust independently recomputes the claim-set hash, input hash, Merkle
-root/proofs, per-pool row totals, and settlement digest. Each payout leaf commits
-`scoreSpent` (raw score recorded in the Registry) and `boostedScore` (the
-booster-adjusted value used only for allocation). The contract recomputes the
-boosted score from the claim's escrowed booster amount before finalizing.
+root/proofs, per-pool row totals, and settlement digest. Settlement artifacts use
+schema version 2; incident-open artifacts remain version 1. Each payout leaf is
+`(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount, eligibleBoosterAmount)`.
+Raw `scoreSpent` is recorded in the Registry; `boostedScore` affects only allocation.
 
-Boosters are escrowed by `fileClaim`; settlement therefore uses the committed
-amount directly without replaying ERC-1155 balance history.
+For boosters, settlement replays ERC-1155 balances over the insured token's same
+`[referenceBlock - minHoldingRequired, referenceBlock]` interval, using the policy
+and booster configuration at `openBlock`. `eligibleBoosterAmount` is the smaller
+of the escrowed quantity and the minimum historical balance. Missing or
+inconsistent history fails closed. Rows also report the original `boosterAmount`,
+which remains stored on-chain and bound by `claimSetHash`. Kernel JSON inputs require `boosterHeld`.
+The contract checks the proven quantity against escrow and recomputes the boost
+from that quantity. Accepting an eligible claim burns only eligible boosters and
+refunds the excess; declining, cancellation, recovery, or a bond-ineligible row
+returns all boosters. Zero eligible boosters do not invalidate a base claim.
+
+Roll out the contract implementation, rebuilt/measured TEE release, API signer,
+and frontend together between incidents. This changes the Merkle leaf and
+`finalizeClaim` ABI, not claim storage. Existing roots cannot be finalized using
+the new leaf, so resolve/recover old claims before upgrading; do not mix releases
+or reuse cached version-1 settlement artifacts.
 
 ## Ephemeral bulk score replay
 
@@ -271,6 +285,8 @@ The deployed flow is intentionally small:
 POST /jobs/settlement -> Rust Lambda -> S3 request -> one Nitro-enabled EC2
 POST /jobs/open       -> Rust Lambda -> S3 request -> one Nitro-enabled EC2
 GET /jobs/<jobId> <- Rust Lambda <- S3 terminal envelope <- enclave
+GET /settlements/<chainId>/<registry>/<module>/<incidentId>/<root>
+    <- Rust Lambda <- immutable root-addressed settlement artifact
 ```
 
 There is no idle EC2. Lambda returns `202 Accepted` with a job ID; clients poll
@@ -337,6 +353,21 @@ GET /jobs/<jobId>
 {"jobId":"<jobId>","status":"completed","apiVerified":false,"payload":{}}
 ```
 
+After a completed settlement terminal passes the Lambda's structural and request-binding
+checks, Lambda conditionally saves the same immutable terminal under its public settlement
+identity before returning it to the polling client. A later claimant does not need the
+original relayer's private job ID. The claimant reads the standing root from the contract and
+requests:
+
+```http
+GET /settlements/<chainId>/<registry>/<defiInsurance>/<incidentId>/<root>
+```
+
+The endpoint returns the same completed-job response shape as `GET /jobs/<jobId>`, including
+an integrity-bound download when the artifact is too large to return inline. If no canonical
+artifact exists yet, the client may start an exact-root replay; the measured runtime returns
+rows only when the recomputed root matches the standing root.
+
 Settlement accepts only `incidentId` and `registry`; incident opening accepts
 only `insuredToken`, with Registry injected from Lambda's fixed configuration.
 Unknown fields, numeric rather than canonical decimal-string IDs, leading zeroes, out-of-range integers, zero/malformed
@@ -369,6 +400,8 @@ Lambda timeout cannot create another instance.
 ```text
 requests/<jobId>.json    immutable request plus createdAt/expiresAt
 terminal/<jobId>.json    immutable completed-or-failed envelope
+settlements/v1/<chainId>/<registry>/<defiInsurance>/<incidentId>/<root>.json
+                          immutable claimant-discoverable completed envelope
 ```
 
 The worker conditionally creates the single terminal key, so success and failure
@@ -420,8 +453,9 @@ alone does not create per-tenant ownership.
 
 Enforce separate policies. Lambda needs only:
 
-- conditional `s3:PutObject` under `requests/` and `s3:GetObject` under
-  `requests/` plus `terminal/`; it must not write terminal state;
+- conditional `s3:PutObject` under `requests/` and `settlements/`, plus
+  `s3:GetObject` under `requests/`, `terminal/`, and `settlements/`; it must not
+  write worker-owned `terminal/` state;
 - `ec2:RunInstances` restricted to the approved AMI, subnet, security group,
   instance profile and instance type;
 - `iam:PassRole` for only the TEE instance role;
@@ -477,12 +511,18 @@ For each release:
    Lambda, KMS and IAM inputs; it binds all artifacts, policies and expected AWS
    configuration into one read-only manifest;
 6. update KMS, IAM, Lambda and the on-chain PCR commitment only from that final
-   bundle;
+   bundle, then apply the manifest-bound browser CORS rule to the exact job bucket:
+   ```bash
+   aws s3api put-bucket-cors \
+     --bucket "$JOB_BUCKET" \
+     --cors-configuration "file://$FINAL_DIR/bucket-cors.json" \
+     --region eu-central-1
+   ```
 7. run `deploy/verify-release.py <final-dir>/release-manifest.json --live
    --rpc-url "$SEPOLIA_RPC_URL"` and fail the deployment unless the live chain
    ID, Registry bytecode, Registry PCR commitment, and authorized DefiInsurance
-   signer, plus the AMI, Lambda code/configuration, Function URL authorization,
-   KMS policy and IAM policies exactly match the manifest.
+   signer, plus the job-bucket CORS, AMI, Lambda code/configuration, Function URL
+   authorization, KMS policy and IAM policies exactly match the manifest.
 
 Rebuild only when measured code or dependencies change. AMI snapshot and private
 S3 artifact storage remain while all compute is terminated.

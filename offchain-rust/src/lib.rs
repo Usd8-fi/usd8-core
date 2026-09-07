@@ -137,6 +137,7 @@ pub struct ClaimInput {
     pub spent_score: BigUint,
     pub score_to_spend: BigUint,
     pub booster_amount: BigUint,
+    pub booster_held: BigUint,
 }
 
 #[derive(Clone, Debug)]
@@ -164,6 +165,8 @@ pub struct SettledRow {
     pub earned_score: BigUint,
     pub score_spent: BigUint,
     pub boosted_score: BigUint,
+    pub booster_amount: BigUint,
+    pub eligible_booster_amount: BigUint,
     pub payout_usd: BigUint,
     pub amounts: Vec<BigUint>,
 }
@@ -176,6 +179,7 @@ pub struct MerkleRow {
     pub score_spent: BigUint,
     pub boosted_score: BigUint,
     pub eligible_amount: BigUint,
+    pub eligible_booster_amount: BigUint,
 }
 
 #[derive(Clone, Debug)]
@@ -344,14 +348,15 @@ fn standard_leaf_hash(incident_id: &BigUint, row: &MerkleRow) -> Result<Hash, Ke
         .len()
         .checked_mul(32)
         .ok_or(KernelError::Uint256Overflow)?;
-    let mut encoded = Vec::with_capacity(224 + amount_bytes);
+    let mut encoded = Vec::with_capacity(288 + amount_bytes);
     encoded.extend_from_slice(&uint256_word(incident_id)?);
     encoded.extend_from_slice(&uint256_word(&row.claim_id)?);
     encoded.extend_from_slice(&row.user.abi_word());
-    encoded.extend_from_slice(&usize_word(224));
+    encoded.extend_from_slice(&usize_word(256));
     encoded.extend_from_slice(&uint256_word(&row.score_spent)?);
     encoded.extend_from_slice(&uint256_word(&row.boosted_score)?);
     encoded.extend_from_slice(&uint256_word(&row.eligible_amount)?);
+    encoded.extend_from_slice(&uint256_word(&row.eligible_booster_amount)?);
     encoded.extend_from_slice(&usize_word(row.amounts.len()));
     for amount in &row.amounts {
         encoded.extend_from_slice(&uint256_word(amount)?);
@@ -497,7 +502,7 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
         } else {
             BigUint::zero()
         };
-        let boost = claim.booster_amount.clone();
+        let boost = claim.booster_amount.clone().min(claim.booster_held.clone());
         // Keep zero-eligible claims in the signed resolution set without letting them spend score
         // or dilute the relative-score denominator used by economically eligible claims.
         let score_spent = if eligible.is_zero() {
@@ -516,6 +521,8 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
             earned_score: unspent,
             score_spent,
             boosted_score,
+            booster_amount: claim.booster_amount.clone(),
+            eligible_booster_amount: boost,
             payout_usd: BigUint::zero(),
             amounts: Vec::new(),
         });
@@ -590,6 +597,7 @@ pub fn allocate(input: &KernelInput) -> Result<KernelOutput, KernelError> {
                 score_spent: row.score_spent.clone(),
                 boosted_score: row.boosted_score.clone(),
                 eligible_amount: row.eligible_amount.clone(),
+                eligible_booster_amount: row.eligible_booster_amount.clone(),
             })
             .collect::<Vec<_>>();
         let tree = SettlementTree::new(&input.incident_id, &merkle_rows)?;

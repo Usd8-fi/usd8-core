@@ -28,6 +28,8 @@ fn pre_crafted_claim_results_match_golden_vectors() {
                     "earnedScore": row["earnedScore"],
                     "scoreSpent": row["scoreSpent"],
                     "boostedScore": row["boostedScore"],
+                    "boosterAmount": row["boosterAmount"],
+                    "eligibleBoosterAmount": row["eligibleBoosterAmount"],
                     "payoutUsd": row["payoutUsd"],
                     "amounts": row["amounts"],
                 })

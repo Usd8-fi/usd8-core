@@ -20,7 +20,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         _warpToFinalization(1);
 
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, none, 1, 1, eligibleSeed, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, none, 1, 1, eligibleSeed, 0, new bytes32[](0));
 
         (,,,,, bool resolved) = defi.claims(claimId);
         uint256 unresolved = _incidentUnresolved(1);
@@ -47,7 +47,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
 
         uint256 supplyBefore = booster.totalSupply(_boosterId());
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, none, scoreSpent, expectedBoost, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, none, scoreSpent, expectedBoost, 10, boosterAmount, new bytes32[](0));
         assert(registry.scoreSpent(ALICE) == scoreSpent);
         assert(booster.balanceOf(address(defi), _boosterId()) == 0);
         assert(booster.totalSupply(_boosterId()) == supplyBefore - boosterAmount);
@@ -66,7 +66,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         uint256 assetsBefore = pool.assets();
 
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, amounts, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, amounts, 1, 1, 10, 0, new bytes32[](0));
         assert(pool.payCalls() == (payout == 0 ? 0 : 1));
         assert(pool.totalPaid() == payout);
         assert(pool.assets() == assetsBefore - payout);
@@ -90,7 +90,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         bytes32[] memory bobProof = new bytes32[](1);
         bobProof[0] = aliceLeaf;
         vm.prank(BOB);
-        defi.finalizeClaim(bobClaim, true, bobAmounts, 1, 1, 11, bobProof);
+        defi.finalizeClaim(bobClaim, true, bobAmounts, 1, 1, 11, 0, bobProof);
         assert(pool.totalPaid() == 60);
         assert(defi.activeIncidentId() == 1);
         assert(_incidentResolvedAt(1) == 0);
@@ -98,7 +98,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         bytes32[] memory aliceProof = new bytes32[](1);
         aliceProof[0] = bobLeaf;
         vm.prank(ALICE);
-        defi.finalizeClaim(aliceClaim, true, aliceAmounts, 1, 1, 10, aliceProof);
+        defi.finalizeClaim(aliceClaim, true, aliceAmounts, 1, 1, 10, 0, aliceProof);
         uint256 unresolved = _incidentUnresolved(1);
         assert(pool.totalPaid() == 100);
         uint256[] memory remainingBudget = defi.incidentPoolBudget(1);
@@ -122,7 +122,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         bytes32[] memory aliceProof = new bytes32[](1);
         aliceProof[0] = bobLeaf;
         vm.prank(ALICE);
-        defi.finalizeClaim(aliceClaim, true, aliceAmounts, 1, 1, 10, aliceProof);
+        defi.finalizeClaim(aliceClaim, true, aliceAmounts, 1, 1, 10, 0, aliceProof);
 
         bytes32[] memory bobProof = new bytes32[](1);
         bobProof[0] = aliceLeaf;
@@ -131,7 +131,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (bobClaim, true, bobAmounts, uint256(1), uint256(1), uint256(11), bobProof)
+                    (bobClaim, true, bobAmounts, uint256(1), uint256(1), uint256(11), uint256(0), bobProof)
                 )
             );
         assert(!success && _selector(data) == DefiInsurance.PayoutCapExceeded.selector);
@@ -157,7 +157,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, empty, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, true, empty, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(!length && _sameBytes(ld, abi.encodeWithSelector(DefiInsurance.InvalidProof.selector, claimId)));
@@ -166,7 +166,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, amount, uint256(0), uint256(0), uint256(9), new bytes32[](0))
+                    (claimId, true, amount, uint256(0), uint256(0), uint256(9), uint256(0), new bytes32[](0))
                 )
             );
         assert(!field && _sameBytes(fd, abi.encodeWithSelector(DefiInsurance.InvalidProof.selector, claimId)));
@@ -190,7 +190,16 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, none, uint256(scoreSpent), expected + 1, uint256(10), new bytes32[](0))
+                    (
+                        claimId,
+                        true,
+                        none,
+                        uint256(scoreSpent),
+                        expected + 1,
+                        uint256(10),
+                        uint256(boosterAmount),
+                        new bytes32[](0)
+                    )
                 )
             );
         assert(!boost);
@@ -216,7 +225,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, none, uint256(0), uint256(0), uint256(11), new bytes32[](0))
+                    (claimId, true, none, uint256(0), uint256(0), uint256(11), uint256(0), new bytes32[](0))
                 )
             );
         assert(!eligible);
@@ -246,7 +255,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, amount, uint256(7), boosted, uint256(10), new bytes32[](0))
+                    (claimId, true, amount, uint256(7), boosted, uint256(10), uint256(2), new bytes32[](0))
                 )
             );
         assert(!success);
@@ -260,7 +269,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
 
         pool.setModes(false, false, false);
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, amount, 7, boosted, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, amount, 7, boosted, 10, 2, new bytes32[](0));
         assert(pool.totalPaid() == 100);
         assert(registry.scoreSpent(ALICE) == 7);
     }
@@ -279,7 +288,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, none, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, true, none, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(!success);
@@ -302,7 +311,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, none, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, true, none, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(!early && _sameBytes(ed, abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, claimId)));
@@ -314,13 +323,13 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, none, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, true, none, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(!paused && _selector(pd) == Registry.Paused.selector);
         registry.setPaused(address(defi), false);
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, none, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, none, 1, 1, 10, 0, new bytes32[](0));
     }
 
     function test_doubleFinalizationCannotPayOrConsumeTwice() public {
@@ -330,7 +339,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         _settle(1, root, none);
         _warpToFinalization(1);
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, none, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, none, 1, 1, 10, 0, new bytes32[](0));
         uint256 balance = insured.balanceOf(address(defi));
         uint256 aliceBalance = insured.balanceOf(ALICE);
         uint256 unresolved = _incidentUnresolved(1);
@@ -342,7 +351,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, none, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, true, none, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(!again && _sameBytes(data, abi.encodeWithSelector(DefiInsurance.ClaimAlreadyResolved.selector, claimId)));
@@ -364,7 +373,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, false, new uint256[](0), uint256(0), uint256(0), uint256(0), new bytes32[](0))
+                    (claimId, false, new uint256[](0), uint256(0), uint256(0), uint256(0), uint256(0), new bytes32[](0))
                 )
             );
         assert(!early && _selector(ed) == DefiInsurance.FinalizeNotOpen.selector);
@@ -372,7 +381,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         vm.warp(uint256(settlementDeadline) + 1);
         registry.setPaused(address(defi), true);
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
         assert(insured.balanceOf(ALICE) == 10);
         assert(booster.balanceOf(ALICE, _boosterId()) == 2);
         assert(_incidentResolvedAt(1) == block.timestamp);
@@ -386,7 +395,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         _warpToFinalization(1);
 
         vm.prank(BOB);
-        defi.finalizeClaim(claimId, false, none, 0, 0, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, none, 0, 0, 10, 0, new bytes32[](0));
 
         (,,,,, bool resolved) = defi.claims(claimId);
         assert(resolved);
@@ -406,7 +415,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, false, none, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, false, none, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(
@@ -417,13 +426,13 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         assert(defi.escrowedInsuredTokens(IERC20(address(insured))) == 10);
 
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, false, none, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, none, 1, 1, 10, 0, new bytes32[](0));
         vm.prank(ALICE);
         (bool twice, bytes memory td) = address(defi)
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, false, none, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, false, none, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(!twice && _selector(td) == DefiInsurance.ClaimAlreadyResolved.selector);
@@ -442,7 +451,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             .call(
                 abi.encodeCall(
                     DefiInsurance.finalizeClaim,
-                    (claimId, true, none, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                    (claimId, true, none, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
                 )
             );
         assert(!finalizeSuccess && _selector(finalizeData) == DefiInsurance.FinalizeNotOpen.selector);
@@ -452,7 +461,7 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
         assert(defi.escrowedInsuredTokens(IERC20(address(insured))) == 10);
 
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
         (,,,,, bool resolvedAfter) = defi.claims(claimId);
         uint256 unresolvedAfter = _incidentUnresolved(1);
         assert(resolvedAfter && unresolvedAfter == 0);
@@ -473,12 +482,12 @@ contract DefiInsuranceFinalizationKontrolTest is DefiInsuranceKontrolBase {
             address(defi),
             abi.encodeCall(
                 DefiInsurance.finalizeClaim,
-                (claimId, true, amount, uint256(1), uint256(1), uint256(10), new bytes32[](0))
+                (claimId, true, amount, uint256(1), uint256(1), uint256(10), uint256(0), new bytes32[](0))
             )
         );
 
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, amount, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, amount, 1, 1, 10, 0, new bytes32[](0));
 
         assert(pool.callbackAttempts() == 1);
         assert(!pool.callbackSuccess());

@@ -221,7 +221,7 @@ contract DefiInsuranceAdminKontrolTest is DefiInsuranceKontrolBase {
         _settle(1, root, _oneAmount(40));
         _warpToFinalization(1);
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, true, amounts, 3, 3, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, amounts, 3, 3, 10, 2, new bytes32[](0));
         assert(defi.activeIncidentId() == 0);
         assert(pool.totalPaid() == 25);
         defi.editInsuredToken(IERC20(address(insured)), 8000, address(feed), address(0xC0DE), hex"12345678aabbccdd");
@@ -275,7 +275,7 @@ contract DefiInsuranceAdminKontrolTest is DefiInsuranceKontrolBase {
         assert(booster.balanceOf(address(upgraded), _boosterId()) == before_.liveBoosterBalance);
 
         vm.prank(BOB);
-        upgraded.finalizeClaim(liveClaimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+        upgraded.finalizeClaim(liveClaimId, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
         assert(upgraded.escrowedInsuredTokens(IERC20(address(insured))) == 0);
         assert(bondToken.balanceOf(address(upgraded)) == 0);
         assert(booster.balanceOf(address(upgraded), _boosterId()) == 0);

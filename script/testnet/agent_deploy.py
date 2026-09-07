@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import time
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from eth_account import Account
@@ -30,8 +32,18 @@ def rpc(url: str, method: str, params: list[Any]) -> Any:
         data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "usd8-agent-deployer/1.0"},
     )
-    with urlopen(request, timeout=60) as response:
-        payload = json.load(response)
+    payload: dict[str, Any] | None = None
+    for attempt in range(4):
+        try:
+            with urlopen(request, timeout=60) as response:
+                payload = json.load(response)
+            break
+        except (TimeoutError, URLError, ConnectionError, http.client.RemoteDisconnected):
+            if attempt == 3:
+                raise
+            time.sleep(2**attempt)
+    if payload is None:
+        raise RuntimeError(f"RPC {method} returned no payload")
     if "error" in payload:
         raise RuntimeError(f"RPC {method} failed: {payload['error']}")
     return payload["result"]
@@ -74,6 +86,21 @@ def fee_caps(url: str) -> tuple[int, int]:
         priority = 1_000_000_000
     priority = max(priority, 1_000_000)
     return base_fee * 2 + priority, priority
+
+
+def wait_for_nonce(url: str, account: str, expected: int, timeout: int = 120) -> None:
+    deadline = time.monotonic() + timeout
+    latest = -1
+    pending = -1
+    while time.monotonic() < deadline:
+        latest = quantity(rpc(url, "eth_getTransactionCount", [account, "latest"]))
+        pending = quantity(rpc(url, "eth_getTransactionCount", [account, "pending"]))
+        if latest == expected and pending == expected:
+            return
+        if latest > expected or pending > expected:
+            raise RuntimeError(f"nonce advanced beyond frozen transaction: latest={latest} pending={pending}")
+        time.sleep(3)
+    raise TimeoutError(f"nonce convergence timeout: expected={expected} latest={latest} pending={pending}")
 
 
 def artifact_transactions(artifact: dict[str, Any]) -> list[dict[str, Any]]:
@@ -187,10 +214,7 @@ def main() -> int:
     max_fee, priority_fee = fee_caps(args.rpc_url)
 
     for index, tx in enumerate(transactions[completed:], start=completed):
-        live_nonce = quantity(rpc(args.rpc_url, "eth_getTransactionCount", [account.address, "latest"]))
-        pending = quantity(rpc(args.rpc_url, "eth_getTransactionCount", [account.address, "pending"]))
-        if live_nonce != tx["nonce"] or pending != live_nonce:
-            raise RuntimeError(f"nonce changed before transaction {index}: latest={live_nonce} pending={pending}")
+        wait_for_nonce(args.rpc_url, account.address, tx["nonce"])
         call = {
             "from": account.address,
             "to": tx["to"],

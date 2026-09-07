@@ -187,7 +187,8 @@ contract SettlementIntegrationTest is Test {
             amounts,
             _u256(60, 40), // raw score spent
             _u256(60, 40), // boosted payout score (no boosters in this fixture)
-            _u256(100e18, 100e18)
+            _u256(100e18, 100e18),
+            _u256(0, 0)
         );
 
         bytes32 root = abi.decode(_ffi("root", rootPayload, ""), (bytes32));
@@ -201,9 +202,9 @@ contract SettlementIntegrationTest is Test {
         vm.warp(block.timestamp + registry.incidentTimingConfig().phaseWindow + 1); // past CORRECTION_WINDOW
 
         vm.prank(bob);
-        defi.finalizeClaim(cb, true, _u256(bobPay), 60, 60, 100e18, proofBob);
+        defi.finalizeClaim(cb, true, _u256(bobPay), 60, 60, 100e18, 0, proofBob);
         vm.prank(carol);
-        defi.finalizeClaim(cc, true, _u256(carolPay), 40, 40, 100e18, proofCarol);
+        defi.finalizeClaim(cc, true, _u256(carolPay), 40, 40, 100e18, 0, proofCarol);
 
         // ── Payouts match the off-chain amounts and only raw score is recorded. ──
         assertEq(usdc.balanceOf(bob), bobPay, "bob payout != off-chain amount");
@@ -249,6 +250,37 @@ contract SettlementIntegrationTest is Test {
         assertEq(defi.incidentPoolBudget(incidentId)[0], grossBudget - acceptedGross, "unused offer redistributed");
         (,,,,,, uint256 unresolved,,,) = defi.incidents(incidentId);
         assertEq(unresolved, 0, "claims remain unresolved");
+    }
+
+    function test_RustProofDrivesPartialBoosterBurnAndRefund() public {
+        if (!vm.envOr("RUN_INTEGRATION", false)) {
+            vm.skip(true);
+            return;
+        }
+        vm.prank(admin);
+        registry.setBoosterConfig(address(booster), 1, 100);
+        vm.prank(admin);
+        uint256 incidentId = defi.openClaimIncident(IERC20(address(lp)), uint64(block.number - 1));
+        uint256 claimId = _joinWithBoosters(bob, 100e18, 100, 10);
+        uint256[][] memory amounts = new uint256[][](1);
+        amounts[0] = _u256(40e6);
+        address[] memory users = new address[](1);
+        users[0] = bob;
+        bytes memory payload =
+            abi.encode(incidentId, _u256(claimId), users, amounts, _u256(100), _u256(103), _u256(100e18), _u256(3));
+        bytes32 root = abi.decode(_ffi("root", payload, ""), (bytes32));
+        bytes32[] memory proof = abi.decode(_ffi("proof", payload, vm.toString(claimId)), (bytes32[]));
+        (,,,, uint64 deadline,,,,,) = defi.incidents(incidentId);
+        vm.warp(deadline + 1);
+        _settle(incidentId, root);
+        vm.warp(block.timestamp + defi.incidentPhaseWindow(incidentId) + 1);
+        vm.prank(bob);
+        defi.finalizeClaim(claimId, true, amounts[0], 100, 103, 100e18, 3, proof);
+        assertEq(booster.balanceOf(bob, 1), 7);
+        assertEq(booster.balanceOf(address(defi), 1), 0);
+        assertEq(booster.totalSupply(1), 7);
+        assertEq(usdc.balanceOf(bob), 40e6);
+        assertEq(registry.scoreSpent(bob), 100);
     }
 
     /// @dev Golden-vector check: the selected FFI EIP-712 settlement digest must
@@ -357,13 +389,22 @@ contract SettlementIntegrationTest is Test {
     // ── helpers ──
 
     function _join(address who, uint128 amount, uint256 score) internal returns (uint256 claimId) {
+        return _joinWithBoosters(who, amount, score, 0);
+    }
+
+    function _joinWithBoosters(address who, uint128 amount, uint256 score, uint256 boosters)
+        internal
+        returns (uint256 claimId)
+    {
         lp.mint(who, amount);
+        booster.mint(who, 1, boosters);
         vm.prank(admin);
         usd8.mint(who, 10e18);
         vm.startPrank(who);
         lp.approve(address(defi), amount);
         usd8.approve(address(defi), 10e18);
-        claimId = defi.fileClaim(IERC20(address(lp)), amount, score, 0, 0, "");
+        booster.setApprovalForAll(address(defi), true);
+        claimId = defi.fileClaim(IERC20(address(lp)), amount, score, boosters, 0, "");
         vm.stopPrank();
     }
 
@@ -386,7 +427,16 @@ contract SettlementIntegrationTest is Test {
         f.users[10] = address(0x2000);
         f.claimIds[10] = _join(f.users[10], 150e18, 1_000);
         f.amounts[10] = _u256(0);
-        f.rootPayload = abi.encode(incidentId, f.claimIds, f.users, f.amounts, f.scores, f.scores, f.eligibles);
+        f.rootPayload = abi.encode(
+            incidentId,
+            f.claimIds,
+            f.users,
+            f.amounts,
+            f.scores,
+            f.scores,
+            f.eligibles,
+            new uint256[](f.claimIds.length)
+        );
     }
 
     function _acceptScarcityClaims(ScarcityFixture memory f)
@@ -397,7 +447,7 @@ contract SettlementIntegrationTest is Test {
             if (i == 8) continue;
             bytes32[] memory proof = abi.decode(_ffi("proof", f.rootPayload, vm.toString(f.claimIds[i])), (bytes32[]));
             vm.prank(f.users[i]);
-            defi.finalizeClaim(f.claimIds[i], true, f.amounts[i], f.scores[i], f.scores[i], f.eligibles[i], proof);
+            defi.finalizeClaim(f.claimIds[i], true, f.amounts[i], f.scores[i], f.scores[i], f.eligibles[i], 0, proof);
             assertEq(usdc.balanceOf(f.users[i]), f.amounts[i][0], "actual payout != local oracle");
             assertEq(registry.scoreSpent(f.users[i]), f.scores[i], "actual score spend != local oracle");
             acceptedNet += f.amounts[i][0];
@@ -409,7 +459,7 @@ contract SettlementIntegrationTest is Test {
         uint256 treasuryBondBefore = usd8.balanceOf(admin);
         bytes32[] memory proof = abi.decode(_ffi("proof", f.rootPayload, vm.toString(f.claimIds[10])), (bytes32[]));
         vm.prank(resolver);
-        defi.finalizeClaim(f.claimIds[10], false, f.amounts[10], 0, 0, 0, proof);
+        defi.finalizeClaim(f.claimIds[10], false, f.amounts[10], 0, 0, 0, 0, proof);
         assertEq(lp.balanceOf(f.users[10]), 150e18, "ineligible escrow not returned");
         assertEq(usd8.balanceOf(f.users[10]), 0, "ineligible bond incorrectly refunded");
         assertEq(usd8.balanceOf(admin), treasuryBondBefore + defi.claimBondAmount(), "bond not forfeited");
@@ -419,7 +469,7 @@ contract SettlementIntegrationTest is Test {
     function _resolveNoShowScarcityClaim(ScarcityFixture memory f) internal {
         bytes32[] memory proof = abi.decode(_ffi("proof", f.rootPayload, vm.toString(f.claimIds[8])), (bytes32[]));
         vm.prank(f.users[8]);
-        defi.finalizeClaim(f.claimIds[8], false, f.amounts[8], f.scores[8], f.scores[8], f.eligibles[8], proof);
+        defi.finalizeClaim(f.claimIds[8], false, f.amounts[8], f.scores[8], f.scores[8], f.eligibles[8], 0, proof);
         assertEq(usdc.balanceOf(f.users[8]), 0, "expired offer paid");
         assertEq(lp.balanceOf(f.users[8]), f.eligibles[8], "eligible no-show escrow not returned");
         assertEq(usd8.balanceOf(f.users[8]), defi.claimBondAmount(), "eligible no-show bond not refunded");

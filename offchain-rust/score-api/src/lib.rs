@@ -5,20 +5,27 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use thiserror::Error;
 use usd8_score_core::{
-    AccountScoreState, RatePoint, ScoreCoreError, advance_account, apply_transfer, gross_score,
-    projected_numerator, validate_rates,
+    AccountScoreState, RatePoint, SCORE_SCALE, ScoreCoreError, advance_account, apply_transfer,
+    gross_score, projected_numerator, validate_rates,
 };
 use usd8_settlement::Address;
 use usd8_settlement::chain::{
-    ChainError, ScoredToken, TokenTransfer, balance_of_at, block_by_number, chain_id,
+    BlockAnchor, ChainError, ScoredToken, TokenTransfer, balance_of_at, block_by_number, chain_id,
     defi_insurance_at, erc20_transfers_for_accounts, finalized_block, score_config_at,
     spent_score_at,
 };
-use usd8_settlement::config::{CHAIN_ID, LOG_RESULT_CAP, MAX_LOG_RANGE};
+use usd8_settlement::config::{LOG_RESULT_CAP, MAX_LOG_RANGE};
 use usd8_settlement::rpc::{LogMetrics, Rpc};
 use usd8_settlement::score::score_cutoff_block;
 
-const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+const CHECKPOINT_SCHEMA_VERSION: u32 = 3;
+pub const SCORE_SNAPSHOT_VERSION: u32 = 3;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScoreNetwork {
+    pub chain_id: u64,
+    pub name: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -56,12 +63,25 @@ pub struct UserCheckpoint {
     pub registry: String,
     pub account: String,
     pub tokens: Vec<TokenCheckpoint>,
+    #[serde(default)]
+    pub visible_tokens: Vec<TokenCheckpoint>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenScoreSnapshot {
+    pub token: String,
+    pub balance: String,
+    pub gross_earned_score: String,
+    pub gross_score_per_second: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedInsuranceScoreSnapshot {
-    pub network: &'static str,
+    #[serde(default)]
+    pub snapshot_version: u32,
+    pub network: String,
     pub chain_id: String,
     pub registry: String,
     pub account: String,
@@ -70,12 +90,125 @@ pub struct CachedInsuranceScoreSnapshot {
     pub score_cutoff_block: String,
     pub score_cutoff_block_hash: String,
     pub min_holding_required: String,
+    #[serde(default)]
+    pub snapshot_timestamp: String,
     pub gross_earned_score: String,
+    pub matured_gross_earned_score: String,
     pub score_spent: String,
     pub available_score: String,
+    #[serde(default)]
+    pub gross_score_per_second: String,
+    #[serde(default)]
+    pub maturing_score_per_second: String,
+    #[serde(default)]
+    pub token_scores: Vec<TokenScoreSnapshot>,
     pub scored_tokens: Vec<String>,
     pub log_requests: String,
-    pub cache_status: &'static str,
+    pub cache_status: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScoreBreakdown {
+    pub gross_earned_score: BigUint,
+    pub matured_gross_earned_score: BigUint,
+    pub available_score: BigUint,
+}
+
+pub fn score_breakdown(
+    reference_numerator: &BigUint,
+    matured_numerator: &BigUint,
+    spent: &BigUint,
+) -> ScoreBreakdown {
+    let gross_earned_score = gross_score(reference_numerator.clone());
+    let matured_gross_earned_score = gross_score(matured_numerator.clone());
+    let available_score = if matured_gross_earned_score > *spent {
+        &matured_gross_earned_score - spent
+    } else {
+        BigUint::zero()
+    };
+    ScoreBreakdown {
+        gross_earned_score,
+        matured_gross_earned_score,
+        available_score,
+    }
+}
+
+pub fn allocate_token_scores(numerators: &[BigUint]) -> Vec<BigUint> {
+    let total = gross_score(numerators.iter().sum());
+    let mut scores = numerators
+        .iter()
+        .cloned()
+        .map(gross_score)
+        .collect::<Vec<_>>();
+    let allocated = scores.iter().sum::<BigUint>();
+    if let Some(last) = scores.last_mut() {
+        *last += total - allocated;
+    }
+    scores
+}
+
+fn scaled_balance(balance: BigUint, decimals: u8) -> BigUint {
+    if decimals <= 18 {
+        balance * BigUint::from(10u8).pow(u32::from(18 - decimals))
+    } else {
+        balance / BigUint::from(10u8).pow(u32::from(decimals - 18))
+    }
+}
+
+pub fn live_score_per_second(
+    checkpoint: &TokenCheckpoint,
+    scored: &ScoredToken,
+    target_block: u64,
+) -> Result<BigUint, IncrementalScoreError> {
+    let rate = scored
+        .rates
+        .iter()
+        .rev()
+        .find(|point| point.from_block <= target_block)
+        .map_or_else(BigUint::zero, |point| point.rate.clone());
+    Ok(
+        scaled_balance(checkpoint_balance(checkpoint)?, scored.decimals) * rate
+            / BigUint::from(SCORE_SCALE)
+            / BigUint::from(12u8),
+    )
+}
+
+fn token_numerators(
+    checkpoints: &[TokenCheckpoint],
+    scored_tokens: &[ScoredToken],
+    target_block: u64,
+) -> Result<Vec<BigUint>, IncrementalScoreError> {
+    scored_tokens
+        .iter()
+        .map(|scored| {
+            checkpoints
+                .iter()
+                .find(|checkpoint| checkpoint.token == scored.token.to_string())
+                .map_or_else(
+                    || Ok(BigUint::zero()),
+                    |checkpoint| token_numerator(checkpoint, scored, target_block),
+                )
+        })
+        .collect()
+}
+
+fn live_score_rates(
+    checkpoints: &[TokenCheckpoint],
+    scored_tokens: &[ScoredToken],
+    target_block: u64,
+) -> Result<Vec<BigUint>, IncrementalScoreError> {
+    scored_tokens
+        .iter()
+        .map(|scored| {
+            checkpoints
+                .iter()
+                .find(|checkpoint| checkpoint.token == scored.token.to_string())
+                .map_or_else(
+                    || Ok(BigUint::zero()),
+                    |checkpoint| live_score_per_second(checkpoint, scored, target_block),
+                )
+        })
+        .collect()
 }
 
 #[derive(Debug, Error)]
@@ -342,11 +475,12 @@ fn checkpoint_balance(checkpoint: &TokenCheckpoint) -> Result<BigUint, Increment
 
 fn validate_user_checkpoint(
     checkpoint: &UserCheckpoint,
+    network: &ScoreNetwork,
     registry: Address,
     account: Address,
 ) -> Result<(), IncrementalScoreError> {
     if checkpoint.schema_version != CHECKPOINT_SCHEMA_VERSION
-        || checkpoint.chain_id != CHAIN_ID.to_string()
+        || checkpoint.chain_id != network.chain_id.to_string()
         || checkpoint.registry != registry.to_string()
         || checkpoint.account != account.to_string()
     {
@@ -355,47 +489,28 @@ fn validate_user_checkpoint(
     Ok(())
 }
 
-pub async fn compute_incremental_score<R: Rpc + ?Sized>(
+async fn score_to_block<R: Rpc + ?Sized>(
     rpc: &R,
-    registry: Address,
+    scored_tokens: &[ScoredToken],
     account: Address,
-    previous: Option<UserCheckpoint>,
-) -> Result<(CachedInsuranceScoreSnapshot, UserCheckpoint), IncrementalScoreError> {
-    let actual_chain = chain_id(rpc).await?;
-    if actual_chain != CHAIN_ID {
-        return Err(IncrementalScoreError::WrongChain {
-            actual: actual_chain,
-            expected: CHAIN_ID,
-        });
-    }
-    if let Some(checkpoint) = &previous {
-        validate_user_checkpoint(checkpoint, registry, account)?;
-    }
-    let finalized = finalized_block(rpc).await?;
-    let defi_insurance = defi_insurance_at(rpc, registry, Some(finalized.number)).await?;
-    if defi_insurance.is_zero() {
-        return Err(IncrementalScoreError::ZeroDefiInsurance);
-    }
-    let config = score_config_at(rpc, registry, defi_insurance, finalized.number).await?;
-    let cutoff = score_cutoff_block(finalized.number, config.params.holding_margin_blocks);
-    let cutoff_anchor = block_by_number(rpc, cutoff).await?;
+    previous_tokens: &[TokenCheckpoint],
+    target_block: u64,
+    target_block_hash: &str,
+) -> Result<(Vec<TokenCheckpoint>, BigUint, LogMetrics, bool, bool), IncrementalScoreError> {
     let mut next_tokens = Vec::new();
     let mut numerator = BigUint::zero();
     let mut metrics = LogMetrics::default();
     let mut advanced = false;
-    let mut missed = previous.is_none();
+    let mut missed = false;
     let tracked = BTreeSet::from([account]);
 
-    for scored in &config.scored_tokens {
-        let Some(starting_block) = first_contributing_block(scored, cutoff) else {
+    for scored in scored_tokens {
+        let Some(starting_block) = first_contributing_block(scored, target_block) else {
             continue;
         };
-        let stored = previous.as_ref().and_then(|checkpoint| {
-            checkpoint
-                .tokens
-                .iter()
-                .find(|item| item.token == scored.token.to_string())
-        });
+        let stored = previous_tokens
+            .iter()
+            .find(|item| item.token == scored.token.to_string());
         let mut checkpoint = if let Some(stored) = stored {
             let cursor = checkpoint_cursor(stored)?;
             let current_hash = block_by_number(rpc, cursor).await?.hash;
@@ -410,13 +525,13 @@ pub async fn compute_incremental_score<R: Rpc + ?Sized>(
             new_token_checkpoint(scored, starting_block, balance, hash)
         };
         let cursor = checkpoint_cursor(&checkpoint)?;
-        if cursor < cutoff {
+        if cursor < target_block {
             let (transfers, transfer_metrics) = erc20_transfers_for_accounts(
                 rpc,
                 scored.token,
                 &tracked,
                 cursor + 1,
-                cutoff,
+                target_block,
                 MAX_LOG_RANGE,
                 LOG_RESULT_CAP,
             )
@@ -427,28 +542,120 @@ pub async fn compute_incremental_score<R: Rpc + ?Sized>(
                 scored,
                 account,
                 &transfers,
-                cutoff,
-                cutoff_anchor.hash.clone(),
+                target_block,
+                target_block_hash.to_owned(),
             )?;
             advanced = true;
-        } else if cursor > cutoff {
+        } else if cursor > target_block {
             return Err(IncrementalScoreError::CursorRollback);
         }
-        let actual_balance = balance_of_at(rpc, scored.token, account, cutoff).await?;
+        let actual_balance = balance_of_at(rpc, scored.token, account, target_block).await?;
         if checkpoint_balance(&checkpoint)? != actual_balance {
             return Err(IncrementalScoreError::Malformed("replayedBalance"));
         }
-        numerator += token_numerator(&checkpoint, scored, cutoff)?;
+        numerator += token_numerator(&checkpoint, scored, target_block)?;
         next_tokens.push(checkpoint);
     }
+    Ok((next_tokens, numerator, metrics, advanced, missed))
+}
 
-    let gross = gross_score(numerator);
-    let spent = spent_score_at(rpc, registry, account, finalized.number).await?;
-    let available = if gross > spent {
-        &gross - &spent
-    } else {
-        BigUint::zero()
-    };
+pub async fn compute_incremental_score<R: Rpc + ?Sized>(
+    rpc: &R,
+    network: &ScoreNetwork,
+    registry: Address,
+    account: Address,
+    previous: Option<UserCheckpoint>,
+) -> Result<(CachedInsuranceScoreSnapshot, UserCheckpoint), IncrementalScoreError> {
+    let reference = finalized_block(rpc).await?;
+    compute_incremental_score_at(rpc, network, registry, account, reference, previous).await
+}
+
+pub async fn compute_incremental_score_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    network: &ScoreNetwork,
+    registry: Address,
+    account: Address,
+    reference: BlockAnchor,
+    previous: Option<UserCheckpoint>,
+) -> Result<(CachedInsuranceScoreSnapshot, UserCheckpoint), IncrementalScoreError> {
+    let actual_chain = chain_id(rpc).await?;
+    if actual_chain != network.chain_id {
+        return Err(IncrementalScoreError::WrongChain {
+            actual: actual_chain,
+            expected: network.chain_id,
+        });
+    }
+    if let Some(checkpoint) = &previous {
+        validate_user_checkpoint(checkpoint, network, registry, account)?;
+    }
+    let defi_insurance = defi_insurance_at(rpc, registry, Some(reference.number)).await?;
+    if defi_insurance.is_zero() {
+        return Err(IncrementalScoreError::ZeroDefiInsurance);
+    }
+    let config = score_config_at(rpc, registry, defi_insurance, reference.number).await?;
+    let cutoff = score_cutoff_block(reference.number, config.params.holding_margin_blocks);
+    let cutoff_anchor = block_by_number(rpc, cutoff).await?;
+    let previous_matured_tokens = previous
+        .as_ref()
+        .map_or(&[][..], |checkpoint| checkpoint.tokens.as_slice());
+    let (matured_tokens, matured_numerator, matured_metrics, matured_advanced, matured_missed) =
+        score_to_block(
+            rpc,
+            &config.scored_tokens,
+            account,
+            previous_matured_tokens,
+            cutoff,
+            &cutoff_anchor.hash,
+        )
+        .await?;
+    let previous_visible_tokens = previous
+        .as_ref()
+        .map_or(&[][..], |checkpoint| checkpoint.visible_tokens.as_slice());
+    let (visible_tokens, visible_numerator, visible_metrics, visible_advanced, visible_missed) =
+        score_to_block(
+            rpc,
+            &config.scored_tokens,
+            account,
+            previous_visible_tokens,
+            reference.number,
+            &reference.hash,
+        )
+        .await?;
+    let metrics = merge_metrics(matured_metrics, visible_metrics);
+    let spent = spent_score_at(rpc, registry, account, reference.number).await?;
+    let score = score_breakdown(&visible_numerator, &matured_numerator, &spent);
+    let visible_token_numerators =
+        token_numerators(&visible_tokens, &config.scored_tokens, reference.number)?;
+    let visible_token_scores = allocate_token_scores(&visible_token_numerators);
+    let visible_rates = live_score_rates(&visible_tokens, &config.scored_tokens, reference.number)?;
+    let visible_balances = config
+        .scored_tokens
+        .iter()
+        .map(|scored| {
+            visible_tokens
+                .iter()
+                .find(|checkpoint| checkpoint.token == scored.token.to_string())
+                .map_or_else(|| Ok(BigUint::zero()), checkpoint_balance)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let matured_rates = live_score_rates(&matured_tokens, &config.scored_tokens, cutoff)?;
+    let gross_score_per_second = visible_rates.iter().sum::<BigUint>();
+    let maturing_score_per_second = matured_rates.iter().sum::<BigUint>();
+    let token_scores = config
+        .scored_tokens
+        .iter()
+        .zip(visible_token_scores)
+        .zip(visible_rates)
+        .zip(visible_balances)
+        .map(
+            |(((token, gross_earned_score), gross_score_per_second), balance)| TokenScoreSnapshot {
+                token: token.token.to_string(),
+                balance: balance.to_string(),
+                gross_earned_score: gross_earned_score.to_string(),
+                gross_score_per_second: gross_score_per_second.to_string(),
+            },
+        )
+        .collect();
     let final_cutoff = block_by_number(rpc, cutoff).await?;
     if final_cutoff.hash != cutoff_anchor.hash {
         return Err(ChainError::AnchorChanged {
@@ -459,47 +666,50 @@ pub async fn compute_incremental_score<R: Rpc + ?Sized>(
         }
         .into());
     }
-    let final_reference = block_by_number(rpc, finalized.number).await?;
-    if final_reference.hash != finalized.hash {
+    let final_reference = block_by_number(rpc, reference.number).await?;
+    if final_reference.hash != reference.hash {
         return Err(ChainError::AnchorChanged {
             name: "score reference",
-            block: finalized.number,
-            before: finalized.hash,
+            block: reference.number,
+            before: reference.hash,
             after: final_reference.hash,
         }
         .into());
     }
-    let cache_status = if missed {
-        "miss"
-    } else if advanced {
-        "advanced"
+    let cache_status = if matured_missed || visible_missed {
+        "miss".to_owned()
+    } else if matured_advanced || visible_advanced {
+        "advanced".to_owned()
     } else {
-        "hit"
+        "hit".to_owned()
     };
     let checkpoint = UserCheckpoint {
         schema_version: CHECKPOINT_SCHEMA_VERSION,
-        chain_id: CHAIN_ID.to_string(),
+        chain_id: network.chain_id.to_string(),
         registry: registry.to_string(),
         account: account.to_string(),
-        tokens: next_tokens,
+        tokens: matured_tokens,
+        visible_tokens,
     };
     let snapshot = CachedInsuranceScoreSnapshot {
-        network: if CHAIN_ID == 11_155_111 {
-            "sepolia"
-        } else {
-            "mainnet"
-        },
-        chain_id: CHAIN_ID.to_string(),
+        snapshot_version: SCORE_SNAPSHOT_VERSION,
+        network: network.name.clone(),
+        chain_id: network.chain_id.to_string(),
         registry: registry.to_string(),
         account: account.to_string(),
-        reference_block: finalized.number.to_string(),
-        reference_block_hash: finalized.hash,
+        reference_block: reference.number.to_string(),
+        reference_block_hash: reference.hash,
         score_cutoff_block: cutoff.to_string(),
         score_cutoff_block_hash: cutoff_anchor.hash,
         min_holding_required: config.params.holding_margin_blocks.to_string(),
-        gross_earned_score: gross.to_string(),
+        snapshot_timestamp: reference.timestamp.to_string(),
+        gross_earned_score: score.gross_earned_score.to_string(),
+        matured_gross_earned_score: score.matured_gross_earned_score.to_string(),
         score_spent: spent.to_string(),
-        available_score: available.to_string(),
+        available_score: score.available_score.to_string(),
+        gross_score_per_second: gross_score_per_second.to_string(),
+        maturing_score_per_second: maturing_score_per_second.to_string(),
+        token_scores,
         scored_tokens: config
             .scored_tokens
             .iter()

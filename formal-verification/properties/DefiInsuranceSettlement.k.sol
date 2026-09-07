@@ -388,7 +388,7 @@ contract DefiInsuranceSettlementKontrolTest is DefiInsuranceKontrolBase {
         assert(_incidentResolvedAt(1) == block.timestamp);
 
         vm.prank(ALICE);
-        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
         assert(insured.balanceOf(ALICE) == 10);
     }
 

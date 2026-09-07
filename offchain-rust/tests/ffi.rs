@@ -26,6 +26,7 @@ fn ffi_root_and_proof_round_trip_abi_payloads() {
             vec![U256::from(60), U256::from(40)],
             vec![U256::from(61), U256::from(40)],
             vec![U256::from(100), U256::from(100)],
+            vec![U256::ZERO, U256::ZERO],
         )
             .abi_encode_params(),
     );
@@ -37,6 +38,7 @@ fn ffi_root_and_proof_round_trip_abi_payloads() {
             score_spent: BigUint::from(60u8),
             boosted_score: BigUint::from(61u8),
             eligible_amount: BigUint::from(100u8),
+            eligible_booster_amount: 0u8.into(),
         },
         MerkleRow {
             claim_id: BigUint::from(2u8),
@@ -45,6 +47,7 @@ fn ffi_root_and_proof_round_trip_abi_payloads() {
             score_spent: BigUint::from(40u8),
             boosted_score: BigUint::from(40u8),
             eligible_amount: BigUint::from(100u8),
+            eligible_booster_amount: 0u8.into(),
         },
     ];
     let expected = SettlementTree::new(&BigUint::from(7u8), &rows).unwrap();

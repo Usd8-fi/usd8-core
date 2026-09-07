@@ -19,6 +19,7 @@ lambda = [
   "dep:aws-types",
   "dep:base64",
   "dep:lambda_http",
+  "dep:usd8-settlement",
 ]
 worker = [
   "dep:aes",

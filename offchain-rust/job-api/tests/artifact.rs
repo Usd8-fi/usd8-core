@@ -3,7 +3,7 @@ use usd8_tee_job_api::{ArtifactError, AttestedDigestKind, extract_attested_diges
 
 fn artifact() -> serde_json::Value {
     json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "settlementDigest": format!("0x{}", "42".repeat(32)),
         "nitroAttestedDigest": format!("0x{}", "42".repeat(32)),
         "teePcrHash": format!("0x{}", "11".repeat(32)),
@@ -36,6 +36,12 @@ fn signer_accepts_only_attested_artifact_with_matching_digest_and_pcr() {
 
 #[test]
 fn signer_rejects_plain_compute_or_malformed_artifacts() {
+    let mut old = artifact();
+    old["schemaVersion"] = json!(1);
+    assert_eq!(
+        extract_attested_digest(&old, AttestedDigestKind::Settlement).unwrap_err(),
+        ArtifactError::Invalid
+    );
     let mut plain = artifact();
     plain
         .as_object_mut()

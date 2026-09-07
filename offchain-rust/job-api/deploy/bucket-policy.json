@@ -20,7 +20,8 @@
       "Resource": [
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
-        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*"
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/settlements/*"
       ],
       "Condition": {"StringNotEquals": {"s3:if-none-match": "*"}}
     },
@@ -33,6 +34,7 @@
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/settlements/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/secrets/*"
       ],
       "Condition": {

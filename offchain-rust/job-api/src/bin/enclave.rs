@@ -5,6 +5,9 @@ fn settlement_score_mode() -> usd8_settlement::engine::ScoreMode {
 
 #[cfg(any(target_os = "linux", test))]
 fn terminal_error_code(detail: &str) -> &str {
+    if SETTLEMENT_TERMINAL_CODES.contains(&detail) {
+        return detail;
+    }
     match detail {
         "CMS_PARSE_FAILED"
         | "CMS_KEY_OR_IV_LENGTH"
@@ -40,6 +43,39 @@ fn terminal_error_code(detail: &str) -> &str {
         _ => "ENCLAVE_FAILED",
     }
 }
+
+#[cfg(any(target_os = "linux", test))]
+const SETTLEMENT_TERMINAL_CODES: &[&str] = &[
+    "SETTLEMENT_RPC_INIT_FAILED",
+    "SETTLEMENT_INPUT_INVALID",
+    "SETTLEMENT_CONFIG_STATE_PRUNED",
+    "SETTLEMENT_CONFIG_RPC_FAILED",
+    "SETTLEMENT_CONFIG_CHAIN_FAILED",
+    "SETTLEMENT_SCORE_STATE_PRUNED",
+    "SETTLEMENT_SCORE_GET_LOGS_HTTP_FAILED",
+    "SETTLEMENT_SCORE_RPC_FAILED",
+    "SETTLEMENT_SCORE_CHAIN_FAILED",
+    "SETTLEMENT_SCORE_FAILED",
+    "SETTLEMENT_FINALITY_FAILED",
+    "SETTLEMENT_ANCHOR_CHANGED",
+    "SETTLEMENT_ORACLE_FAILED",
+    "SETTLEMENT_CONVERSION_FAILED",
+    "SETTLEMENT_POOL_TOPOLOGY_FAILED",
+    "SETTLEMENT_REPLAY_FAILED",
+    "SETTLEMENT_CHAIN_STATE_PRUNED",
+    "SETTLEMENT_CHAIN_RPC_FAILED",
+    "SETTLEMENT_CHAIN_FAILED",
+    "SETTLEMENT_CONFIG_FAILED",
+    "SETTLEMENT_ALLOCATION_FAILED",
+    "SETTLEMENT_DIGEST_FAILED",
+    "SETTLEMENT_INVARIANT_FAILED",
+    "SETTLEMENT_ALREADY_ROOTED",
+    "SETTLEMENT_VERIFY_FAILED",
+    "SETTLEMENT_ATTESTATION_FAILED",
+    "SETTLEMENT_ARTIFACT_SIZE_FAILED",
+    "SETTLEMENT_COMPUTE_TIMEOUT",
+    "SETTLEMENT_ARTIFACT_FAILED",
+];
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -84,8 +120,9 @@ mod linux {
         MAX_SESSION_TOKEN_BYTES, MAX_WIRE_REQUEST_BYTES, TerminalEnvelope,
         canonicalize_open_request, canonicalize_request, connect_proxy_port,
         decrypt_kms_recipient_envelope, enclave_timeout_seconds, extract_attested_digest,
-        parse_kms_recipient_cms, read_frame_async, settlement_rpc_url, sign_digest,
-        stored_request_is_live, verify_job_request_binding, write_frame_async,
+        parse_kms_recipient_cms, read_frame_async, settlement_rpc_requires_drpc_key,
+        settlement_rpc_url, sign_digest, stored_request_is_live, verify_job_request_binding,
+        write_frame_async,
     };
     use zeroize::{Zeroize, Zeroizing};
 
@@ -315,13 +352,14 @@ mod linux {
     async fn compute(request: &JobWireRequest, drpc_key: &str) -> Result<serde_json::Value, Error> {
         let request_timeout =
             Duration::from_secs(enclave_timeout_seconds(&request.stored_request.request));
+        let rpc_key = settlement_rpc_requires_drpc_key().then_some(drpc_key);
         match &request.stored_request.request {
             CanonicalRequest::Settlement(settlement) => {
                 let result = timeout(
                     request_timeout,
                     usd8_settlement::attested_runtime::settlement_artifact(
                         settlement_rpc_url(),
-                        drpc_key,
+                        rpc_key,
                         &settlement.registry,
                         &settlement.incident_id,
                         super::settlement_score_mode(),
@@ -331,14 +369,15 @@ mod linux {
                         },
                     ),
                 )
-                .await;
-                Ok(result??)
+                .await
+                .map_err(|_| -> Error { "SETTLEMENT_COMPUTE_TIMEOUT".into() })?;
+                result.map_err(|error| -> Error { error.code().into() })
             }
-            CanonicalRequest::Open(open) => Ok(timeout(
+            CanonicalRequest::Open(open) => timeout(
                 request_timeout,
                 usd8_settlement::attested_runtime::incident_open_artifact(
                     settlement_rpc_url(),
-                    drpc_key,
+                    rpc_key,
                     &open.registry,
                     &open.insured_token,
                     &env::var("USD8_EXPECTED_SIGNER")?,
@@ -348,7 +387,9 @@ mod linux {
                     },
                 ),
             )
-            .await??),
+            .await
+            .map_err(|_| -> Error { "OPEN_COMPUTE_FAILED".into() })?
+            .map_err(|_| -> Error { "OPEN_COMPUTE_FAILED".into() }),
         }
     }
 
@@ -400,15 +441,17 @@ mod linux {
         if drpc_key.is_empty() || drpc_key.len() > 512 || drpc_key.contains('\0') {
             return Err("invalid dRPC key".into());
         }
-        let artifact = compute(request, &drpc_key)
-            .await
-            .map_err(|_| "OPEN_COMPUTE_FAILED")?;
+        let artifact = compute(request, &drpc_key).await?;
         let expected_kind = match &request.stored_request.request {
             CanonicalRequest::Settlement(_) => AttestedDigestKind::Settlement,
             CanonicalRequest::Open(_) => AttestedDigestKind::IncidentOpen,
         };
+        let artifact_error = match &request.stored_request.request {
+            CanonicalRequest::Settlement(_) => "SETTLEMENT_ARTIFACT_FAILED",
+            CanonicalRequest::Open(_) => "OPEN_ARTIFACT_FAILED",
+        };
         let digest = extract_attested_digest(&artifact, expected_kind)
-            .map_err(|_| "OPEN_ARTIFACT_FAILED")?;
+            .map_err(|_| -> Error { artifact_error.into() })?;
         let signer_binding = binding(
             b"USD8_TEE_SIGNER_V1\0",
             &[request.stored_request.job_id.as_bytes(), &digest],
@@ -499,5 +542,50 @@ mod tests {
                 "KMS_RECIPIENT_DECRYPT_FAILED"
             );
         }
+    }
+
+    #[test]
+    fn settlement_stage_codes_are_preserved_in_failed_terminals() {
+        for code in [
+            "SETTLEMENT_RPC_INIT_FAILED",
+            "SETTLEMENT_INPUT_INVALID",
+            "SETTLEMENT_CONFIG_STATE_PRUNED",
+            "SETTLEMENT_CONFIG_RPC_FAILED",
+            "SETTLEMENT_CONFIG_CHAIN_FAILED",
+            "SETTLEMENT_SCORE_STATE_PRUNED",
+            "SETTLEMENT_SCORE_GET_LOGS_HTTP_FAILED",
+            "SETTLEMENT_SCORE_RPC_FAILED",
+            "SETTLEMENT_SCORE_CHAIN_FAILED",
+            "SETTLEMENT_SCORE_FAILED",
+            "SETTLEMENT_FINALITY_FAILED",
+            "SETTLEMENT_ANCHOR_CHANGED",
+            "SETTLEMENT_ORACLE_FAILED",
+            "SETTLEMENT_CONVERSION_FAILED",
+            "SETTLEMENT_POOL_TOPOLOGY_FAILED",
+            "SETTLEMENT_REPLAY_FAILED",
+            "SETTLEMENT_CHAIN_STATE_PRUNED",
+            "SETTLEMENT_CHAIN_RPC_FAILED",
+            "SETTLEMENT_CHAIN_FAILED",
+            "SETTLEMENT_CONFIG_FAILED",
+            "SETTLEMENT_ALLOCATION_FAILED",
+            "SETTLEMENT_DIGEST_FAILED",
+            "SETTLEMENT_INVARIANT_FAILED",
+            "SETTLEMENT_ALREADY_ROOTED",
+            "SETTLEMENT_VERIFY_FAILED",
+            "SETTLEMENT_ATTESTATION_FAILED",
+            "SETTLEMENT_ARTIFACT_SIZE_FAILED",
+            "SETTLEMENT_COMPUTE_TIMEOUT",
+            "SETTLEMENT_ARTIFACT_FAILED",
+        ] {
+            assert_eq!(super::terminal_error_code(code), code);
+        }
+    }
+
+    #[test]
+    fn invented_settlement_codes_are_not_exposed() {
+        assert_eq!(
+            super::terminal_error_code("SETTLEMENT_RAW_PROVIDER_MESSAGE"),
+            "ENCLAVE_FAILED"
+        );
     }
 }

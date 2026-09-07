@@ -24,6 +24,10 @@ class MeasuredRegistryTest(unittest.TestCase):
         script = BUILD_RELEASE.read_text()
         self.assertIn('NETWORK=${NETWORK:?set NETWORK to sepolia}', script)
         self.assertIn('[[ "$NETWORK" == sepolia ]]', script)
+        self.assertIn(
+            "--features lambda,janitor,sepolia --bin usd8-tee-job-lambda",
+            script,
+        )
         self.assertNotIn('NETWORK must be ethereum or sepolia', script)
 
     def test_release_build_discards_unmanifested_measurements_sidecar(self) -> None:
@@ -46,6 +50,19 @@ class MeasuredRegistryTest(unittest.TestCase):
         self.assertIn('--arg kmsKeyArn "$KMS_KEY_ARN"', source)
         self.assertIn('--arg kmsKey "$KMS_KEY_ARN"', source)
         self.assertIn('.Resource = $kmsKeyArn', source)
+
+    def test_finalization_binds_lambda_policy_to_selected_instance_type(self) -> None:
+        source = FINALIZE_RELEASE.read_text()
+        self.assertIn('--arg instanceType "$INSTANCE_TYPE"', source)
+        self.assertIn('select(.Sid == "LaunchTaggedWorkers")', source)
+        self.assertIn('.Condition.StringEquals["ec2:InstanceType"]) = $instanceType', source)
+
+    def test_finalization_commits_to_precheck_rpc_without_storing_it(self) -> None:
+        source = FINALIZE_RELEASE.read_text()
+        self.assertIn('USD8_PRECHECK_RPC_URL=${USD8_PRECHECK_RPC_URL:', source)
+        self.assertIn('PRECHECK_RPC_URL_SHA256=', source)
+        self.assertIn('USD8_PRECHECK_RPC_URL: $precheckRpcUrlSha256', source)
+        self.assertNotIn('USD8_PRECHECK_RPC_URL: $USD8_PRECHECK_RPC_URL', source)
 
     def test_finalization_labels_output_as_a_candidate_pending_live_verification(self) -> None:
         source = FINALIZE_RELEASE.read_text()

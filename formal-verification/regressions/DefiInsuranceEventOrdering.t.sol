@@ -205,7 +205,7 @@ contract DefiInsuranceEventOrderingForgeTest is DefiInsuranceKontrolBase {
         emit ScoreSpentRecorded(ALICE, 1, 1);
         vm.expectEmit(true, true, false, true, address(defi));
         emit ClaimFinalized(claimId, ALICE);
-        defi.finalizeClaim(claimId, true, amounts, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, amounts, 1, 1, 10, 2, new bytes32[](0));
         vm.stopPrank();
     }
 
@@ -265,7 +265,7 @@ contract DefiInsuranceEventOrderingForgeTest is DefiInsuranceKontrolBase {
         emit ScoreSpentRecorded(ALICE, 1, 1);
         vm.expectEmit(true, true, false, true, address(defi));
         emit ClaimFinalized(claimId, ALICE);
-        defi.finalizeClaim(claimId, true, none, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, none, 1, 1, 10, 0, new bytes32[](0));
         vm.stopPrank();
     }
 
@@ -284,7 +284,7 @@ contract DefiInsuranceEventOrderingForgeTest is DefiInsuranceKontrolBase {
         emit Transfer(address(defi), ALICE, bond);
         vm.expectEmit(true, true, false, true, address(defi));
         emit ClaimDeclined(claimId, ALICE, true);
-        defi.finalizeClaim(claimId, false, none, 1, 1, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, none, 1, 1, 10, 0, new bytes32[](0));
         vm.stopPrank();
     }
 
@@ -303,7 +303,7 @@ contract DefiInsuranceEventOrderingForgeTest is DefiInsuranceKontrolBase {
         emit Transfer(address(defi), CAROL, bond);
         vm.expectEmit(true, true, false, true, address(defi));
         emit ClaimDeclined(claimId, ALICE, false);
-        defi.finalizeClaim(claimId, false, none, 0, 0, 10, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, none, 0, 0, 10, 0, new bytes32[](0));
         vm.stopPrank();
     }
 

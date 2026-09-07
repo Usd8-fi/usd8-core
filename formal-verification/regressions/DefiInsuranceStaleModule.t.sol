@@ -84,7 +84,7 @@ contract DefiInsuranceStaleModuleRegressionTest is Test {
 
         vm.prank(claimant);
         vm.expectRevert(abi.encodeWithSelector(DefiInsurance.FinalizeNotOpen.selector, uint256(1)));
-        defi.finalizeClaim(claimId, true, noPayouts, 0, 0, escrow, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, noPayouts, 0, 0, escrow, 0, new bytes32[](0));
     }
 
     function test_deregistrationMakesUnresolvedClaimImmediatelyWithdrawable() public {
@@ -106,7 +106,7 @@ contract DefiInsuranceStaleModuleRegressionTest is Test {
         registry.setDefiInsurance(address(0));
 
         vm.prank(claimant);
-        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
 
         (,,,,, bool resolved) = defi.claims(claimId);
         (,,,,,, uint256 unresolved,,,) = defi.incidents(1);
@@ -218,7 +218,9 @@ contract DefiInsuranceStaleModuleRegressionTest is Test {
     ) internal pure returns (bytes32) {
         return keccak256(
             bytes.concat(
-                keccak256(abi.encode(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount))
+                keccak256(
+                    abi.encode(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount, uint256(0))
+                )
             )
         );
     }

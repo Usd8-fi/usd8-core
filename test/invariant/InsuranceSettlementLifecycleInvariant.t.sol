@@ -108,7 +108,7 @@ abstract contract InsuranceSettlementBase is StdInvariant, Test {
 
     function _finalizeUnboosted(address user, uint256 claimId, uint256 payout, uint256 eligible) internal {
         vm.prank(user);
-        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, eligible, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, eligible, 0, new bytes32[](0));
     }
 
     function _amounts(uint256 payout) internal pure returns (uint256[] memory values) {
@@ -129,10 +129,22 @@ abstract contract InsuranceSettlementBase is StdInvariant, Test {
         uint256 scoreSpent,
         uint256 boostedScore,
         uint256 eligible
-    ) internal pure returns (bytes32) {
+    ) internal view returns (bytes32) {
+        (,,, uint128 boosters,,) = defi.claims(claimId);
         return keccak256(
             bytes.concat(
-                keccak256(abi.encode(incidentId, claimId, user, _amounts(payout), scoreSpent, boostedScore, eligible))
+                keccak256(
+                    abi.encode(
+                        incidentId,
+                        claimId,
+                        user,
+                        _amounts(payout),
+                        scoreSpent,
+                        boostedScore,
+                        eligible,
+                        uint256(boosters)
+                    )
+                )
             )
         );
     }
@@ -230,7 +242,7 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
         uint256 poolAssetsBefore = pool.totalAssets();
         uint256 bobUsdcBefore = usdc.balanceOf(BOB);
         vm.prank(BOB);
-        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, eligible, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, eligible, 0, new bytes32[](0));
 
         assertEq(poolAssetsBefore - pool.totalAssets(), _grossPayout(incidentId, payout), "pool payout conservation");
         assertEq(usdc.balanceOf(BOB) - bobUsdcBefore, payout, "claimant payout");
@@ -267,13 +279,13 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
             vm.warp(phaseDeadline);
             vm.prank(BOB);
             vm.expectRevert();
-            defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, escrow, new bytes32[](0));
+            defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, escrow, 0, new bytes32[](0));
         }
 
         (,,,, uint64 phaseDeadline,,,,,) = defi.incidents(incidentId);
         vm.warp(uint256(phaseDeadline) + registry.incidentTimingConfig().phaseWindow);
         vm.prank(BOB);
-        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, escrow, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, _amounts(payout), 1, 1, escrow, 0, new bytes32[](0));
         assertEq(defi.activeIncidentId(), 0, "boundary-finalized incident remained active");
     }
 
@@ -387,8 +399,9 @@ contract InsuranceSettlementLifecycleTracerTest is InsuranceSettlementBase {
         uint256 eligible,
         bytes32[] memory proof
     ) internal {
+        (,,, uint128 boosters,,) = defi.claims(claimId);
         vm.prank(user);
-        defi.finalizeClaim(claimId, true, _amounts(payout), score, boostedScore, eligible, proof);
+        defi.finalizeClaim(claimId, true, _amounts(payout), score, boostedScore, eligible, boosters, proof);
     }
 }
 
@@ -444,7 +457,9 @@ contract InsuranceSettlementMultiPoolTracerTest is InsuranceSettlementBase {
         payouts[0] = payoutA;
         payouts[1] = payoutB;
         uint256 eligible = uint256(escrow) / 2;
-        bytes32 root = keccak256(bytes.concat(keccak256(abi.encode(incidentId, claimId, BOB, payouts, 1, 1, eligible))));
+        bytes32 root = keccak256(
+            bytes.concat(keccak256(abi.encode(incidentId, claimId, BOB, payouts, 1, 1, eligible, uint256(0))))
+        );
 
         (,,,, uint64 claimDeadline,,,,,) = defi.incidents(incidentId);
         vm.warp(claimDeadline + 1);
@@ -458,7 +473,7 @@ contract InsuranceSettlementMultiPoolTracerTest is InsuranceSettlementBase {
         uint256 firstBefore = pool.totalAssets();
         uint256 secondBefore = secondPool.totalAssets();
         vm.prank(BOB);
-        defi.finalizeClaim(claimId, true, payouts, 1, 1, eligible, new bytes32[](0));
+        defi.finalizeClaim(claimId, true, payouts, 1, 1, eligible, 0, new bytes32[](0));
 
         assertEq(firstBefore - pool.totalAssets(), grossPayouts[0], "first pool conservation");
         assertEq(secondBefore - secondPool.totalAssets(), grossPayouts[1], "second pool conservation");
@@ -688,7 +703,9 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
         uint256 payoutBefore = usdc.balanceOf(row.user);
         uint256 insuredBefore = insuredToken.balanceOf(row.user);
         vm.prank(row.user);
-        defi.finalizeClaim(claimId, true, _amounts(row.payout), row.scoreSpent, row.boostedScore, row.eligible, proof);
+        defi.finalizeClaim(
+            claimId, true, _amounts(row.payout), row.scoreSpent, row.boostedScore, row.eligible, boosterAmount, proof
+        );
 
         row.finalized = true;
         successfulFinalizations += 1;
@@ -741,7 +758,7 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
     function _declineClaim(uint256 claimId, uint256 incidentId, address user, bool hasRoot) internal returns (bool) {
         if (!hasRoot) {
             vm.prank(user);
-            defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+            defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
             return true;
         }
 
@@ -756,8 +773,11 @@ contract InsuranceSettlementLifecycleInvariantTest is InsuranceSettlementBase {
         } else {
             proof = new bytes32[](0);
         }
+        (,,, uint128 boosters,,) = defi.claims(claimId);
         vm.prank(user);
-        defi.finalizeClaim(claimId, false, _amounts(row.payout), row.scoreSpent, row.boostedScore, row.eligible, proof);
+        defi.finalizeClaim(
+            claimId, false, _amounts(row.payout), row.scoreSpent, row.boostedScore, row.eligible, boosters, proof
+        );
         return true;
     }
 

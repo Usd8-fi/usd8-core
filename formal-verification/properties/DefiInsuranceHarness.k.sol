@@ -293,10 +293,22 @@ abstract contract DefiInsuranceKontrolBase is Test {
         uint256 scoreSpent,
         uint256 boostedScore,
         uint256 eligibleAmount
-    ) internal pure returns (bytes32) {
+    ) internal view returns (bytes32) {
+        (,,, uint128 eligibleBoosters,,) = defi.claims(claimId);
         return keccak256(
             bytes.concat(
-                keccak256(abi.encode(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount))
+                keccak256(
+                    abi.encode(
+                        incidentId,
+                        claimId,
+                        user,
+                        amounts,
+                        scoreSpent,
+                        boostedScore,
+                        eligibleAmount,
+                        uint256(eligibleBoosters)
+                    )
+                )
             )
         );
     }

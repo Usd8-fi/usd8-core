@@ -6,7 +6,8 @@ use num_bigint::BigUint;
 use std::str::FromStr;
 use thiserror::Error;
 
-type TreePayload = sol!((uint256,uint256[],address[],uint256[][],uint256[],uint256[],uint256[]));
+type TreePayload =
+    sol!((uint256,uint256[],address[],uint256[][],uint256[],uint256[],uint256[],uint256[]));
 type DigestPayload =
     sol!((uint256,address,uint256,bytes32,uint256,uint256[],address[],bytes32,bytes32));
 type ClaimSetPayload = sol!((uint8[],uint256[],address[],uint256[],uint256[],uint256[]));
@@ -54,13 +55,15 @@ fn parse_b256(value: &str) -> Result<B256, FfiError> {
 fn tree(payload: &str) -> Result<(SettlementTree, Vec<BigUint>), FfiError> {
     let decoded = <TreePayload as SolType>::abi_decode_params(&payload_bytes(payload)?)
         .map_err(|error| FfiError::InvalidAbi(error.to_string()))?;
-    let (incident_id, ids, users, amounts, spents, boosteds, eligibles) = decoded;
+    let (incident_id, ids, users, amounts, spents, boosteds, eligibles, eligible_boosters) =
+        decoded;
     let length = ids.len();
     if users.len() != length
         || amounts.len() != length
         || spents.len() != length
         || boosteds.len() != length
         || eligibles.len() != length
+        || eligible_boosters.len() != length
     {
         return Err(FfiError::InvalidInput(
             "tree payload arrays have different lengths".to_owned(),
@@ -75,8 +78,12 @@ fn tree(payload: &str) -> Result<(SettlementTree, Vec<BigUint>), FfiError> {
         .zip(spents)
         .zip(boosteds)
         .zip(eligibles)
+        .zip(eligible_boosters)
         .map(
-            |(((((claim_id, user), amounts), score_spent), boosted_score), eligible_amount)| {
+            |(
+                (((((claim_id, user), amounts), score_spent), boosted_score), eligible_amount),
+                eligible_booster_amount,
+            )| {
                 MerkleRow {
                     claim_id,
                     user,
@@ -84,6 +91,7 @@ fn tree(payload: &str) -> Result<(SettlementTree, Vec<BigUint>), FfiError> {
                     score_spent: big(score_spent),
                     boosted_score: big(boosted_score),
                     eligible_amount: big(eligible_amount),
+                    eligible_booster_amount: big(eligible_booster_amount),
                 }
             },
         )

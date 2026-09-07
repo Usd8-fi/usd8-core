@@ -7,6 +7,8 @@ use usd8_tee_job_api::{
 };
 
 const REGISTRY: &str = "0x1111111111111111111111111111111111111111";
+const DEFI_INSURANCE: &str = "0x2222222222222222222222222222222222222222";
+const ROOT: &str = "0x3333333333333333333333333333333333333333333333333333333333333333";
 const BODY: &[u8] = br#"{"incidentId":"7"}"#;
 
 #[derive(Default)]
@@ -238,6 +240,75 @@ async fn poll_returns_pending_then_exact_terminal_object() {
         store.gets.lock().unwrap().as_slice(),
         [format!("terminal/{}.json", submitted.job_id)]
     );
+}
+
+#[tokio::test]
+async fn completed_settlement_is_saved_and_retrievable_without_its_job_id() {
+    let store = Arc::new(FakeStore::default());
+    let launcher = Arc::new(FakeLauncher::default());
+    let app = App::new(
+        AppConfig {
+            registry: REGISTRY.into(),
+            job_secret: b"0123456789abcdef0123456789abcdef".to_vec(),
+            max_result_bytes: 4_096,
+            max_inline_result_bytes: 4_096,
+            result_url_ttl_seconds: 300,
+            job_ttl_seconds: 1_800,
+        },
+        store.clone(),
+        launcher,
+    )
+    .unwrap();
+    let submitted = app.submit("private-relayer-key", BODY).await.unwrap();
+    let digest = format!("0x{}", "44".repeat(32));
+    let pcr_hash = format!("0x{}", "55".repeat(32));
+    let terminal = serde_json::json!({
+        "schemaVersion": 1,
+        "jobId": submitted.job_id,
+        "status": "completed",
+        "payload": {
+            "artifact": {
+                "schemaVersion": 2,
+                "chainId": 11_155_111,
+                "registry": REGISTRY,
+                "defiInsurance": DEFI_INSURANCE,
+                "incidentId": "7",
+                "root": ROOT,
+                "settlementDigest": digest,
+                "nitroAttestedDigest": digest,
+                "teePcrHash": pcr_hash,
+                "measuredTeePcrHash": pcr_hash,
+                "nitroAttestationDocument": "0x01",
+                "poolOrder": [],
+                "poolPayouts": [],
+                "rows": []
+            },
+            "digest": digest,
+            "signature": format!("0x{}", "66".repeat(65)),
+            "signer": DEFI_INSURANCE
+        }
+    });
+    let terminal_bytes = serde_json::to_vec(&terminal).unwrap();
+    store.objects.lock().unwrap().insert(
+        format!("terminal/{}.json", submitted.job_id),
+        terminal_bytes.clone(),
+    );
+
+    app.poll(&submitted.job_id).await.unwrap();
+
+    let settlement_key =
+        format!("settlements/v1/11155111/{REGISTRY}/{DEFI_INSURANCE}/7/{ROOT}.json");
+    assert_eq!(
+        store.objects.lock().unwrap().get(&settlement_key),
+        Some(&terminal_bytes)
+    );
+    let discovered = app
+        .settlement(11_155_111, REGISTRY, DEFI_INSURANCE, "7", ROOT)
+        .await
+        .unwrap();
+    assert_eq!(discovered.status, "completed");
+    assert_eq!(discovered.job_id, submitted.job_id);
+    assert_eq!(discovered.payload.unwrap()["artifact"]["root"], ROOT);
 }
 
 #[tokio::test]

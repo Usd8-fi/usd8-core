@@ -23,6 +23,97 @@ SPEC.loader.exec_module(VERIFY_MODULE)
 
 
 class ReleaseManifestTest(unittest.TestCase):
+    def test_bucket_cors_validation_rejects_wildcard_origin(self) -> None:
+        deploy = pathlib.Path(__file__).parents[1]
+        cors = json.loads((deploy / "bucket-cors.json").read_text())
+
+        VERIFY_MODULE.normalize_bucket_cors(cors)
+        cors["CORSRules"][0]["AllowedOrigins"] = ["*"]
+        with self.assertRaisesRegex(SystemExit, "bucket CORS"):
+            VERIFY_MODULE.normalize_bucket_cors(cors)
+
+    def test_live_bucket_cors_verifier_reads_manifest_bucket(self) -> None:
+        deploy = pathlib.Path(__file__).parents[1]
+        cors = json.loads((deploy / "bucket-cors.json").read_text())
+        manifest = {
+            "aws": {
+                "region": "eu-central-1",
+                "lambdaEnvironment": {
+                    "USD8_JOB_BUCKET": "usd8-tee-jobs-919437049909-eu-central-1",
+                },
+            },
+        }
+        with mock.patch.object(VERIFY_MODULE, "aws_json", return_value=cors) as aws:
+            VERIFY_MODULE.verify_live_bucket_cors(
+                manifest,
+                {"bucketCors": deploy / "bucket-cors.json"},
+            )
+
+        aws.assert_called_once_with(
+            [
+                "s3api", "get-bucket-cors", "--bucket",
+                "usd8-tee-jobs-919437049909-eu-central-1",
+            ],
+            "eu-central-1",
+        )
+
+    def test_job_bucket_cors_allows_externalized_results_from_reviewed_origins(self) -> None:
+        deploy = pathlib.Path(__file__).parents[1]
+        cors = json.loads((deploy / "bucket-cors.json").read_text())
+        bootstrap_policy = json.loads((deploy / "operator-bootstrap-policy.json").read_text())
+        persistent_policy = json.loads((deploy / "operator-persistent-policy.json").read_text())
+
+        self.assertEqual(cors, {
+            "CORSRules": [{
+                "AllowedMethods": ["GET"],
+                "AllowedOrigins": [
+                    "https://usd8.fi",
+                    "https://usd8-fi.github.io",
+                    "http://127.0.0.1:4173",
+                    "http://localhost:4173",
+                    "http://127.0.0.1:5173",
+                    "http://localhost:5173",
+                ],
+                "ExposeHeaders": ["Content-Length"],
+                "MaxAgeSeconds": 300,
+            }],
+        })
+        bucket_statement = next(
+            item for item in bootstrap_policy["Statement"] if item["Sid"] == "CreateJobBucket"
+        )
+        self.assertIn("s3:PutBucketCORS", bucket_statement["Action"])
+        self.assertIn("s3:GetBucketCORS", bucket_statement["Action"])
+        read_statement = next(
+            item for item in persistent_policy["Statement"] if item["Sid"] == "ReadJobBucketCors"
+        )
+        self.assertEqual(read_statement["Action"], "s3:GetBucketCORS")
+        self.assertEqual(
+            read_statement["Resource"],
+            "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1",
+        )
+
+    def test_job_bucket_policies_allow_immutable_root_addressed_settlements(self) -> None:
+        deploy = pathlib.Path(__file__).parents[1]
+        lambda_policy = json.loads((deploy / "lambda-role-policy.json").read_text())
+        bucket_policy = json.loads((deploy / "bucket-policy.json").read_text())
+        settlement_resource = (
+            "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/settlements/*"
+        )
+
+        lambda_statements = {item["Sid"]: item for item in lambda_policy["Statement"]}
+        self.assertIn(settlement_resource, lambda_statements["CreateRequests"]["Resource"])
+        self.assertIn(settlement_resource, lambda_statements["ReadJobs"]["Resource"])
+        self.assertIn(
+            "settlements/*",
+            lambda_statements["ListExactJobPrefixes"]["Condition"]["ForAnyValue:StringLike"][
+                "s3:prefix"
+            ],
+        )
+
+        bucket_statements = {item["Sid"]: item for item in bucket_policy["Statement"]}
+        self.assertIn(settlement_resource, bucket_statements["RequireCreateIfAbsent"]["Resource"])
+        self.assertIn(settlement_resource, bucket_statements["AllowLambdaJobReads"]["Resource"])
+
     def chain_manifest(self) -> dict:
         return {
             "chainId": 11155111,
@@ -96,9 +187,13 @@ class ReleaseManifestTest(unittest.TestCase):
 
     def test_live_rpc_refuses_redirects(self) -> None:
         handler = VERIFY_MODULE.NoRedirect()
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            handler.redirect_request(None, None, 302, "https://redirect.invalid", {}, None)
-        raised.exception.close()
+        # Supply a real response body so HTTPError.close also works on Python 3.9.
+        with tempfile.TemporaryFile() as response:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                handler.redirect_request(None, response, 302, "https://redirect.invalid", {}, None)
+            self.assertEqual(raised.exception.code, 302)
+            raised.exception.close()
+            self.assertTrue(response.closed)
 
     def test_live_rpc_sets_explicit_user_agent(self) -> None:
         response = mock.MagicMock()
@@ -193,7 +288,7 @@ class ReleaseManifestTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             VERIFY_MODULE.verify_attested_role_binding(policy, INSTANCE_ROLE_ARN)
 
-    def make_release(self, root: pathlib.Path) -> pathlib.Path:
+    def make_release(self, root: pathlib.Path, *, include_bucket_cors: bool = True) -> pathlib.Path:
         artifacts = {
             "eif": "usd8-tee-enclave.eif",
             "parent": "usd8-tee-parent",
@@ -203,6 +298,8 @@ class ReleaseManifestTest(unittest.TestCase):
             "kmsPolicy": "kms-key-policy.json",
             "instancePolicy": "instance-role-policy.json",
         }
+        if include_bucket_cors:
+            artifacts["bucketCors"] = "bucket-cors.json"
         policies = {
             "kmsPolicy": {
                 "Statement": [{
@@ -228,6 +325,8 @@ class ReleaseManifestTest(unittest.TestCase):
             path = root / relative
             if name in policies:
                 path.write_text(json.dumps(policies[name], sort_keys=True))
+            elif name == "bucketCors":
+                path.write_bytes((pathlib.Path(__file__).parents[1] / "bucket-cors.json").read_bytes())
             else:
                 path.write_bytes(f"fixture-{name}".encode())
             entries[name] = {
@@ -279,6 +378,14 @@ class ReleaseManifestTest(unittest.TestCase):
             result = self.run_verify(manifest)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("RELEASE_VERIFY_PASSED", result.stdout)
+
+    def test_rejects_build_without_hash_bound_bucket_cors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = self.make_release(pathlib.Path(directory), include_bucket_cors=False)
+            result = self.run_verify(manifest)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bucketCors", result.stderr)
 
     def test_rejects_dirty_source_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

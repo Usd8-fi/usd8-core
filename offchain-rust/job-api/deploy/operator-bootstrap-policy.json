@@ -50,6 +50,8 @@
         "s3:PutBucketEncryption",
         "s3:PutBucketVersioning",
         "s3:PutBucketPolicy",
+        "s3:PutBucketCORS",
+        "s3:GetBucketCORS",
         "s3:PutLifecycleConfiguration",
         "s3:PutObject",
         "s3:GetObject"

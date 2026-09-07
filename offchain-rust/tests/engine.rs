@@ -11,9 +11,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use usd8_settlement::abi::{
-    IAggregatorV3, IDefiInsurance, IERC20, IRegistry, ISingleAssetCoverPool,
+    IAggregatorV3, IDefiInsurance, IERC20, IERC1155, IRegistry, ISingleAssetCoverPool,
 };
 use usd8_settlement::artifact::{verify_run, write_atomic_json};
+use usd8_settlement::attested_runtime::artifact_for_attestation;
 use usd8_settlement::config::BootstrapConfig;
 use usd8_settlement::engine::{ScoreMode, build_settlement};
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
@@ -28,6 +29,8 @@ const POOL: &str = "0x0000000000000000000000000000000000006000";
 const ASSET: &str = "0x0000000000000000000000000000000000007000";
 const FEED: &str = "0x0000000000000000000000000000000000008000";
 const USER: &str = "0x0000000000000000000000000000000000009000";
+const BOOSTER: &str = "0x000000000000000000000000000000000000a000";
+const BOOSTER_ID: u64 = 9;
 
 fn aa(value: &str) -> AlloyAddress {
     AlloyAddress::from_str(value).unwrap()
@@ -124,7 +127,17 @@ impl Rpc for EngineRpc {
                 }
                 let balance_selector =
                     format!("0x{}", hex::encode(IERC20::balanceOfCall::SELECTOR));
-                if selector == balance_selector {
+                let booster_selector =
+                    format!("0x{}", hex::encode(IERC1155::balanceOfCall::SELECTOR));
+                if selector == balance_selector || selector == booster_selector {
+                    if selector == booster_selector {
+                        let call =
+                            IERC1155::balanceOfCall::abi_decode(&hex::decode(&data[2..]).unwrap())
+                                .unwrap();
+                        assert_eq!(to, BOOSTER);
+                        assert_eq!(call.account, aa(USER));
+                        assert_eq!(call.id, U256::from(BOOSTER_ID));
+                    }
                     let block = u64::from_str_radix(
                         params[1].as_str().unwrap().trim_start_matches("0x"),
                         16,
@@ -203,13 +216,17 @@ fn fixture_with_min_claim_and_root(
     _min_claim_amount: u128,
     root: [u8; 32],
 ) -> (EngineRpc, BootstrapConfig) {
+    fixture_with_boosters(root, 0)
+}
+
+fn fixture_with_boosters(root: [u8; 32], booster_amount: u64) -> (EngineRpc, BootstrapConfig) {
     let registration = ClaimEvent {
         kind: EventKind::Register,
         claim_id: BigUint::from(1u8),
         user: ka(USER),
         amount: BigUint::from(100u8),
         score_to_spend: BigUint::from(60u8),
-        booster_amount: BigUint::from(0u8),
+        booster_amount: BigUint::from(booster_amount),
         block_number: 92,
         log_index: 0,
     };
@@ -272,6 +289,15 @@ fn fixture_with_min_claim_and_root(
             twapLookbackBlocks: 10,
             minHoldingRequired: 5,
             sampleStepBlocks: 2,
+        }),
+    );
+    insert(
+        REGISTRY,
+        IRegistry::boosterConfigCall::SELECTOR,
+        encoded::<IRegistry::boosterConfigCall>(&IRegistry::boosterConfigReturn {
+            collection: aa(BOOSTER),
+            tokenId: BOOSTER_ID,
+            boostBps: 100,
         }),
     );
     insert(
@@ -350,7 +376,7 @@ fn fixture_with_min_claim_and_root(
                 user: aa(USER),
                 insuredTokenAmount: 100,
                 scoreToSpend: U256::from(60),
-                boosterAmount: U256::ZERO,
+                boosterAmount: U256::from(booster_amount),
             },
             92,
             0,
@@ -378,7 +404,7 @@ fn fixture_with_min_claim_and_root(
     let config = BootstrapConfig::derived(
         Address::from_str(REGISTRY).unwrap(),
         Address::from_str(DEFI).unwrap(),
-        1,
+        BOOSTER_ID,
         100,
         [(
             Address::from_str(ASSET).unwrap(),
@@ -434,6 +460,122 @@ fn checkpoint_integrity_key_is_redacted_from_debug_output() {
 }
 
 #[tokio::test]
+async fn boosters_use_the_same_preincident_window_and_historical_minimum() {
+    // The insured-token window is [75, 80]. Endpoint balances alone would miss the dip.
+    for (escrowed, start, end, transfers, expected) in [
+        (10, 10, 10, vec![(77, false, 7), (79, true, 7)], 3u64),
+        (2, 10, 10, vec![], 2),
+        (10, 0, 10, vec![(78, true, 10)], 0),
+        (10, 0, 0, vec![(85, true, 10)], 0),
+    ] {
+        let (mut rpc, config) = fixture_with_boosters([0u8; 32], escrowed);
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 75), U256::from(start));
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 80), U256::from(end));
+        for (block, incoming, amount) in transfers {
+            Arc::make_mut(&mut rpc.logs).push(event_log(
+                BOOSTER,
+                &IERC1155::TransferSingle {
+                    operator: aa(USER),
+                    from: if incoming {
+                        AlloyAddress::ZERO
+                    } else {
+                        aa(USER)
+                    },
+                    to: if incoming {
+                        aa(USER)
+                    } else {
+                        AlloyAddress::ZERO
+                    },
+                    id: U256::from(BOOSTER_ID),
+                    value: U256::from(amount),
+                },
+                block,
+                block,
+            ));
+        }
+        let run = build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .unwrap();
+        let row = &run.output.rows[0];
+        assert_eq!(row.eligible_booster_amount, BigUint::from(expected));
+        assert_eq!(
+            row.boosted_score,
+            BigUint::from(60 * (100 + expected) / 100)
+        );
+        assert_eq!(row.eligible_amount, BigUint::from(100u8));
+        assert_eq!(row.score_spent, BigUint::from(60u8));
+        verify_run(&run, &config).unwrap();
+        let artifact = run.artifact(&config, true);
+        assert_eq!(artifact["schemaVersion"], 2);
+        assert_eq!(artifact["rows"][0]["boosterAmount"], escrowed.to_string());
+        assert_eq!(
+            artifact["rows"][0]["eligibleBoosterAmount"],
+            expected.to_string()
+        );
+    }
+}
+
+#[tokio::test]
+async fn booster_acquired_at_cutoff_qualifies_but_cutoff_plus_one_does_not() {
+    // The required holding window starts at block 75 (post-block state).
+    // A mint in block 75 is held throughout; a mint in block 76 is too late.
+    const CUTOFF: u64 = 75;
+    for (mint_block, starting_balance, expected) in [(CUTOFF, 10u64, 10u64), (CUTOFF + 1, 0, 0)] {
+        let (mut rpc, config) = fixture_with_boosters([0u8; 32], 10);
+        Arc::make_mut(&mut rpc.balances)
+            .insert((BOOSTER.to_owned(), CUTOFF), U256::from(starting_balance));
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), CUTOFF + 1), U256::from(10));
+        Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 80), U256::from(10));
+        Arc::make_mut(&mut rpc.logs).push(event_log(
+            BOOSTER,
+            &IERC1155::TransferSingle {
+                operator: aa(USER),
+                from: AlloyAddress::ZERO,
+                to: aa(USER),
+                id: U256::from(BOOSTER_ID),
+                value: U256::from(10),
+            },
+            mint_block,
+            0,
+        ));
+        let run = build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .unwrap();
+        let row = &run.output.rows[0];
+        assert_eq!(
+            row.eligible_booster_amount,
+            BigUint::from(expected),
+            "mint block {mint_block}"
+        );
+        assert_eq!(
+            row.boosted_score,
+            BigUint::from(60 * (100 + expected) / 100)
+        );
+        assert_eq!(row.score_spent, BigUint::from(60u8));
+        assert_eq!(row.eligible_amount, BigUint::from(100u8));
+        verify_run(&run, &config).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unavailable_or_inconsistent_booster_history_fails_closed() {
+    let (mut rpc, config) = fixture_with_boosters([0u8; 32], 10);
+    assert!(
+        build_settlement(Arc::new(rpc.clone()), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .is_err()
+    );
+    Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 75), U256::from(10));
+    Arc::make_mut(&mut rpc.balances).insert((BOOSTER.to_owned(), 80), U256::from(3));
+    // Missing transfer logs must not turn uncertain history into an eligible quantity.
+    assert!(
+        build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     let (rpc, config) = fixture();
     let run = build_settlement(Arc::new(rpc), &config, BigUint::from(7u8), ScoreMode::Raw)
@@ -450,8 +592,11 @@ async fn full_engine_builds_and_atomically_verifies_one_claim_artifact() {
     verify_run(&run, &config).unwrap();
 
     let artifact = run.artifact(&config, true);
+    let attested_artifact = artifact_for_attestation(&run, &config);
     let compact = run.artifact(&config, false);
     assert_eq!(artifact["rows"][0]["acceptPayoutRecommended"], true);
+    assert!(attested_artifact["rows"][0].get("proof").is_none());
+    assert_eq!(attested_artifact["rows"], compact["rows"]);
     assert!(compact["rows"][0].get("proof").is_none());
     assert_eq!(compact["root"], artifact["root"]);
     assert_eq!(compact["digest"], artifact["digest"]);

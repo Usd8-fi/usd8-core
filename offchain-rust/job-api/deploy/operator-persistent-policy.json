@@ -65,6 +65,12 @@
       "Resource": "arn:aws:iam::919437049909:user/hermes-tee-agent"
     },
     {
+      "Sid": "ReadJobBucketCors",
+      "Effect": "Allow",
+      "Action": "s3:GetBucketCORS",
+      "Resource": "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1"
+    },
+    {
       "Sid": "ReadSepoliaReleaseKey",
       "Effect": "Allow",
       "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:ListResourceTags"],

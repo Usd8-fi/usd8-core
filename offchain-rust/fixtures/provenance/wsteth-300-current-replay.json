@@ -24,11 +24,11 @@
     "root": "0x4cb7ed9677bea4245ac7511cdc2c8e4895f22bb84c54612072d6bc553490afdf"
   },
   "currentReplay": {
-    "toolchain": "Rust 1.92.0",
+    "toolchain": "Rust 1.94.1",
     "command": "usd8-settlement kernel fixtures/real-usdc-usdt-wsteth-300-6m.json",
     "claimSetHash": "0x23ebb1b973915ba73823091a91a88a16d8990fd9b3d05d97e44d7c9425b358e1",
     "settlementInputHash": "0x8389779f9042a9242e9b12555233f32a4ac7f875190f3755973447abd2f4a954",
-    "root": "0xf3ea211950a9bfc561fa72ca6b1108aab3ec4e3a2bb5e93d18ed14b6ff5562b1",
+    "root": "0x06405af0c9a6f9e8973da2f7284850b1d1434b2623f87245d52d49e1473de189",
     "poolPayouts": [
       "73917524084776006121"
     ]

@@ -7,7 +7,7 @@ use std::str::FromStr;
 use usd8_settlement::Address;
 use usd8_settlement::abi::{IDefiInsurance, IRegistry};
 use usd8_settlement::config::CHAIN_ID;
-use usd8_settlement::incident_open::build_incident_open;
+use usd8_settlement::incident_open::{build_incident_open, precheck_incident_open};
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
 
 const REGISTRY: &str = "0x3Fa82eC1842f72c36580D84E03377b10B5E2F590";
@@ -312,6 +312,21 @@ async fn open_authorization_is_derived_from_live_contract_state() {
         }
     );
     assert_eq!(authorization.tee_pcr_hash, format!("0x{}", "44".repeat(32)));
+}
+
+#[tokio::test]
+async fn open_precheck_reuses_the_authoritative_drop_selection_without_a_signer() {
+    let result = precheck_incident_open(
+        &fixture(false),
+        Address::from_str(REGISTRY).unwrap(),
+        Address::from_str(TOKEN).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.reference_block, REFERENCE_BLOCK);
+    assert_eq!(result.sample_count, 2);
+    assert_eq!(result.minimum_drop_bps, 2_000);
 }
 
 #[tokio::test]

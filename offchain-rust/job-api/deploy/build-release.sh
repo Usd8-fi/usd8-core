@@ -71,7 +71,7 @@ cd job-api
 USD8_REGISTRY="$REGISTRY" CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release --locked \
   --features "$JOB_FEATURES" --bin usd8-tee-enclave --bin usd8-tee-parent
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release --locked \
-  --features lambda,janitor --bin usd8-tee-job-lambda --bin usd8-tee-janitor
+  --features lambda,janitor,sepolia --bin usd8-tee-job-lambda --bin usd8-tee-janitor
 
 install -m 0555 target/release/usd8-tee-enclave "$CONTEXT/usd8-tee-enclave"
 install -m 0444 deploy/Dockerfile.enclave "$CONTEXT/Dockerfile"
@@ -123,6 +123,7 @@ for POLICY in kms-key-policy.json instance-role-policy.json; do
       else . end
     )' "deploy/$POLICY" > "$RELEASE/$POLICY"
 done
+install -m 0444 deploy/bucket-cors.json "$RELEASE/bucket-cors.json"
 
 EIF_SHA256=$(sha256sum "$RELEASE/usd8-tee-enclave.eif" | cut -d' ' -f1)
 PARENT_SHA256=$(sha256sum "$RELEASE/usd8-tee-parent" | cut -d' ' -f1)
@@ -131,6 +132,7 @@ LAMBDA_SHA256=$(sha256sum "$RELEASE/lambda.zip" | cut -d' ' -f1)
 JANITOR_SHA256=$(sha256sum "$RELEASE/janitor.zip" | cut -d' ' -f1)
 KMS_POLICY_SHA256=$(sha256sum "$RELEASE/kms-key-policy.json" | cut -d' ' -f1)
 INSTANCE_POLICY_SHA256=$(sha256sum "$RELEASE/instance-role-policy.json" | cut -d' ' -f1)
+BUCKET_CORS_SHA256=$(sha256sum "$RELEASE/bucket-cors.json" | cut -d' ' -f1)
 jq -n \
   --arg source "$SOURCE_SHA256" --arg commit "$GIT_COMMIT" --argjson dirty "$GIT_DIRTY" \
   --arg rootLock "$ROOT_LOCK_SHA256" --arg jobLock "$JOB_LOCK_SHA256" \
@@ -142,7 +144,7 @@ jq -n \
   --arg eif "$EIF_SHA256" --arg parent "$PARENT_SHA256" \
   --arg settlement "$SETTLEMENT_SHA256" --arg lambda "$LAMBDA_SHA256" \
   --arg janitor "$JANITOR_SHA256" --arg kmsPolicy "$KMS_POLICY_SHA256" \
-  --arg instancePolicy "$INSTANCE_POLICY_SHA256" '
+  --arg instancePolicy "$INSTANCE_POLICY_SHA256" --arg bucketCors "$BUCKET_CORS_SHA256" '
   {
     schemaVersion: 2,
     status: "built",
@@ -163,11 +165,12 @@ jq -n \
       lambda: {path: "lambda.zip", sha256: $lambda},
       janitor: {path: "janitor.zip", sha256: $janitor},
       kmsPolicy: {path: "kms-key-policy.json", sha256: $kmsPolicy},
-      instancePolicy: {path: "instance-role-policy.json", sha256: $instancePolicy}
+      instancePolicy: {path: "instance-role-policy.json", sha256: $instancePolicy},
+      bucketCors: {path: "bucket-cors.json", sha256: $bucketCors}
     }
   }' > "$RELEASE/release-manifest.json"
 (cd "$RELEASE" && sha256sum usd8-tee-enclave.eif usd8-tee-parent usd8-settlement \
-  lambda.zip janitor.zip kms-key-policy.json instance-role-policy.json > SHA256SUMS)
+  lambda.zip janitor.zip kms-key-policy.json instance-role-policy.json bucket-cors.json > SHA256SUMS)
 python3 deploy/verify-release.py "$RELEASE/release-manifest.json" --allow-built
 mkdir -p "$(dirname "$OUT")"
 mv "$RELEASE" "$OUT"

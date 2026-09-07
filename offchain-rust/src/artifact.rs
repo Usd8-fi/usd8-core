@@ -72,6 +72,7 @@ pub fn verify_run(run: &SettlementRun, config: &BootstrapConfig) -> Result<(), A
             score_spent: row.score_spent.clone(),
             boosted_score: row.boosted_score.clone(),
             eligible_amount: row.eligible_amount.clone(),
+            eligible_booster_amount: row.eligible_booster_amount.clone(),
         })
         .collect::<Vec<_>>();
     if merkle_rows.is_empty() {

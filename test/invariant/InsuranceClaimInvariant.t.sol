@@ -114,7 +114,7 @@ contract InsuranceClaimHandler is Test {
         uint256 amount = ghostEscrow[actor];
         uint256 balanceBefore = insuredToken.balanceOf(actor);
         vm.prank(actor);
-        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, new bytes32[](0));
+        defi.finalizeClaim(claimId, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
 
         (,,,,, resolved) = defi.claims(claimId);
         assertTrue(resolved, "withdrawn claim unresolved");

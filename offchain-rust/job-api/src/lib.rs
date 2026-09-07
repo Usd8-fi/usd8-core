@@ -40,18 +40,28 @@ pub const fn settlement_rpc_url() -> &'static str {
 }
 
 #[cfg(not(feature = "sepolia"))]
+pub const fn settlement_rpc_requires_drpc_key() -> bool {
+    true
+}
+
+#[cfg(not(feature = "sepolia"))]
 pub const fn settlement_rpc_authority() -> &'static str {
     "lb.drpc.org:443"
 }
 
 #[cfg(feature = "sepolia")]
 pub const fn settlement_rpc_url() -> &'static str {
-    "https://lb.drpc.live/ogrpc?network=sepolia"
+    "https://rpc.sepolia.ethpandaops.io"
+}
+
+#[cfg(feature = "sepolia")]
+pub const fn settlement_rpc_requires_drpc_key() -> bool {
+    false
 }
 
 #[cfg(feature = "sepolia")]
 pub const fn settlement_rpc_authority() -> &'static str {
-    "lb.drpc.live:443"
+    "rpc.sepolia.ethpandaops.io:443"
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -228,7 +238,10 @@ pub fn extract_attested_digest(
     if object
         .get("schemaVersion")
         .and_then(serde_json::Value::as_u64)
-        != Some(1)
+        != Some(match expected {
+            AttestedDigestKind::Settlement => 2,
+            AttestedDigestKind::IncidentOpen => 1,
+        })
     {
         return Err(ArtifactError::Invalid);
     }
@@ -340,6 +353,12 @@ pub enum ProtocolError {
     InvalidIdempotencyKey,
     #[error("invalid job ID")]
     InvalidJobId,
+    #[error("invalid chain ID")]
+    InvalidChainId,
+    #[error("invalid DefiInsurance address")]
+    InvalidDefiInsurance,
+    #[error("invalid settlement root")]
+    InvalidSettlementRoot,
 }
 
 pub fn canonicalize_request(
@@ -472,6 +491,56 @@ impl JobPaths {
             request: format!("requests/{job_id}.json"),
             terminal: format!("terminal/{job_id}.json"),
         })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementLocator {
+    pub chain_id: u64,
+    pub registry: String,
+    pub defi_insurance: String,
+    pub incident_id: String,
+    pub root: String,
+}
+
+impl SettlementLocator {
+    pub fn new(
+        chain_id: u64,
+        registry: &str,
+        defi_insurance: &str,
+        incident_id: &str,
+        root: &str,
+    ) -> Result<Self, ProtocolError> {
+        if chain_id == 0 {
+            return Err(ProtocolError::InvalidChainId);
+        }
+        validate_incident_id(incident_id)?;
+        let registry = normalize_registry(registry)?;
+        let defi_insurance =
+            normalize_address(defi_insurance).map_err(|_| ProtocolError::InvalidDefiInsurance)?;
+        let root_hex = root
+            .strip_prefix("0x")
+            .ok_or(ProtocolError::InvalidSettlementRoot)?;
+        if root_hex.len() != 64
+            || !root_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || root_hex.bytes().all(|byte| byte == b'0')
+        {
+            return Err(ProtocolError::InvalidSettlementRoot);
+        }
+        Ok(Self {
+            chain_id,
+            registry,
+            defi_insurance,
+            incident_id: incident_id.to_owned(),
+            root: format!("0x{}", root_hex.to_ascii_lowercase()),
+        })
+    }
+
+    pub fn key(&self) -> String {
+        format!(
+            "settlements/v1/{}/{}/{}/{}/{}.json",
+            self.chain_id, self.registry, self.defi_insurance, self.incident_id, self.root
+        )
     }
 }
 
@@ -694,6 +763,79 @@ pub enum TerminalStatus {
     Failed,
 }
 
+fn settlement_locator_from_terminal(
+    terminal: &TerminalEnvelope,
+    configured_registry: &str,
+) -> Result<Option<SettlementLocator>, ServiceError> {
+    if terminal.status != TerminalStatus::Completed {
+        return Ok(None);
+    }
+    let Some(artifact) = terminal.payload.get("artifact") else {
+        return Ok(None);
+    };
+    if artifact.get("root").is_none() {
+        return Ok(None);
+    }
+    let attested_digest = extract_attested_digest(artifact, AttestedDigestKind::Settlement)
+        .map_err(|_| ServiceError::InvalidStoredResult)?;
+    let payload_digest = terminal
+        .payload
+        .get("digest")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.strip_prefix("0x"))
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    let mut payload_digest_bytes = [0u8; 32];
+    hex::decode_to_slice(payload_digest, &mut payload_digest_bytes)
+        .map_err(|_| ServiceError::InvalidStoredResult)?;
+    if payload_digest_bytes != attested_digest {
+        return Err(ServiceError::InvalidStoredResult);
+    }
+    let signature = terminal
+        .payload
+        .get("signature")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.strip_prefix("0x"))
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    if signature.len() != 130 || !signature.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ServiceError::InvalidStoredResult);
+    }
+    let signer = terminal
+        .payload
+        .get("signer")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    normalize_address(signer).map_err(|_| ServiceError::InvalidStoredResult)?;
+
+    let chain_id = artifact
+        .get("chainId")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    let registry = artifact
+        .get("registry")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    let defi_insurance = artifact
+        .get("defiInsurance")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    let incident_id = artifact
+        .get("incidentId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    let root = artifact
+        .get("root")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ServiceError::InvalidStoredResult)?;
+    let locator = SettlementLocator::new(chain_id, registry, defi_insurance, incident_id, root)
+        .map_err(|_| ServiceError::InvalidStoredResult)?;
+    let configured_registry =
+        normalize_registry(configured_registry).map_err(|_| ServiceError::InvalidRequest)?;
+    if locator.registry != configured_registry {
+        return Err(ServiceError::InvalidStoredResult);
+    }
+    Ok(Some(locator))
+}
+
 pub struct App<S, L> {
     config: AppConfig,
     store: Arc<S>,
@@ -837,27 +979,124 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
                 });
             }
         };
+        let terminal = self.parse_terminal(&bytes, Some(job_id))?;
+        self.publish_settlement(&paths, &bytes, &terminal).await?;
+        self.terminal_outcome(&paths.terminal, bytes, terminal)
+            .await
+    }
+
+    pub async fn settlement(
+        &self,
+        chain_id: u64,
+        registry: &str,
+        defi_insurance: &str,
+        incident_id: &str,
+        root: &str,
+    ) -> Result<PollOutcome, ServiceError> {
+        let locator = SettlementLocator::new(chain_id, registry, defi_insurance, incident_id, root)
+            .map_err(|_| ServiceError::InvalidRequest)?;
+        if locator.registry
+            != normalize_registry(&self.config.registry)
+                .map_err(|_| ServiceError::InvalidRequest)?
+        {
+            return Err(ServiceError::InvalidRequest);
+        }
+        let key = locator.key();
+        let bytes = self
+            .store
+            .get(&key, self.config.max_result_bytes)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        let terminal = self.parse_terminal(&bytes, None)?;
+        if terminal.status != TerminalStatus::Completed
+            || settlement_locator_from_terminal(&terminal, &self.config.registry)? != Some(locator)
+        {
+            return Err(ServiceError::InvalidStoredResult);
+        }
+        self.terminal_outcome(&key, bytes, terminal).await
+    }
+
+    fn parse_terminal(
+        &self,
+        bytes: &[u8],
+        expected_job_id: Option<&str>,
+    ) -> Result<TerminalEnvelope, ServiceError> {
         if bytes.len() > self.config.max_result_bytes {
             return Err(ServiceError::InvalidStoredResult);
         }
         let terminal: TerminalEnvelope =
-            serde_json::from_slice(&bytes).map_err(|_| ServiceError::InvalidStoredResult)?;
+            serde_json::from_slice(bytes).map_err(|_| ServiceError::InvalidStoredResult)?;
         if terminal.schema_version != 1
-            || terminal.job_id != job_id
+            || expected_job_id.is_some_and(|job_id| terminal.job_id != job_id)
+            || JobPaths::new(&terminal.job_id).is_err()
             || !terminal.payload.is_object()
         {
             return Err(ServiceError::InvalidStoredResult);
         }
+        Ok(terminal)
+    }
+
+    async fn publish_settlement(
+        &self,
+        paths: &JobPaths,
+        bytes: &[u8],
+        terminal: &TerminalEnvelope,
+    ) -> Result<(), ServiceError> {
+        let Some(locator) = settlement_locator_from_terminal(terminal, &self.config.registry)?
+        else {
+            return Ok(());
+        };
+        let request_bytes = self
+            .store
+            .get(&paths.request, self.config.max_result_bytes)
+            .await?
+            .ok_or(ServiceError::InvalidStoredResult)?;
+        let stored: StoredRequest = serde_json::from_slice(&request_bytes)
+            .map_err(|_| ServiceError::InvalidStoredResult)?;
+        let request_matches = matches!(
+            &stored.request,
+            CanonicalRequest::Settlement(request)
+                if request.incident_id == locator.incident_id
+                    && request.registry == locator.registry
+        );
+        if stored.schema_version != STORED_REQUEST_SCHEMA_VERSION
+            || stored.job_id != terminal.job_id
+            || verify_job_request_binding(&stored.job_id, &stored.request).is_err()
+            || !request_matches
+        {
+            return Err(ServiceError::InvalidStoredResult);
+        }
+
+        let key = locator.key();
+        if let CreateOutcome::Exists(existing) = self.store.create(&key, bytes).await? {
+            let existing_terminal = self.parse_terminal(&existing, None)?;
+            if existing_terminal.status != TerminalStatus::Completed
+                || settlement_locator_from_terminal(&existing_terminal, &self.config.registry)?
+                    != Some(locator)
+            {
+                return Err(ServiceError::InvalidStoredResult);
+            }
+        }
+        Ok(())
+    }
+
+    async fn terminal_outcome(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        terminal: TerminalEnvelope,
+    ) -> Result<PollOutcome, ServiceError> {
         let status = match terminal.status {
             TerminalStatus::Completed => "completed",
             TerminalStatus::Failed => "failed",
         };
+        let job_id = terminal.job_id;
         let (payload, download) = if bytes.len() <= self.config.max_inline_result_bytes {
             (Some(terminal.payload), None)
         } else {
             let url = self
                 .store
-                .download_url(&paths.terminal, self.config.result_url_ttl_seconds)
+                .download_url(key, self.config.result_url_ttl_seconds)
                 .await?;
             (
                 None,
@@ -870,7 +1109,7 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
             )
         };
         Ok(PollOutcome {
-            job_id: job_id.to_owned(),
+            job_id,
             status: status.to_owned(),
             api_verified: false,
             payload,

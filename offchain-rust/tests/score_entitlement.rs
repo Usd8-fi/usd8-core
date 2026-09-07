@@ -46,6 +46,7 @@ fn scenario(pool_usd: u64, claims: &[(u64, u64)]) -> KernelInput {
                 spent_score: 0u8.into(),
                 score_to_spend: (*score).into(),
                 booster_amount: 0u8.into(),
+                booster_held: 0u8.into(),
             })
             .collect(),
     }
@@ -65,6 +66,28 @@ fn assert_payouts(name: &str, pool_usd: u64, claims: &[(u64, u64)], expected: &[
         vec![expected.iter().cloned().sum()],
         "{name}: aggregate pool payout"
     );
+}
+
+#[test]
+fn only_historically_held_escrowed_boosters_increase_entitlement() {
+    let mut input = scenario(100, &[(100, 100), (100, 100)]);
+    input.claims[0].booster_amount = 50u8.into();
+    for (held, eligible) in [(0u8, 0u8), (20, 20), (80, 50)] {
+        input.claims[0].booster_held = held.into();
+        let output = allocate(&input).unwrap();
+        let row = &output.rows[0];
+        assert_eq!(row.eligible_booster_amount, eligible.into());
+        assert_eq!(row.score_spent, 100u8.into());
+        assert_eq!(
+            row.boosted_score,
+            BigUint::from(100u16 + u16::from(eligible))
+        );
+        assert_eq!(
+            row.payout_usd,
+            wad(100) * &row.boosted_score / (&row.boosted_score + 100u8)
+        );
+        assert_eq!(row.eligible_amount, wad(100));
+    }
 }
 
 #[test]

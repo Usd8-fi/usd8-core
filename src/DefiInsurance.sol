@@ -609,7 +609,7 @@ contract DefiInsurance is
         inc.claimSetHash = keccak256(abi.encode(inc.claimSetHash, claimId));
         claimIdByIncidentAndUser[incidentId][msg.sender] = 0; // may re-file within the window with a different claim id
         escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
-        _returnBoosters(c, msg.sender);
+        _resolveBoosters(c, msg.sender, 0);
         _resolveClaimBond(c, msg.sender);
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
 
@@ -623,12 +623,15 @@ contract DefiInsurance is
         received = token.balanceOf(address(this)) - balanceBefore;
     }
 
-    /// @dev Return a claim's escrowed boosters on a non-acceptance exit.
-    function _returnBoosters(Claim storage c, address recipient) internal {
+    /// @dev Burn the accepted eligible quantity and return the remaining escrow.
+    function _resolveBoosters(Claim storage c, address recipient, uint256 burnAmount) internal {
         uint256 amount = c.boosterAmount;
         if (amount != 0) {
             (address booster, uint64 boosterId,) = registry().boosterConfig();
-            IERC1155(booster).safeTransferFrom(address(this), recipient, boosterId, amount, "");
+            if (burnAmount != 0) IERC1155Burnable(booster).burn(address(this), boosterId, burnAmount);
+            if (amount > burnAmount) {
+                IERC1155(booster).safeTransferFrom(address(this), recipient, boosterId, amount - burnAmount, "");
+            }
         }
     }
 
@@ -745,6 +748,7 @@ contract DefiInsurance is
     /// @param boostedScore Booster-adjusted score used only for off-chain payout weighting.
     /// @param eligibleAmount Covered escrow amount. Bond and payout eligibility also
     ///        require nonzero score spent.
+    /// @param eligibleBoosterAmount Escrowed booster units that satisfy the historical holding requirement.
     /// @param proof Merkle proof against the standing root.
     function finalizeClaim(
         uint256 claimId,
@@ -753,6 +757,7 @@ contract DefiInsurance is
         uint256 scoreSpent,
         uint256 boostedScore,
         uint256 eligibleAmount,
+        uint256 eligibleBoosterAmount,
         bytes32[] calldata proof
     ) external nonReentrant {
         Claim storage c = claims[claimId];
@@ -761,17 +766,18 @@ contract DefiInsurance is
 
         uint256 incidentId = c.incidentId;
         Incident storage inc = incidents[incidentId];
-        bool moduleInactive = registry().defiInsurance() != address(this);
-
-        // A removed module or missing/voided root has no usable proof. After the
-        // applicable deadline, the claimant may recover without settlement.
-        if (moduleInactive || inc.root == bytes32(0)) {
-            if (msg.sender != c.user) revert UnauthorizedClaim(claimId);
-            bool unavailable =
-                moduleInactive || block.timestamp > uint256(inc.phaseDeadline) + incidentPhaseWindow[incidentId];
-            if (acceptPayout || !unavailable) revert FinalizeNotOpen(incidentId);
-            _resolveWithoutSettlement(claimId, c, inc);
-            return;
+        {
+            bool moduleInactive = registry().defiInsurance() != address(this);
+            // A removed module or missing/voided root has no usable proof. After the
+            // applicable deadline, the claimant may recover without settlement.
+            if (moduleInactive || inc.root == bytes32(0)) {
+                if (msg.sender != c.user) revert UnauthorizedClaim(claimId);
+                bool unavailable =
+                    moduleInactive || block.timestamp > uint256(inc.phaseDeadline) + incidentPhaseWindow[incidentId];
+                if (acceptPayout || !unavailable) revert FinalizeNotOpen(incidentId);
+                _resolveWithoutSettlement(claimId, c, inc);
+                return;
+            }
         }
 
         // A proof-backed decline remains available after payout expiry so an eligible
@@ -785,15 +791,19 @@ contract DefiInsurance is
 
         {
             if (amounts.length != inc.pools.length) revert InvalidProof(claimId);
-            bytes32 leaf =
-                _settlementLeaf(incidentId, claimId, c.user, amounts, scoreSpent, boostedScore, eligibleAmount);
+            bytes32 leaf = _settlementLeaf(
+                incidentId, claimId, c.user, amounts, scoreSpent, boostedScore, eligibleAmount, eligibleBoosterAmount
+            );
             if (!MerkleProof.verifyCalldata(proof, inc.root, leaf)) revert InvalidProof(claimId);
         }
 
         {
+            if (eligibleBoosterAmount > c.boosterAmount) {
+                revert EligibleExceedsEscrow(eligibleBoosterAmount, c.boosterAmount);
+            }
             (,, uint16 boosterBoostBps) = registry().boosterConfig();
             uint256 expectedBoostedScore =
-                Math.mulDiv(scoreSpent, BPS_DENOMINATOR + uint256(c.boosterAmount) * boosterBoostBps, BPS_DENOMINATOR);
+                Math.mulDiv(scoreSpent, BPS_DENOMINATOR + eligibleBoosterAmount * boosterBoostBps, BPS_DENOMINATOR);
             if (boostedScore != expectedBoostedScore) revert InvalidBoostedScore(boostedScore, expectedBoostedScore);
         }
 
@@ -811,15 +821,7 @@ contract DefiInsurance is
             if (refund != 0) inc.insuredToken.safeTransfer(c.user, refund);
         }
 
-        uint256 boosterAmount = c.boosterAmount;
-        if (boosterAmount != 0) {
-            if (acceptPayout && eligible) {
-                (address booster, uint64 boosterId,) = registry().boosterConfig();
-                IERC1155Burnable(booster).burn(address(this), boosterId, boosterAmount);
-            } else {
-                _returnBoosters(c, c.user);
-            }
-        }
+        _resolveBoosters(c, c.user, acceptPayout && eligible ? eligibleBoosterAmount : 0);
 
         // Eligibility—not payout size or acceptance—determines who receives the bond.
         _resolveClaimBond(c, eligible ? c.user : registry().treasury());
@@ -849,7 +851,7 @@ contract DefiInsurance is
             inc.resolvedAt = uint64(block.timestamp);
         }
         escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
-        _returnBoosters(c, msg.sender);
+        _resolveBoosters(c, msg.sender, 0);
         _resolveClaimBond(c, msg.sender);
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
         emit ClaimDeclined(claimId, msg.sender, false);
@@ -863,11 +865,23 @@ contract DefiInsurance is
         uint256[] calldata amounts,
         uint256 scoreSpent,
         uint256 boostedScore,
-        uint256 eligibleAmount
+        uint256 eligibleAmount,
+        uint256 eligibleBoosterAmount
     ) internal pure returns (bytes32) {
         return keccak256(
             bytes.concat(
-                keccak256(abi.encode(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount))
+                keccak256(
+                    abi.encode(
+                        incidentId,
+                        claimId,
+                        user,
+                        amounts,
+                        scoreSpent,
+                        boostedScore,
+                        eligibleAmount,
+                        eligibleBoosterAmount
+                    )
+                )
             )
         );
     }

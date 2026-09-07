@@ -1,9 +1,11 @@
+use crate::abi::IRegistry;
 use crate::chain::{
     BlockAnchor, ChainError, Incident, SettlementAnchors, assert_anchors_unchanged,
-    assert_contract_code_at, chain_id, decimals_at, defi_insurance_at, derive_bootstrap_config_at,
-    earned_score_of, finalized_settlement_anchors, incident_at, incident_claim_deadline_at,
-    incident_config_at, incident_tee_pcr_hash_at, max_cover_pool_payout_bps_at, min_balances_over,
-    pool_state_at, pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
+    assert_contract_code_at, chain_id, contract_call, decimals_at, defi_insurance_at,
+    derive_bootstrap_config_at, earned_score_of, finalized_settlement_anchors, incident_at,
+    incident_claim_deadline_at, incident_config_at, incident_tee_pcr_hash_at,
+    max_cover_pool_payout_bps_at, min_balances_over, min_erc1155_balance_over, pool_state_at,
+    pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
 };
 use crate::checkpoint::{BulkScoreSource, CheckpointError, CheckpointScoreSource};
 use crate::config::{BootstrapConfig, ConfigError, LOG_RESULT_CAP, MAX_LOG_RANGE};
@@ -158,6 +160,8 @@ impl SettlementRun {
                     "earnedScore": row.earned_score.to_string(),
                     "scoreSpent": row.score_spent.to_string(),
                     "boostedScore": row.boosted_score.to_string(),
+                    "boosterAmount": row.booster_amount.to_string(),
+                    "eligibleBoosterAmount": row.eligible_booster_amount.to_string(),
                     "payoutUsd": row.payout_usd.to_string(),
                     "amounts": row.amounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
                     "acceptPayoutRecommended": row.amounts.iter().any(|amount| !amount.is_zero()),
@@ -219,7 +223,7 @@ impl SettlementRun {
             }),
         };
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "configVersion": config.version,
             "configHash": self.config_hash,
             "bootstrapConfig": {
@@ -690,6 +694,22 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
     .await?;
     log_metrics = merge_metrics(log_metrics, eligibility_metrics);
 
+    let booster = if live_events
+        .iter()
+        .any(|event| !event.booster_amount.is_zero())
+    {
+        Some(
+            contract_call(
+                rpc.as_ref(),
+                config.registry,
+                &IRegistry::boosterConfigCall {},
+                Some(provisional.open_block),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let mut claims = Vec::with_capacity(live_events.len());
     for event in live_events {
         let min_held = minimums.get(&event.user).cloned().ok_or_else(|| {
@@ -698,6 +718,27 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
                 event.user
             ))
         })?;
+        let booster_held = if let Some(booster) = &booster {
+            if event.booster_amount.is_zero() {
+                BigUint::zero()
+            } else {
+                let (minimum, metrics) = min_erc1155_balance_over(
+                    rpc.as_ref(),
+                    Address::from_bytes(booster.collection.into_array()),
+                    event.user,
+                    &BigUint::from(booster.tokenId),
+                    hold_from,
+                    provisional.reference_block,
+                    MAX_LOG_RANGE,
+                    LOG_RESULT_CAP,
+                )
+                .await?;
+                log_metrics = merge_metrics(log_metrics, metrics);
+                minimum
+            }
+        } else {
+            BigUint::zero()
+        };
         let gross_earned_score = if let Some(source) = &bulk_source {
             source.gross_score_of(event.user).await?
         } else if let Some(source) = &checkpoint_source {
@@ -731,6 +772,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             spent_score,
             score_to_spend: event.score_to_spend.clone(),
             booster_amount: event.booster_amount.clone(),
+            booster_held,
         });
     }
 

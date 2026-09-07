@@ -40,8 +40,7 @@ struct JsonClaimInput {
     spent_score: String,
     score_to_spend: String,
     booster_amount: String,
-    #[serde(default, rename = "boosterHeld")]
-    _booster_held: Option<String>,
+    booster_held: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +66,8 @@ struct JsonSettledRow {
     earned_score: String,
     score_spent: String,
     boosted_score: String,
+    booster_amount: String,
+    eligible_booster_amount: String,
     payout_usd: String,
     amounts: Vec<String>,
 }
@@ -140,6 +141,7 @@ impl TryFrom<JsonKernelInput> for KernelInput {
                         &format!("{prefix}.boosterAmount"),
                         &claim.booster_amount,
                     )?,
+                    booster_held: decimal(&format!("{prefix}.boosterHeld"), &claim.booster_held)?,
                 })
             })
             .collect::<Result<_, KernelError>>()?;
@@ -176,6 +178,8 @@ impl From<KernelOutput> for JsonKernelOutput {
                 earned_score: row.earned_score.to_string(),
                 score_spent: row.score_spent.to_string(),
                 boosted_score: row.boosted_score.to_string(),
+                booster_amount: row.booster_amount.to_string(),
+                eligible_booster_amount: row.eligible_booster_amount.to_string(),
                 payout_usd: row.payout_usd.to_string(),
                 amounts: row
                     .amounts

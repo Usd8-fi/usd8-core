@@ -14,7 +14,8 @@
       "Resource": [
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
-        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*"
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/settlements/*"
       ]
     },
     {
@@ -25,6 +26,7 @@
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/requests/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/terminal/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/launch/*",
+        "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/settlements/*",
         "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1/secrets/*"
       ]
     },
@@ -35,7 +37,7 @@
       "Resource": "arn:aws:s3:::usd8-tee-jobs-919437049909-eu-central-1",
       "Condition": {
         "ForAnyValue:StringLike": {
-          "s3:prefix": ["requests/*", "terminal/*", "launch/*", "secrets/*"]
+          "s3:prefix": ["requests/*", "terminal/*", "launch/*", "settlements/*", "secrets/*"]
         }
       }
     },
@@ -44,7 +46,7 @@
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": [
-        "arn:aws:ec2:eu-central-1::image/ami-00be9df40b2d17012",
+        "arn:aws:ec2:eu-central-1::image/ami-04e7f846111aa531e",
         "arn:aws:ec2:eu-central-1:919437049909:subnet/subnet-0d42339eecdaddbaa",
         "arn:aws:ec2:eu-central-1:919437049909:security-group/sg-0d93490bebb3d2251",
         "arn:aws:ec2:eu-central-1:919437049909:network-interface/*",

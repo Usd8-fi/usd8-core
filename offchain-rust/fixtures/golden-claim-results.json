@@ -28,7 +28,8 @@
           "grossEarnedScore": "100",
           "spentScore": "40",
           "scoreToSpend": "1000",
-          "boosterAmount": "2"
+          "boosterAmount": "2",
+          "boosterHeld": "2"
         }
       ]
     },
@@ -41,6 +42,8 @@
           "earnedScore": "60",
           "scoreSpent": "60",
           "boostedScore": "61",
+          "boosterAmount": "2",
+          "eligibleBoosterAmount": "2",
           "payoutUsd": "80000000000000000000",
           "amounts": ["80000000000000000000"]
         }
@@ -76,7 +79,8 @@
           "grossEarnedScore": "50",
           "spentScore": "0",
           "scoreToSpend": "50",
-          "boosterAmount": "0"
+          "boosterAmount": "0",
+          "boosterHeld": "0"
         },
         {
           "claimId": "2",
@@ -86,7 +90,8 @@
           "grossEarnedScore": "50",
           "spentScore": "0",
           "scoreToSpend": "50",
-          "boosterAmount": "0"
+          "boosterAmount": "0",
+          "boosterHeld": "0"
         }
       ]
     },
@@ -99,6 +104,8 @@
           "earnedScore": "50",
           "scoreSpent": "50",
           "boostedScore": "50",
+          "boosterAmount": "0",
+          "eligibleBoosterAmount": "0",
           "payoutUsd": "50000000000000000000",
           "amounts": ["50000000000000000000"]
         },
@@ -109,6 +116,8 @@
           "earnedScore": "50",
           "scoreSpent": "50",
           "boostedScore": "50",
+          "boosterAmount": "0",
+          "eligibleBoosterAmount": "0",
           "payoutUsd": "50000000000000000000",
           "amounts": ["50000000000000000000"]
         }
@@ -145,7 +154,8 @@
           "grossEarnedScore": "90",
           "spentScore": "0",
           "scoreToSpend": "90",
-          "boosterAmount": "0"
+          "boosterAmount": "0",
+          "boosterHeld": "0"
         },
         {
           "claimId": "2",
@@ -155,7 +165,8 @@
           "grossEarnedScore": "100",
           "spentScore": "0",
           "scoreToSpend": "100",
-          "boosterAmount": "0"
+          "boosterAmount": "0",
+          "boosterHeld": "0"
         },
         {
           "claimId": "3",
@@ -165,7 +176,8 @@
           "grossEarnedScore": "100",
           "spentScore": "0",
           "scoreToSpend": "100",
-          "boosterAmount": "0"
+          "boosterAmount": "0",
+          "boosterHeld": "0"
         }
       ]
     },
@@ -178,6 +190,8 @@
           "earnedScore": "90",
           "scoreSpent": "90",
           "boostedScore": "90",
+          "boosterAmount": "0",
+          "eligibleBoosterAmount": "0",
           "payoutUsd": "10000000000000000000",
           "amounts": ["10000000000000000000"]
         },
@@ -188,6 +202,8 @@
           "earnedScore": "100",
           "scoreSpent": "100",
           "boostedScore": "100",
+          "boosterAmount": "0",
+          "eligibleBoosterAmount": "0",
           "payoutUsd": "27586206896551724137",
           "amounts": ["27586206896551724137"]
         },
@@ -198,6 +214,8 @@
           "earnedScore": "100",
           "scoreSpent": "100",
           "boostedScore": "100",
+          "boosterAmount": "0",
+          "eligibleBoosterAmount": "0",
           "payoutUsd": "27586206896551724137",
           "amounts": ["27586206896551724137"]
         }
@@ -234,7 +252,8 @@
           "grossEarnedScore": "1000",
           "spentScore": "900",
           "scoreToSpend": "500",
-          "boosterAmount": "3"
+          "boosterAmount": "3",
+          "boosterHeld": "3"
         }
       ]
     },
@@ -247,6 +266,8 @@
           "earnedScore": "100",
           "scoreSpent": "100",
           "boostedScore": "103",
+          "boosterAmount": "3",
+          "eligibleBoosterAmount": "3",
           "payoutUsd": "24000000000000000000",
           "amounts": ["24000000000000000000"]
         }
