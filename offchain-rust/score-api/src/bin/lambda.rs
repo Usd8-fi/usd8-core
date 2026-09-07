@@ -222,9 +222,7 @@ fn score_request_from_path(path: &str) -> Option<Result<ScoreRequest, ()>> {
         return None;
     }
     Some(match second {
-        None => Address::from_str(first)
-            .map(|account| ScoreRequest::Legacy { account })
-            .map_err(|()| ()),
+        None => Address::from_str(first).map(|account| ScoreRequest::Legacy { account }),
         Some(account) => match (first.parse::<u64>(), Address::from_str(account)) {
             (Ok(chain_id), Ok(account)) if chain_id != 0 => {
                 Ok(ScoreRequest::Explicit { chain_id, account })
@@ -288,6 +286,8 @@ impl App {
         }))
     }
 
+    // Keep checkpoint payload and optimistic-concurrency metadata explicit at this persistence boundary.
+    #[allow(clippy::too_many_arguments)]
     async fn save(
         &self,
         network: &RuntimeNetwork,
