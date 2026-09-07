@@ -75,7 +75,9 @@ contract RefreshSepoliaTwentyClaimSettlementOracles is Script {
         _requireRefreshed(FEED_0, before0);
         _requireRefreshed(FEED_1, before1);
         _requireRefreshed(INSURED_FEED, before2);
-        require(_protectedStateHash(registry, insurance, lossVault, booster) == protectedBefore, "protected state changed");
+        require(
+            _protectedStateHash(registry, insurance, lossVault, booster) == protectedBefore, "protected state changed"
+        );
         require(_actorStateHash(registry, lossVault, booster, actors) == actorsBefore, "actor state changed");
         _validateTopology(registry, insurance, admin);
 

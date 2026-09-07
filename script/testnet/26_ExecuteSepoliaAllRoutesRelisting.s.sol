@@ -25,8 +25,7 @@ contract ExecuteSepoliaAllRoutesRelisting is Script {
         require(insurance.activeIncidentId() == 0, "incident active");
         require(!insurance.isInsuredToken(lossToken), "loss token already listed");
         require(
-            timelock.hasRole(timelock.EXECUTOR_ROLE(), admin)
-                || timelock.hasRole(timelock.EXECUTOR_ROLE(), address(0)),
+            timelock.hasRole(timelock.EXECUTOR_ROLE(), admin) || timelock.hasRole(timelock.EXECUTOR_ROLE(), address(0)),
             "executor missing"
         );
 

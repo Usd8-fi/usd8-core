@@ -155,17 +155,14 @@ contract SepoliaMockUsdcSystemTest is Test {
         Registry registry = Registry(
             address(
                 new ERC1967Proxy(
-                    address(registryImplementation),
-                    abi.encodeCall(Registry.initialize, (address(this), address(this)))
+                    address(registryImplementation), abi.encodeCall(Registry.initialize, (address(this), address(this)))
                 )
             )
         );
         DefiInsurance insuranceImplementation = new DefiInsurance();
         DefiInsurance insurance = DefiInsurance(
             address(
-                new ERC1967Proxy(
-                    address(insuranceImplementation), abi.encodeCall(DefiInsurance.initialize, (registry))
-                )
+                new ERC1967Proxy(address(insuranceImplementation), abi.encodeCall(DefiInsurance.initialize, (registry)))
             )
         );
 

@@ -64,7 +64,9 @@ contract ProvisionSepoliaFreshLifecycleE2EClaimants is Script {
 
         usdc.forceApprove(address(treasury), totalUsd8 / 1e12);
         treasury.mintUSD8(totalUsd8 / 1e12);
-        for (uint256 i = 0; i < CLAIMANT_COUNT; i++) usd8.safeTransfer(claimants[i], _usd8Amount(i));
+        for (uint256 i = 0; i < CLAIMANT_COUNT; i++) {
+            usd8.safeTransfer(claimants[i], _usd8Amount(i));
+        }
 
         IERC20(address(underlying)).forceApprove(address(lossVault), totalLossAssets);
         for (uint256 i = 0; i < CLAIMANT_COUNT; i++) {
@@ -96,7 +98,8 @@ contract ProvisionSepoliaFreshLifecycleE2EClaimants is Script {
     }
 
     function _lossAmount(uint256 index) internal pure returns (uint256) {
-        uint256[10] memory amounts = [uint256(25_000), 40_000, 60_000, 90_000, 130_000, 180_000, 250_000, 350_000, 500_000, 700_000];
+        uint256[10] memory amounts =
+            [uint256(25_000), 40_000, 60_000, 90_000, 130_000, 180_000, 250_000, 350_000, 500_000, 700_000];
         return amounts[index] * 1e18;
     }
 

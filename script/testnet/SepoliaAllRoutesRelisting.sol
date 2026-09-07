@@ -13,9 +13,6 @@ library SepoliaAllRoutesRelisting {
 
     function payload(IERC20 lossToken, address usdcOracle) internal pure returns (bytes memory) {
         bytes memory recipe = abi.encodeCall(IERC4626.convertToAssets, (1e18));
-        return abi.encodeCall(
-            DefiInsurance.editInsuredToken,
-            (lossToken, 8000, usdcOracle, address(lossToken), recipe)
-        );
+        return abi.encodeCall(DefiInsurance.editInsuredToken, (lossToken, 8000, usdcOracle, address(lossToken), recipe));
     }
 }

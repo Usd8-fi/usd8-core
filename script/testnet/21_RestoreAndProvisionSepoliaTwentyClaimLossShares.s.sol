@@ -153,7 +153,10 @@ contract RestoreAndProvisionSepoliaTwentyClaimLossShares is Script {
     ) internal view {
         require(ctx.lossVault.totalAssets() == EXPECTED_TOTAL_SUPPLY + missingShares, "post total assets mismatch");
         require(ctx.lossVault.totalSupply() == EXPECTED_TOTAL_SUPPLY + missingShares, "post total supply mismatch");
-        require(ctx.underlying.totalSupply() == beforeState.underlyingSupply + underlyingRequired, "underlying supply mismatch");
+        require(
+            ctx.underlying.totalSupply() == beforeState.underlyingSupply + underlyingRequired,
+            "underlying supply mismatch"
+        );
         require(ctx.underlying.balanceOf(ctx.admin) == beforeState.adminUnderlying, "admin underlying residue");
         require(_protectedStateHash(ctx) == beforeState.protectedState, "protected state changed");
         require(_freshActorStateHash(ctx, fresh) == beforeState.freshActorState, "fresh actor state changed");
@@ -243,7 +246,8 @@ contract RestoreAndProvisionSepoliaTwentyClaimLossShares is Script {
     }
 
     function _targetLossShares(uint256 index) internal pure returns (uint256) {
-        uint256[10] memory amounts = [uint256(15_000), 30_000, 55_000, 75_000, 110_000, 160_000, 220_000, 300_000, 420_000, 600_000];
+        uint256[10] memory amounts =
+            [uint256(15_000), 30_000, 55_000, 75_000, 110_000, 160_000, 220_000, 300_000, 420_000, 600_000];
         return amounts[index] * 1e18;
     }
 

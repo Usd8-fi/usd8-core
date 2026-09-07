@@ -107,11 +107,7 @@ contract ProvisionSepoliaTwentyClaimNativeGas is Script {
         );
     }
 
-    function _actorTokenStateHash(Context memory ctx, address[] memory actors)
-        internal
-        view
-        returns (bytes32 state)
-    {
+    function _actorTokenStateHash(Context memory ctx, address[] memory actors) internal view returns (bytes32 state) {
         for (uint256 i = 0; i < ACTOR_COUNT; i++) {
             state = keccak256(
                 abi.encode(
