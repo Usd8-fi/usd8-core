@@ -6,7 +6,7 @@ This document defines the requested security-audit scope for the USD8 core smart
 
 - Repository  [`Usd8-fi/usd8-core`](https://github.com/Usd8-fi/usd8-core)
 - Branch main
-- Frozen Commit [`6efab51299d551ed45b20d82b305d300e9f01d7b`](https://github.com/Usd8-fi/usd8-core/commit/6efab51299d551ed45b20d82b305d300e9f01d7b)
+- Frozen Commit ~~[`6efab51299d551ed45b20d82b305d300e9f01d7b`](https://github.com/Usd8-fi/usd8-core/commit/6efab51299d551ed45b20d82b305d300e9f01d7b)~~
 [`f24d7c869adb7d076c1d87f99e6105078e24038d`](https://github.com/Usd8-fi/usd8-core/commit/f24d7c869adb7d076c1d87f99e6105078e24038d)
 
 | File | Lines | Summary
