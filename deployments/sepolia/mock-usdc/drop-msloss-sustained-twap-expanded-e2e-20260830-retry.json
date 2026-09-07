@@ -1,0 +1,25 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: realize a fresh bounded 22% msLOSS drop after the refreshed sustained parity TWAP baseline",
+  "lossRecipient": "0x000000000000000000000000000000000000dEaD",
+  "lossAssets": "9152996962025316455697",
+  "expectedPreAssets": "41604531645569620253164",
+  "expectedSupply": "41604531645569620253164",
+  "expectedPostAssets": "32451534683544303797467",
+  "expectedPostRatioWad": "779999999999999999",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault.realizeLoss refreshed sustained-TWAP expanded E2E",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xd35d26ed000000000000000000000000000000000000000000000000000000000000dead0000000000000000000000000000000000000000000001f02f59824e448a9511",
+        "nonce": "0x27e",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

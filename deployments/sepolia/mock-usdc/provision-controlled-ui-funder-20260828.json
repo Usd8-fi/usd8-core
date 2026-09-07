@@ -1,0 +1,13 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-28T17:47:50Z",
+  "purpose": "TESTNET ONLY: fund controlled UI claimants with gas, MockUSDC, and msLOSS underlying",
+  "forkBlock": 11586385,
+  "transactions": [
+    {"transactionType":"CALL","contractName":"claimant1 gas","transaction":{"from":"0x724e8951d39E14CEBcB5fB02638f49A637C97838","to":"0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4","gas":"0x5208","value":"0xb1a2bc2ec50000","input":"0x","nonce":"0x233","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"claimant2 gas","transaction":{"from":"0x724e8951d39E14CEBcB5fB02638f49A637C97838","to":"0x8F20e1AA4B32eD617278E9ed896E9409821e879d","gas":"0x5208","value":"0xb1a2bc2ec50000","input":"0x","nonce":"0x234","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"MockUSDC.mint claimant1","transaction":{"from":"0x724e8951d39E14CEBcB5fB02638f49A637C97838","to":"0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c","gas":"0xca58","value":"0x0","input":"0x40c10f19000000000000000000000000ed6db48f8cdce82ee37ba8760ceefe569167f3c4000000000000000000000000000000000000000000000000000000003a699d00","nonce":"0x235","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"MockUSDC.mint claimant2","transaction":{"from":"0x724e8951d39E14CEBcB5fB02638f49A637C97838","to":"0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c","gas":"0xca58","value":"0x0","input":"0x40c10f190000000000000000000000008f20e1aa4b32ed617278e9ed896e9409821e879d000000000000000000000000000000000000000000000000000000003b9aca00","nonce":"0x236","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"SepoliaLossToken.mint claimant2","transaction":{"from":"0x724e8951d39E14CEBcB5fB02638f49A637C97838","to":"0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5","gas":"0xca9f","value":"0x0","input":"0x40c10f190000000000000000000000008f20e1aa4b32ed617278e9ed896e9409821e879d0000000000000000000000000000000000000000000000001bc16d674ec80000","nonce":"0x237","chainId":"0xaa36a7"}}
+  ]
+}

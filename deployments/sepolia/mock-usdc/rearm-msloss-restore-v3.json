@@ -1,0 +1,24 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-21T07:03:03Z",
+  "purpose": "TESTNET ONLY: re-arm msLOSS at 1.0 after the previous 22% drop aged outside the temporary 450-block detector window",
+  "lossToken": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+  "lossVault": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+  "mintAssets": "2200000000000000000000",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc000000000000000000000000000000000000000000000077432217e683600000",
+        "nonce": "0x19f",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

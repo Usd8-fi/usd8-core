@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "ac48dbb4e4fc9dd428d953e64bb35bcb9e54a2133d3a48871df7a46f2d1cd455",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 574,
+      "label": "SepoliaLossToken.mint restore vault for replacement settlement E2E",
+      "transactionHash": "0x414d926422356ab09def5353bb89ec0f6650b7aba3769dbd79b9d1b9eb35f129",
+      "status": "confirmed",
+      "blockNumber": 11588313,
+      "contractAddress": null
+    }
+  ]
+}

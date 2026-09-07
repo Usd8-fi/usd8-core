@@ -1,0 +1,52 @@
+{
+  "artifactSha256": "31cd12a868b156d12867792c394d742c42d361465e5978006d9ab4c8718e4b11",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 375,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0xed14edb75b3386e6e3b85e14475a60a45d7aadc67350f59d29b628719b4fb5c2",
+      "status": "confirmed",
+      "blockNumber": 11492512,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 376,
+      "label": "MockUSDC.approveTreasury",
+      "transactionHash": "0x6d1d30835b6bcbe513289d42849150108eb77d7edf40bb93cf58cc856f4e105f",
+      "status": "confirmed",
+      "blockNumber": 11492513,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 377,
+      "label": "Treasury.mintUSD8",
+      "transactionHash": "0x5093dea46dc20df6a71b69300f33cdbb7b75b31e184c57b4d693b273835d91d9",
+      "status": "confirmed",
+      "blockNumber": 11492514,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 378,
+      "label": "USD8.approveCoverPool",
+      "transactionHash": "0x6ea932a53327990970b6cc4d060f7207af2978292321162667682017c652d715",
+      "status": "confirmed",
+      "blockNumber": 11492515,
+      "contractAddress": null
+    },
+    {
+      "index": 4,
+      "nonce": 379,
+      "label": "SingleAssetCoverPool.receiveProfitDistribution",
+      "transactionHash": "0xde8dc242f8c8c658afa708922cecf07d6217cec2c1c2fc589c57dd486cbb93ac",
+      "status": "confirmed",
+      "blockNumber": 11492517,
+      "contractAddress": null
+    }
+  ]
+}

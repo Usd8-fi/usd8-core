@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "65aade79aad1615f41581d3854f84560927e3a6f023a1a270e750bcc7e7be332",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 841,
+      "label": "TimelockController.execute removePool(mGHO cover pool)",
+      "transactionHash": "0x91ed9afdfdf28a591a4405423f33cd76e85d071a44e9b512919d93b3954907b1",
+      "status": "confirmed",
+      "blockNumber": 11633605,
+      "contractAddress": null
+    }
+  ]
+}

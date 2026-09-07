@@ -1,0 +1,27 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: create a fresh relative 22% msLOSS impairment from the stable 0.78 baseline for measured Nitro automatic incident-open and user claiming E2E",
+  "lossVault": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+  "lossRecipient": "0x000000000000000000000000000000000000dEaD",
+  "lossAssets": "6006343200000000000001",
+  "expectedPreAssets": "27301560000000000000005",
+  "expectedPostAssets": "21295216800000000000004",
+  "expectedPreRatioWad": "780000000000000000",
+  "expectedPostRatioWad": "608400000000000000",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault",
+      "function": "realizeLoss(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xd35d26ed000000000000000000000000000000000000000000000000000000000000dead0000000000000000000000000000000000000000000001459ac1a56e0b020001",
+        "nonce": "0x1c7",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

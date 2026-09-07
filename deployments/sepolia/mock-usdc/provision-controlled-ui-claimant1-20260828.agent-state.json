@@ -1,0 +1,25 @@
+{
+  "artifactSha256": "7281ee078be302540478e896a4d1cd5ed2596ecc4d15c2eca76a2bd3b005638c",
+  "role": "claimant1",
+  "sender": "0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 26,
+      "label": "MockUSDC.approve Treasury",
+      "transactionHash": "0x677fd2c877254dcbd46a8eba974fdfa643a19d707a6bde28b0aa90f833323de9",
+      "status": "confirmed",
+      "blockNumber": 11586438,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 27,
+      "label": "Treasury.mintUSD8 claimant1",
+      "transactionHash": "0xe4886beca88c46a869bac87b4ee5151d58e75ccf70a97177e7876a5aac912b2c",
+      "status": "confirmed",
+      "blockNumber": 11586439,
+      "contractAddress": null
+    }
+  ]
+}

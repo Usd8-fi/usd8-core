@@ -1,0 +1,35 @@
+{
+  "chainId": 11155111,
+  "network": "ethereum-sepolia",
+  "purpose": "External test participants eligible for future booster rewards",
+  "testers": [
+    {
+      "address": "0x07011C665D3c27EEE72C8459c4f87c8221a6FCDd",
+      "boosterStatus": "pending",
+      "allocations": [
+        {
+          "mockUsdc": "1000",
+          "mockWstEth": "1000",
+          "transactions": {
+            "mockUsdc": "0xf94042b757532e7909c632679325fb909909458468beeafb6fed81e9414110ae",
+            "mockWstEth": "0xad0c29a165b33c5f65f82ed49e7e09e6cd57bdcbfdf5b9e3add93f595d368306"
+          }
+        }
+      ]
+    },
+    {
+      "address": "0xb60C01dE607fF9085d6dAd8613BF31A91d575902",
+      "boosterStatus": "pending",
+      "allocations": [
+        {
+          "mockUsdc": "5000",
+          "mockWstEth": "5000",
+          "transactions": {
+            "mockUsdc": "0x80f3807e631089389dfb899715c00f3c5114206e5de8ff627171e65b1b5bf843",
+            "mockWstEth": "0x7d4498edef39b0bc3f67b9f34bc84cddec293caa91fa1da80d91d129d353d2f9"
+          }
+        }
+      ]
+    }
+  ]
+}

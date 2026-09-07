@@ -1,0 +1,20 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: restore msLOSS to exact 1:1 before browser claim lifecycle E2E",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc0000000000000000000000000000000000000000000003cb7166ccaf7e950000",
+        "nonce": "0x231",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

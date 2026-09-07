@@ -1,0 +1,69 @@
+{
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x249f0",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000724e8951d39e14cebcb5fb02638f49a637c978380000000000000000000000000000000000000000000000000000000024d2ebf4",
+        "nonce": "0x177",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.approveTreasury",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x249f0",
+        "value": "0x0",
+        "input": "0x095ea7b300000000000000000000000026f85ec30a753451d218f4dc526f696d2d8050970000000000000000000000000000000000000000000000000000000024d2ebf4",
+        "nonce": "0x178",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "Treasury.mintUSD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x26F85ec30a753451d218f4Dc526F696D2d805097",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x8d0972280000000000000000000000000000000000000000000000000000000024d2ebf4",
+        "nonce": "0x179",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "USD8.approveCoverPool",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xfDb7546dEA188d52E8eE98b789Da2d695dA702A7",
+        "gas": "0x249f0",
+        "value": "0x0",
+        "input": "0x095ea7b3000000000000000000000000ecbfc3b78cd4b29ed589b78c46a8819da89244320000000000000000000000000000000000000000000000217dbc3ec553034000",
+        "nonce": "0x17a",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SingleAssetCoverPool.receiveProfitDistribution",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xEcbfc3b78CD4B29ED589b78c46a8819dA8924432",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x94419e750000000000000000000000000000000000000000000000217dbc3ec553034000",
+        "nonce": "0x17b",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

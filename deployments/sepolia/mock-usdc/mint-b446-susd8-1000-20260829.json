@@ -1,0 +1,62 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-29T08:48:29Z",
+  "purpose": "TESTNET ONLY: mint exactly 1,000 sUSD8 shares to 0xB446b0c85cc4ef5f5Ebf495C4FDD38eCc5284176 through the reserve-backed USD8 path",
+  "recipient": "0xB446b0c85cc4ef5f5Ebf495C4FDD38eCc5284176",
+  "shares": "1000000000000000000000",
+  "reserveInput": "1000000000",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.approve Treasury for sUSD8 provisioning",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x1d4c0",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000002a722ed12982623dff64dc0adba40e734a5f59c3000000000000000000000000000000000000000000000000000000003b9aca00",
+        "nonce": "0x241",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "Treasury.mintUSD8 reserve-backed sUSD8 provisioning",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x8d097228000000000000000000000000000000000000000000000000000000003b9aca00",
+        "nonce": "0x242",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "USD8.approve savings vault for exact-share mint",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+        "gas": "0x1d4c0",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000007989b3eb6fad27e404b07433ebd265657359f4ab00000000000000000000000000000000000000000000003635c9adc5dea00000",
+        "nonce": "0x243",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "sUSD8.mint exact shares to recipient",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x7989B3EB6faD27e404b07433eBD265657359F4AB",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000003635c9adc5dea00000000000000000000000000000b446b0c85cc4ef5f5ebf495c4fdd38ecc5284176",
+        "nonce": "0x244",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

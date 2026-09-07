@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "4cb39979e265dce82db438f674ce9874e65e7c3b24660b93cdbfab36dea2ff75",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 852,
+      "label": "TimelockController.execute setExitTimingConfig(300,120)",
+      "transactionHash": "0xfe99b289b520bf36532993693df6747e19a2f00f8fb122932f94b0d09ac50577",
+      "status": "confirmed",
+      "blockNumber": 11638997,
+      "contractAddress": null
+    }
+  ]
+}

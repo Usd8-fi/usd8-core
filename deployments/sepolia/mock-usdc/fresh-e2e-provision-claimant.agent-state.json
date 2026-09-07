@@ -1,0 +1,43 @@
+{
+  "artifactSha256": "989374861f4e36ca9f0b6b674ad86111f966262fff97bc1e15934cab8fb073ff",
+  "role": "claimant1",
+  "sender": "0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 22,
+      "label": "MockUSDC",
+      "transactionHash": "0x6428f1a80adaa6afc9c2d0a0579f8122693e60aca81590db664dc4a73f3ff2d6",
+      "status": "confirmed",
+      "blockNumber": 11570699,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 23,
+      "label": "Treasury",
+      "transactionHash": "0x0f39612c3d2800ae491436553093b30c4a8d300659a661364f52a2c545e82428",
+      "status": "confirmed",
+      "blockNumber": 11570701,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 24,
+      "label": "USD8",
+      "transactionHash": "0x7e56012794cadbf29570a68b26eadf79f6ffaa7be7e372d2877c408d2303c25f",
+      "status": "confirmed",
+      "blockNumber": 11570702,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 25,
+      "label": "msLOSS",
+      "transactionHash": "0x94a91103aeebd9b00c90488ef6d6f7dcea51ab67258350e06bd18cb73be046e6",
+      "status": "confirmed",
+      "blockNumber": 11570704,
+      "contractAddress": null
+    }
+  ]
+}

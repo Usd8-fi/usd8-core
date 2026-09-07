@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "42a0d110990fd1cce3f824f77326869b9b7e4054337b9ab1cbfae98f93a74f4c",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 425,
+      "label": "TimelockController",
+      "transactionHash": "0x6cb8973fe611f081da696c838dc0d1ae34f96d2a36ed8ed90ce22e31df752fa7",
+      "status": "confirmed",
+      "blockNumber": 11537282,
+      "contractAddress": null
+    }
+  ]
+}

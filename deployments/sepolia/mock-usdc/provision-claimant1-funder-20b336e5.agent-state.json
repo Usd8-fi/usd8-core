@@ -1,0 +1,43 @@
+{
+  "artifactSha256": "1511c01da9bad7e0b5796d04dba0915adfbf973c228a617cacb36f75701adb1d",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 428,
+      "label": "MockUSDC",
+      "transactionHash": "0x19b45cbf23a3edbc851e550eae77dd9bc58a9c18dde9e5bc42ee0f5dba51d076",
+      "status": "confirmed",
+      "blockNumber": 11537462,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 429,
+      "label": "SepoliaLossToken",
+      "transactionHash": "0x83ce40bac9b28f749337c15d924da1591d8c425435543e5f26ad415f0367de04",
+      "status": "confirmed",
+      "blockNumber": 11537463,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 430,
+      "label": "SepoliaLossToken",
+      "transactionHash": "0x2ec2d9769cf14a114b5bf6aefeb382c89ced0ced7f07345c4b0419b03bb5c792",
+      "status": "confirmed",
+      "blockNumber": 11537464,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 431,
+      "label": "SepoliaLossVault",
+      "transactionHash": "0x3589a80701073adcbb56f94d0e56175d9a7af93f3d839eb8919faba43e260da8",
+      "status": "confirmed",
+      "blockNumber": 11537465,
+      "contractAddress": null
+    }
+  ]
+}

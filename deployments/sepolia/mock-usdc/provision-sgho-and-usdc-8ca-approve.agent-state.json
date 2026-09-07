@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "c7547bb51e1ffb58b4434b75dc8f4bf81485aa9231425c6ef6681276f0dc72cc",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 392,
+      "label": "MockGHO.approve",
+      "transactionHash": "0x25e7e5a937add9e45adeeb56916182b9a6dfc6d4bf74d78859e5c87b70c21ad0",
+      "status": "confirmed",
+      "blockNumber": 11528139,
+      "contractAddress": null
+    }
+  ]
+}

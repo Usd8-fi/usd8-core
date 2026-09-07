@@ -1,0 +1,117 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: top the seven external Mock USDC test participants up to 5000 msLOSS; two already held 5000, so mint exact shares to the remaining five",
+  "participants": [
+    "0x07011c665d3c27eee72c8459c4f87c8221a6fcdd",
+    "0x0963f85cebc7a29d18f97e8c42c13df73f2baa2e",
+    "0x704a3117090256be6a6db52d7d5af823ad569c7a",
+    "0x8ca72d405cfa5128f2623aab437a8741c57983a7",
+    "0x9b49f5a74a521a18d3050d9b6ba71154dd294763",
+    "0xb446b0c85cc4ef5f5ebf495c4fdd38ecc5284176",
+    "0xb60c01de607ff9085d6dad8613bf31a91d575902"
+  ],
+  "alreadyAtTarget": [
+    "0x8ca72d405cfa5128f2623aab437a8741c57983a7",
+    "0xb446b0c85cc4ef5f5ebf495c4fdd38ecc5284176"
+  ],
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000724e8951d39e14cebcb5fb02638f49a637c9783800000000000000000000000000000000000000000000042118dcbc9275300005",
+        "nonce": "0x1bf",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken",
+      "function": "approve(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x095ea7b3000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc00000000000000000000000000000000000000000000042118dcbc9275300005",
+        "nonce": "0x1c0",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault",
+      "function": "mint(uint256,address)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd5920000000000000000000000000000007011c665d3c27eee72c8459c4f87c8221a6fcdd",
+        "nonce": "0x1c1",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault",
+      "function": "mint(uint256,address)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd592000000000000000000000000000000963f85cebc7a29d18f97e8c42c13df73f2baa2e",
+        "nonce": "0x1c2",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault",
+      "function": "mint(uint256,address)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd59200000000000000000000000000000704a3117090256be6a6db52d7d5af823ad569c7a",
+        "nonce": "0x1c3",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault",
+      "function": "mint(uint256,address)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd592000000000000000000000000000009b49f5a74a521a18d3050d9b6ba71154dd294763",
+        "nonce": "0x1c4",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault",
+      "function": "mint(uint256,address)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd59200000000000000000000000000000b60c01de607ff9085d6dad8613bf31a91d575902",
+        "nonce": "0x1c5",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

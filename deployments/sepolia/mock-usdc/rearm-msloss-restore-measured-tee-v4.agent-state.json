@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "19dceb12a4c642b24f778187107171bb9cc4011459bf6dec67935d8505619064",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 417,
+      "label": "SepoliaLossToken",
+      "transactionHash": "0x0edae91cefbffee3fc042c9c1c5fee2208e24f335675ea3699364af0974f9863",
+      "status": "confirmed",
+      "blockNumber": 11535274,
+      "contractAddress": null
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: re-stamp all three settlement feeds so pool-asset and insured-underlying USD prices sit inside maxOracleStaleness (36h) for the next incident",
+  "note": "SepoliaTestOracle.updateAnswer(int256) with unchanged answers; only updatedAt advances.",
+  "feeds": [
+    {
+      "name": "wstETH/USD",
+      "address": "0x00E79aFB10A84D153803F00e73900803179D594e",
+      "answer": "400000000000"
+    },
+    {
+      "name": "mGHO-CP/USD",
+      "address": "0xDa725125d8ff0588496382427ab65Bc8f8D639Eb",
+      "answer": "100000000"
+    },
+    {
+      "name": "USDC/USD (msLOSS underlying)",
+      "address": "0x9989a6bB00C1737A9A0175408053a04A6f3eD74b",
+      "answer": "100000000"
+    }
+  ],
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer wstETH/USD",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x00E79aFB10A84D153803F00e73900803179D594e",
+        "gas": "0x186a0",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000005d21dba000",
+        "nonce": "0x344",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer mGHO-CP/USD",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xDa725125d8ff0588496382427ab65Bc8f8D639Eb",
+        "gas": "0x186a0",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000000005f5e100",
+        "nonce": "0x345",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer USDC/USD (msLOSS underlying)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x9989a6bB00C1737A9A0175408053a04A6f3eD74b",
+        "gas": "0x186a0",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000000005f5e100",
+        "nonce": "0x346",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

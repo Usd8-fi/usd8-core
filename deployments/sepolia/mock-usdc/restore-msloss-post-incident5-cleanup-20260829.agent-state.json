@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "c7e330a2f63ecf4daee8589e0fd7f4384b3e8027ebe6a7d9e8c9a4e97419fe3b",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 584,
+      "label": "SepoliaLossToken.mint restore vault after incident 5 payout E2E",
+      "transactionHash": "0x7b0036555eee809e48ff006635fa1b861bf70d74858aac48c67fdba2ebfaeb91",
+      "status": "confirmed",
+      "blockNumber": 11593368,
+      "contractAddress": null
+    }
+  ]
+}

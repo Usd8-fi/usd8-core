@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "d3b9d024b59f144ba3f9bf53d0a9157e3d18e9584f646391469013c5db4a6a22",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 858,
+      "label": "TimelockController.execute editInsuredToken(msLOSS -> dedicated oracle)",
+      "transactionHash": "0xf1c77b6838dede8a65cd0b4aafb43e06d3e7b401a4b9e1e4a3c5f3a460dbea66",
+      "status": "confirmed",
+      "blockNumber": 11640746,
+      "contractAddress": null
+    }
+  ]
+}

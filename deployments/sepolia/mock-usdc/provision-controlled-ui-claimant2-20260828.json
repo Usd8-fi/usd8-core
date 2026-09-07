@@ -1,0 +1,12 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-28T17:47:50Z",
+  "purpose": "TESTNET ONLY: claimant2 mints 1000 reserve-backed USD8 and deposits 2 msLOSS underlying for controlled UI E2E",
+  "forkBlock": 11586385,
+  "transactions": [
+    {"transactionType":"CALL","contractName":"MockUSDC.approve Treasury","transaction":{"from":"0x8F20e1AA4B32eD617278E9ed896E9409821e879d","to":"0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c","gas":"0x7a120","value":"0x0","input":"0x095ea7b30000000000000000000000002a722ed12982623dff64dc0adba40e734a5f59c3000000000000000000000000000000000000000000000000000000003b9aca00","nonce":"0x12","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"Treasury.mintUSD8 claimant2","transaction":{"from":"0x8F20e1AA4B32eD617278E9ed896E9409821e879d","to":"0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3","gas":"0x7a120","value":"0x0","input":"0x8d097228000000000000000000000000000000000000000000000000000000003b9aca00","nonce":"0x13","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"SepoliaLossToken.approve vault","transaction":{"from":"0x8F20e1AA4B32eD617278E9ed896E9409821e879d","to":"0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5","gas":"0x7a120","value":"0x0","input":"0x095ea7b3000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc0000000000000000000000000000000000000000000000001bc16d674ec80000","nonce":"0x14","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"SepoliaLossVault.deposit claimant2","transaction":{"from":"0x8F20e1AA4B32eD617278E9ed896E9409821e879d","to":"0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc","gas":"0x7a120","value":"0x0","input":"0x6e553f650000000000000000000000000000000000000000000000001bc16d674ec800000000000000000000000000008f20e1aa4b32ed617278e9ed896e9409821e879d","nonce":"0x15","chainId":"0xaa36a7"}}
+  ]
+}

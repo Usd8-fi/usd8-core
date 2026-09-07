@@ -1,0 +1,22 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: refresh msLOSS to parity for a new canonical incident-open job after the prior immutable job expired before IAM repair",
+  "expectedPreAssets": "32451534683544303797467",
+  "expectedSupply": "41604531645569620253164",
+  "expectedPostAssets": "41604531645569620253164",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestToken.mint refreshed TWAP baseline",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc0000000000000000000000000000000000000000000001f02f59824e448a9511",
+        "nonce": "0x27d",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

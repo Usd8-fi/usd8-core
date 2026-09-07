@@ -1,0 +1,78 @@
+{
+  "transactions": [
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "MockSavingsGHO.mint",
+      "contractAddress": "0x6e5eb99a5923bea10eb3990ec8da84e70007e668",
+      "function": "mint(uint256,address)",
+      "functionAbi": "function mint(uint256 shares, address receiver) returns (uint256 assets)",
+      "arguments": [
+        "5000000000000000000000",
+        "0xB446b0c85cc4ef5f5Ebf495C4FDD38eCc5284176"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x6e5eb99a5923bea10eb3990ec8da84e70007e668",
+        "gas": "0x249f0",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd59200000000000000000000000000000b446b0c85cc4ef5f5ebf495c4fdd38ecc5284176",
+        "nonce": "0x189",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    },
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "MockSavingsGHO.mint",
+      "contractAddress": "0x6e5eb99a5923bea10eb3990ec8da84e70007e668",
+      "function": "mint(uint256,address)",
+      "functionAbi": "function mint(uint256 shares, address receiver) returns (uint256 assets)",
+      "arguments": [
+        "5000000000000000000000",
+        "0x8ca72D405CFa5128f2623AAB437A8741c57983a7"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x6e5eb99a5923bea10eb3990ec8da84e70007e668",
+        "gas": "0x249f0",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd592000000000000000000000000000008ca72d405cfa5128f2623aab437a8741c57983a7",
+        "nonce": "0x18a",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    },
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "contractAddress": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+      "function": "mint(address,uint256)",
+      "functionAbi": "function mint(address to, uint256 amount)",
+      "arguments": [
+        "0x8ca72D405CFa5128f2623AAB437A8741c57983a7",
+        "2000000000"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0x11170",
+        "value": "0x0",
+        "input": "0x40c10f190000000000000000000000008ca72d405cfa5128f2623aab437a8741c57983a70000000000000000000000000000000000000000000000000000000077359400",
+        "nonce": "0x18b",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    }
+  ],
+  "receipts": [],
+  "libraries": [],
+  "pending": [],
+  "returns": {},
+  "chain": 11155111
+}

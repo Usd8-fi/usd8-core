@@ -1,0 +1,26 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-22T10:30:06Z",
+  "purpose": "TESTNET ONLY: restore msLOSS to exact 1:1 baseline before real Nitro E2E loss",
+  "lossToken": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+  "lossVault": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+  "mintAssets": "2200440000000000000000",
+  "expectedPreAssets": "7801560000000000000000",
+  "expectedPostAssets": "10002000000000000000000",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0xa2e3",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc000000000000000000000000000000000000000000000077493d4991b88c0000",
+        "nonce": "0x1b6",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

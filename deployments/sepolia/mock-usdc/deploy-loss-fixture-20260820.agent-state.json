@@ -1,0 +1,61 @@
+{
+  "artifactSha256": "8f312524426400f5d21391f4b8089e35884cc39cc8348f160bd975b090a26909",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 396,
+      "label": "SepoliaLossToken",
+      "transactionHash": "0xacdfcdce1420fb3f8faece3df82036e3b799eb051ce96194f3fa8d80867e2499",
+      "status": "confirmed",
+      "blockNumber": 11529045,
+      "contractAddress": "0xb0afb6dcb6e6a8ccd8008d657fe1faad0d4b2cb5"
+    },
+    {
+      "index": 1,
+      "nonce": 397,
+      "label": "SepoliaLossVault",
+      "transactionHash": "0x8c9ed75024de377fd561bfbeb7ac956c6a48bc8fb77c874b28d6dffc6e90f5b7",
+      "status": "confirmed",
+      "blockNumber": 11529047,
+      "contractAddress": "0xd5b2a08f474f77ef29211ccc59cd65e5fa6734dc"
+    },
+    {
+      "index": 2,
+      "nonce": 398,
+      "label": "SepoliaLossToken",
+      "transactionHash": "0x5bfceab5dea83b72b142d1c19272545f9b43d81844bcf9e1b10aca9d9cc19283",
+      "status": "confirmed",
+      "blockNumber": 11529048,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 399,
+      "label": "SepoliaLossToken",
+      "transactionHash": "0x9d04aed80384f6c460863d6e44110cb418fef89a02f93625b9937459a27a42c7",
+      "status": "confirmed",
+      "blockNumber": 11529050,
+      "contractAddress": null
+    },
+    {
+      "index": 4,
+      "nonce": 400,
+      "label": "SepoliaLossVault",
+      "transactionHash": "0x9cb392ff5ed12203ae31063a90a6bdac5854a153ee1938c7b1cc2580ed1e9813",
+      "status": "confirmed",
+      "blockNumber": 11529051,
+      "contractAddress": null
+    },
+    {
+      "index": 5,
+      "nonce": 401,
+      "label": "SepoliaLossVault",
+      "transactionHash": "0x1bf041f587da7b8d06665e77b23a3c80f6076b193da77f1143e5f782750e1667",
+      "status": "confirmed",
+      "blockNumber": 11529053,
+      "contractAddress": null
+    }
+  ]
+}

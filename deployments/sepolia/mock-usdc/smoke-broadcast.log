@@ -1,0 +1,9 @@
+artifact_sha256=da7ae1e53068bfe71556df359798afe770207bad0bf0c1f9d05eaf7a04874db7
+role=funder
+sender=0x724e8951d39E14CEBcB5fB02638f49A637C97838
+nonce_range=367-369
+transactions=3 completed=0
+sent index=0 nonce=367 label=approve(address,uint256) tx=0x0b3cbaf3b76e7d57d6cfdff23c15515fa65229ad99ff783dbae29d3225e99c27
+sent index=1 nonce=368 label=mintUSD8(uint256) tx=0x55dcc411ccbf465b946d6047c01ae25890381a4b5020c829c91b10ce52591af7
+sent index=2 nonce=369 label=redeemUSD8(uint256,uint256) tx=0xc92a3ab20ae3f115b69ef5c270918aefbd4c1ce6dd159adb679f727c6a17a09b
+mode=broadcast-complete state=deployments/sepolia/mock-usdc/smoke-plan.agent-state.json

@@ -1,0 +1,25 @@
+{
+  "artifactSha256": "8e6ac6762b0a1a1bb9bd435281dc2690e5c3d2f1b52c02a169c873ec42dfd974",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 572,
+      "label": "Sepolia staging pool USD feed updateAnswer",
+      "transactionHash": "0x5d6a3a834419a2749b821265243ed6c151e66d093a325747f058efe358d0d4dc",
+      "status": "confirmed",
+      "blockNumber": 11588303,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 573,
+      "label": "Sepolia staging insured-underlying USD feed updateAnswer",
+      "transactionHash": "0xbc3859ede3fe7a4762434d42bddb026bfd607890ca4e15de6250954492a2def3",
+      "status": "confirmed",
+      "blockNumber": 11588304,
+      "contractAddress": null
+    }
+  ]
+}

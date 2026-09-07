@@ -1,0 +1,28 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: 22% msLOSS impairment from the 0.474552 baseline for the claim-UI rerun, with all three settlement feeds freshly stamped",
+  "lossVault": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+  "lossRecipient": "0x000000000000000000000000000000000000dEaD",
+  "lossAssets": "453739571494323037974683",
+  "expectedPreAssets": "2062452597701468354430381",
+  "expectedSupply": "4346104531645569620253164",
+  "expectedPostAssets": "1608713026207145316455698",
+  "expectedPreRatioWad": "474552000000000000",
+  "expectedPostRatioWad": "370150560000000000",
+  "expectedDeclineBps": 2200,
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault.realizeLoss 22% claim-UI rerun",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xd35d26ed000000000000000000000000000000000000000000000000000000000000dead000000000000000000000000000000000000000000006015457e42ce3aa0b09b",
+        "nonce": "0x347",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

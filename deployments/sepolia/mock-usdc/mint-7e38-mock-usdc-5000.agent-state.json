@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "4027679527e5e58db38e3363ab5f4740998f394b1a071737a6662ccfbaf4593e",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 550,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0xc1bd3da8c162b2f505cbfd3f34ca623fb08626a06dbc6bedc73fa50de48af4e8",
+      "status": "confirmed",
+      "blockNumber": 11573021,
+      "contractAddress": null
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: mint 25,000 USD8 and stream it to the wstETH cover pool so the trailing 30D earnings APR renders a non-zero value",
+  "note": "rewardsDuration is 7 days; the card shows realized trailing APR, so it climbs from 0.",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.approve Treasury",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000002a722ed12982623dff64dc0adba40e734a5f59c300000000000000000000000000000000000000000000000000000005d21dba00",
+        "nonce": "0x34b",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "Treasury.mintUSD8 25000",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x8d09722800000000000000000000000000000000000000000000000000000005d21dba00",
+        "nonce": "0x34c",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "USD8.approve coverPool",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x095ea7b300000000000000000000000055cb69271da9937d0cb3c548409fd3f77586df7900000000000000000000000000000000000000000000054b40b1f852bda00000",
+        "nonce": "0x34d",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SingleAssetCoverPool.receiveProfitDistribution 25000 USD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x55cb69271da9937d0Cb3c548409FD3f77586dF79",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x94419e7500000000000000000000000000000000000000000000054b40b1f852bda00000",
+        "nonce": "0x34e",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

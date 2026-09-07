@@ -1,0 +1,55 @@
+{
+  "transactions": [
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "contractAddress": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+      "function": "mint(address,uint256)",
+      "functionAbi": "function mint(address to, uint256 amount)",
+      "arguments": [
+        "0x07011C665D3c27EEE72C8459c4f87c8221a6FCDd",
+        "1000000000"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca58",
+        "value": "0x0",
+        "input": "0x40c10f1900000000000000000000000007011c665d3c27eee72c8459c4f87c8221a6fcdd000000000000000000000000000000000000000000000000000000003b9aca00",
+        "nonce": "0x182",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    },
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "MockWstETH.mint",
+      "contractAddress": "0xdfaf9c1ce55f18ab7850edd84f2175ce734985fa",
+      "function": "mint(address,uint256)",
+      "functionAbi": "function mint(address to, uint256 amount)",
+      "arguments": [
+        "0x07011C665D3c27EEE72C8459c4f87c8221a6FCDd",
+        "1000000000000000000000"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0xdfaf9c1ce55f18ab7850edd84f2175ce734985fa",
+        "gas": "0xca88",
+        "value": "0x0",
+        "input": "0x40c10f1900000000000000000000000007011c665d3c27eee72c8459c4f87c8221a6fcdd00000000000000000000000000000000000000000000003635c9adc5dea00000",
+        "nonce": "0x183",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    }
+  ],
+  "receipts": [],
+  "libraries": [],
+  "pending": [],
+  "returns": {},
+  "chain": 11155111
+}

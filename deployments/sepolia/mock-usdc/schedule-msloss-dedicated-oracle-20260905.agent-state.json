@@ -1,0 +1,25 @@
+{
+  "artifactSha256": "2a050326f310615eebf6ba6821fccbbe08aec82c8ea957cccfbba62b6f9d5ed4",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 856,
+      "label": "TimelockController.schedule editInsuredToken(msLOSS -> dedicated oracle)",
+      "transactionHash": "0x67439db1bddde032dc095184ce352816fee2972b4f8b03fe57d4ac337d228126",
+      "status": "confirmed",
+      "blockNumber": 11640594,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 857,
+      "label": "SepoliaTestOracle.updateAnswer msLOSS underlying = $2000",
+      "transactionHash": "0x7e7dbd998096fdd51cdfc501699eb9350b22169c16f891ca65eb12479dd3dc8f",
+      "status": "confirmed",
+      "blockNumber": 11640595,
+      "contractAddress": null
+    }
+  ]
+}

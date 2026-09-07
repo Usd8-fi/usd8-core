@@ -1,0 +1,25 @@
+{
+  "artifactSha256": "47b901cdba2871b4952e5d134d0f708f4084f2309dc236b856c24c74ebe7d712",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 386,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0xf94042b757532e7909c632679325fb909909458468beeafb6fed81e9414110ae",
+      "status": "confirmed",
+      "blockNumber": 11510222,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 387,
+      "label": "MockWstETH.mint",
+      "transactionHash": "0xad0c29a165b33c5f65f82ed49e7e09e6cd57bdcbfdf5b9e3add93f595d368306",
+      "status": "confirmed",
+      "blockNumber": 11510223,
+      "contractAddress": null
+    }
+  ]
+}

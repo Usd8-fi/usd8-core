@@ -1,0 +1,49 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: re-stamp both settlement feeds and realize a 22% msLOSS impairment for a fresh claim round",
+  "expectedPreRatioWad": "288717436800000000",
+  "expectedPostRatioWad": "225199600704000000",
+  "expectedDeclineBps": 2200,
+  "lossAssets": "276055155297146136303797",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer wstETH/USD",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x00E79aFB10A84D153803F00e73900803179D594e",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000005d21dba000",
+        "nonce": "0x355",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer USDC/USD",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x9989a6bB00C1737A9A0175408053a04A6f3eD74b",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000000005f5e100",
+        "nonce": "0x356",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault.realizeLoss 22% round-4 drop",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xd35d26ed000000000000000000000000000000000000000000000000000000000000dead000000000000000000000000000000000000000000003a74fade53db791218b5",
+        "nonce": "0x357",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

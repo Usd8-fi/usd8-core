@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "6f7ba5606933735d7d83a467c1fb427cbb17c45322d948a8c510273c42816358",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 446,
+      "label": "SingleAssetCoverPool",
+      "transactionHash": "0x986f7f68bfbe8cd3f32877904b6ace431cb7ba7a16e1fa0c1abbd20606866ebf",
+      "status": "confirmed",
+      "blockNumber": 11564579,
+      "contractAddress": null
+    }
+  ]
+}

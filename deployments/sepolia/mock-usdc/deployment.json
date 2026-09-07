@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 2,
+  "network": "ethereum-sepolia",
+  "chainId": 11155111,
+  "kind": "fresh-current-source-mock-usdc-staging",
+  "deployedAt": "2026-08-26T11:22:48Z",
+  "gitCommit": "1e4d5f3cbcf80523203459349f69ecb055cac004",
+  "measuredOffchainCommit": "2daf169d1018526a3fbeba34d03fdac79b51dc3b",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "contracts": {
+    "mockUsdc": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+    "aaveUsdcVault": "0xfB82Cf1A712B3d0357132Fd153e33081bEabC1Dd",
+    "morphoUsdcVault": "0x327aA8c33765bEbf0B13c3DDAc981deF9036b225",
+    "registry": "0xB34D92cd05005DF36050370433819597a9BaC693",
+    "usd8": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+    "treasury": "0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3",
+    "savingsBootstrap": "0x02753474e626474243EEEe581a6da9E555832C40",
+    "savingsVault": "0x7989B3EB6faD27e404b07433eBD265657359F4AB",
+    "savingsAdapter": "0xBa3b016Ed5b501eA39f1d26cc8EBCF71E4a71ddc",
+    "coverPool": "0x55cb69271da9937d0Cb3c548409FD3f77586dF79",
+    "defiInsurance": "0x4E346CcD0a46D51ebaE6810d653791982968d502",
+    "usd8PriceOracle": "0xf4AeDC595912cE5951c3a0AfDD8a61ebb07a8634",
+    "aaveStrategy": "0x79F5AAf3F02cfF93193D1003198E1F1296d6707a",
+    "morphoStrategy": "0xDAD5BD9d7B7d3D26a89827F3159F4170C29EaE"
+  },
+  "fresh": {
+    "registryImplementation": "0x1C3FA0b6efb61Df4b94f7AAbD4ec4BED63f1C52d",
+    "usd8Implementation": "0xb0A7761dED4c4c48e7b1a4ede61FB33cD1039469",
+    "treasuryImplementation": "0x3ab433A2Dbd17bBd322078eCe357444822f994aa",
+    "defiInsuranceImplementation": "0xd125186cd5ae9f06B45fDE205130D54b9788Fe2A",
+    "coverPoolImplementation": "0xD49739324a0D894B06F53fCA5dD052A5fC7aC18F",
+    "coverPoolBeacon": "0xe935806dC8B8C7b52E98dfA864A10E4bd9688e00"
+  },
+  "reused": {
+    "timelock": "0x158494e7b95c0e5F87e8dB4Ad1Be5c32de99F645",
+    "morphoVaultV2Factory": "0xb3fE2D5f8Af90f194B01db546397058Fcebb85D1",
+    "booster": "0xC0012770848FCD350AB11906e93ba9fdfDA19f4c",
+    "coverAsset": "0xdfaf9C1CE55f18AB7850EDd84F2175ce734985fa",
+    "coverAssetUsdOracle": "0x00E79aFB10A84D153803F00e73900803179D594e",
+    "aaveSgho": "0x6e5eb99a5923bEA10Eb3990Ec8Da84e70007E668",
+    "ghoUsdOracle": "0xA1BEA76BD8FB29bcec20Ad6F97e541283Ab82275",
+    "skySusds": "0x5279e60d104110dB53b9d00a54F323E978be3757",
+    "usdsUsdOracle": "0x9951918957c4466a223E7E8D00c6a326be61018C",
+    "usdcUsdOracle": "0x9989a6bB00C1737A9A0175408053a04A6f3eD74b",
+    "msLoss": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc"
+  },
+  "tee": {
+    "signer": "0x0140Cc1E7a438F2F29F1345348AE5f1aE4F0CB0F",
+    "teePcrHash": "0x1ccc0b38c13750ed40ef6bb31aa7245f2749b8ef0665dcf7f08ee64171c34f65",
+    "releaseArchiveSha256": "c37be44657327d23fd04a21a54e3b2b157fa4cd08b9685869ea78bcbc6db36c2"
+  },
+  "testnetOnlyConfiguration": {
+    "incidentPhaseWindowSeconds": 3600,
+    "maxReferenceBlockAge": 450,
+    "incidentTwapBlocks": 4,
+    "incidentSampleStepBlocks": 2,
+    "minimumDropBps": 2000,
+    "coverPoolCapWsteth": "1000"
+  },
+  "evidence": {
+    "deploymentArtifactSha256": "b71766d0ae486b43487b8fb7498c772a43fc68c491b696fb6791ad8e8bab616a",
+    "deploymentReceiptsSha256": "18df620a98b6232fab1e082dfe9399cb9691c62366ad22f5a2bec04272fca9a5",
+    "deploymentReceipts": "49/49 confirmed, live status 1, blocks 11570477-11570547",
+    "smokeArtifactSha256": "144ffea4b601f0f9d81381062cd4c2b85a69e9a11caa2900bbaf6e36c2670917",
+    "smokeReceiptsSha256": "fd29c9cdb640a2c8be573fecdd4d54b7cf6fb4c5175151ade361b1fcc6fbb858",
+    "smokeReceipts": "3/3 confirmed, live status 1, blocks 11570557-11570560",
+    "topologyVerifier": "passed against two independent Sepolia RPC providers",
+    "mintRedeemSmoke": "1 mUSDC -> 1 USD8 -> 1 mUSDC exact; balances restored; allowance zero"
+  },
+  "notes": [
+    "This is a disposable public Sepolia staging deployment, not a production deployment.",
+    "Every first-party implementation, proxy, beacon, strategy and oracle was freshly deployed from the current source tree.",
+    "Only the timelock and explicit Sepolia fixtures were reused.",
+    "Accelerated incident timings are isolated to this testnet deployment script; production Registry defaults remain unchanged.",
+    "The previous staging manifest is archived as deployment-2026-08-12.json."
+  ]
+}

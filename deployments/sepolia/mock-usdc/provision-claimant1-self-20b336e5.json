@@ -1,0 +1,11 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-21T17:23:50Z",
+  "purpose": "TESTNET ONLY: claimant1 mints and approves the exact USD8 bond and msLOSS escrow for measured Nitro incident-open E2E",
+  "transactions": [
+    {"transactionType":"CALL","contractName":"MockUSDC","function":"approve(address,uint256)","transaction":{"from":"0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4","to":"0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c","gas":"0x30d40","value":"0x0","input":"0x095ea7b300000000000000000000000026f85ec30a753451d218f4dc526f696d2d8050970000000000000000000000000000000000000000000000000000000000989680","nonce":"0x12","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"Treasury","function":"mintUSD8(uint256)","transaction":{"from":"0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4","to":"0x26F85ec30a753451d218f4Dc526F696D2d805097","gas":"0x493e0","value":"0x0","input":"0x8d0972280000000000000000000000000000000000000000000000000000000000989680","nonce":"0x13","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"SepoliaLossVault","function":"approve(address,uint256)","transaction":{"from":"0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4","to":"0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc","gas":"0x30d40","value":"0x0","input":"0x095ea7b3000000000000000000000000c74439a7a3d5db8a48766a5fc2d200bd2858026d0000000000000000000000000000000000000000000000001bc16d674ec80000","nonce":"0x14","chainId":"0xaa36a7"}},
+    {"transactionType":"CALL","contractName":"USD8","function":"approve(address,uint256)","transaction":{"from":"0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4","to":"0xfDb7546dEA188d52E8eE98b789Da2d695dA702A7","gas":"0x30d40","value":"0x0","input":"0x095ea7b3000000000000000000000000c74439a7a3d5db8a48766a5fc2d200bd2858026d0000000000000000000000000000000000000000000000008ac7230489e80000","nonce":"0x15","chainId":"0xaa36a7"}}
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "artifactSha256": "130396de71c4cea3a5b3b5c3c4aa81776ea468e90f3f7639ba06b210ffdb77c7",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 541,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0xea58ec9992d0e085e34c0d3398e0886f64a656364916e792438006a68624b761",
+      "status": "confirmed",
+      "blockNumber": 11572029,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 542,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0x87eb8a07b796b49e6d19e078ab70c852bc3a255db04bbf6ee0cca3a7b98e8fca",
+      "status": "confirmed",
+      "blockNumber": 11572030,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 543,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0x4cf29a6dbfce99844a9995add9390eda15c861591b7da45aaa576658530174ef",
+      "status": "confirmed",
+      "blockNumber": 11572031,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 544,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0xb460eae34ed90c59b67f62378e4f28967724ac96e846b2910f1bf57aee57e4ee",
+      "status": "confirmed",
+      "blockNumber": 11572033,
+      "contractAddress": null
+    },
+    {
+      "index": 4,
+      "nonce": 545,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0x9e63c8faccb1b2f11e64e0a808f709d98c820060729c69b1162798f2c993ae13",
+      "status": "confirmed",
+      "blockNumber": 11572034,
+      "contractAddress": null
+    },
+    {
+      "index": 5,
+      "nonce": 546,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0x44f45e8b3efa873b3baa0748c024a13504ba44fafdecd989b50f744cde795b81",
+      "status": "confirmed",
+      "blockNumber": 11572036,
+      "contractAddress": null
+    },
+    {
+      "index": 6,
+      "nonce": 547,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0xdaf0bf243a30b67ca5b4e34d7eed9a3a892729fc05975f888596b3ade80b053c",
+      "status": "confirmed",
+      "blockNumber": 11572037,
+      "contractAddress": null
+    }
+  ]
+}

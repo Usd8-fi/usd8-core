@@ -1,0 +1,43 @@
+{
+  "artifactSha256": "e23db38dd534bc6139ccfbe68fe37574625ebc1ee9599260dd8571b77eab4c99",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 577,
+      "label": "MockUSDC.approve Treasury for sUSD8 provisioning",
+      "transactionHash": "0x992a9958bf63c6a8ac0809d9ea28e980cdc710be805c61e69e4b7bd9b4dda3ec",
+      "status": "confirmed",
+      "blockNumber": 11590761,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 578,
+      "label": "Treasury.mintUSD8 reserve-backed sUSD8 provisioning",
+      "transactionHash": "0x256f4daaaf498610021e066dbec06a83bcdfb3f9377ad49ce9b7826eacba14f6",
+      "status": "confirmed",
+      "blockNumber": 11590762,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 579,
+      "label": "USD8.approve savings vault for exact-share mint",
+      "transactionHash": "0xe6330a21609edb540189fa5952487a4d666bb986b92dab5cdc51207a73dfa6ac",
+      "status": "confirmed",
+      "blockNumber": 11590763,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 580,
+      "label": "sUSD8.mint exact shares to recipient",
+      "transactionHash": "0x754769463937bb6c7de8b250bb81dd797215d5914362c1c568b956b617e5522f",
+      "status": "confirmed",
+      "blockNumber": 11590765,
+      "contractAddress": null
+    }
+  ]
+}

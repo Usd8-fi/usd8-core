@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "1b4271733b84951c0b1aa15595b927d82c261baedea66b98c9e1ae8ce2149747",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 835,
+      "label": "SepoliaLossVault.realizeLoss fresh 22% manual claim-UI drop",
+      "transactionHash": "0x690bc92d0abb1e7da109a0ea993d5d2c2f8662a69f3547effd7e3a2621abafe4",
+      "status": "confirmed",
+      "blockNumber": 11631625,
+      "contractAddress": null
+    }
+  ]
+}

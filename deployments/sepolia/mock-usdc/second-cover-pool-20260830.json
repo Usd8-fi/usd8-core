@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "network": "ethereum-sepolia",
+  "chainId": 11155111,
+  "kind": "second-synthetic-cover-pool-for-multi-asset-e2e",
+  "status": "registeredFinalized",
+  "deployedAt": "2026-08-30T10:20:00Z",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "registry": "0xB34D92cd05005DF36050370433819597a9BaC693",
+  "defiInsurance": "0x4E346CcD0a46D51ebaE6810d653791982968d502",
+  "timelock": "0x158494e7b95c0e5F87e8dB4Ad1Be5c32de99F645",
+  "poolBeacon": "0xe935806dC8B8C7b52E98dfA864A10E4bd9688e00",
+  "contracts": {
+    "asset": "0xBBd327336D5135E146312dD16F2491C1E6ce8822",
+    "assetSymbol": "mGHO-CP",
+    "assetDecimals": 18,
+    "assetUsdFeed": "0xDa725125d8ff0588496382427ab65Bc8f8D639Eb",
+    "pool": "0x8917f4C377dD0e5Bd4909D8A00B508F38C0f3f4F"
+  },
+  "capital": {
+    "seedAssets": "256000000000000000000000",
+    "depositCap": "256000000000000000000000",
+    "seedReceiver": "0x000000000000000000000000000000000000dEaD",
+    "seedShares": "256000000000000000000000000",
+    "usdFeedAnswer": "100000000",
+    "usdFeedDecimals": 8
+  },
+  "governance": {
+    "operationId": "0xac1e68a09559fb75ba23f3777b8ee648405e68474a417766231ab3c4247b7799",
+    "operationSalt": "0xbdd1d0f4d4c0325c3afde646e2e78e3f87bfb6eeecbb381f21a8bfbecbcdce02",
+    "readyAt": 1788087096,
+    "readyAtUtc": "2026-08-30T10:51:36Z",
+    "minimumDelaySeconds": 1800,
+    "executeTransaction": "0x5c8c1f6b3dc6450e5b5d4073de7251584f9e22e0e23e0540aa16c45bb05dfd47",
+    "executeBlock": 11598343,
+    "executeStatus": 1,
+    "finalized": true,
+    "finalityVerifiedAtBlock": 11598447
+  },
+  "transactions": [
+    {
+      "purpose": "deploy asset",
+      "hash": "0x388c09eca9cc5a7173d513b4c8611b868e5fb34e44342ac2fb48d1d65a67e9ad",
+      "blockNumber": 11598188,
+      "status": 1
+    },
+    {
+      "purpose": "deploy USD feed",
+      "hash": "0x79759c4f82157d771e5758acb05c67c6d54a7f322508906f3beabea1f56ee226",
+      "blockNumber": 11598191,
+      "status": 1
+    },
+    {
+      "purpose": "deploy beacon-proxy pool",
+      "hash": "0xc5f2641fab0ba4c44c2dee261cd7ef55ff8268b55e31156cdd7407ded48d30f4",
+      "blockNumber": 11598192,
+      "status": 1
+    },
+    {
+      "purpose": "approve seed",
+      "hash": "0xb67f8280ead3e9f2ec2a607d60eea3ba0bbf948394a5a638153eef16462ef5bb",
+      "blockNumber": 11598194,
+      "status": 1
+    },
+    {
+      "purpose": "deposit seed to dead sink",
+      "hash": "0xe5e3a828dd9ba6a913be9e7b40e411b0cd8f9fe30d1975ffb7439a1b09940f47",
+      "blockNumber": 11598195,
+      "status": 1
+    },
+    {
+      "purpose": "cap pool at seeded assets",
+      "hash": "0x64bed3f224c010d2e113aab25625a6e5f1e79c9e5dd684fb781b71e7a8be3985",
+      "blockNumber": 11598196,
+      "status": 1
+    },
+    {
+      "purpose": "schedule timelocked registry addition",
+      "hash": "0x6ab8e920bb548d0d33ed9e5bb8ae8eba41c33d2a0912d8f2610a1bada90a63fc",
+      "blockNumber": 11598198,
+      "status": 1
+    },
+    {
+      "purpose": "execute timelocked registry addition",
+      "hash": "0x5c8c1f6b3dc6450e5b5d4073de7251584f9e22e0e23e0540aa16c45bb05dfd47",
+      "blockNumber": 11598343,
+      "status": 1
+    }
+  ],
+  "evidence": {
+    "foundryArtifactSha256": "a62aa9e5fe76543f8491d0bfdce5ae1678f1e11f0eac76cc4601ad717f887556",
+    "agentJournalSha256BeforeManifest": "346df6c997df87b3e251f3e0f63e04a0028fd043ab4a3d42185905c25257a6a3",
+    "dualRpcPostState": "asset, feed, pool seed, cap, dead-sink shares, registry pool/feed mappings, and ordered two-pool topology agreed at block 11598343 on EthPandaOps and PublicNode",
+    "registrationPreState": {
+      "blockNumber": 11598342,
+      "coverPoolsLength": 1,
+      "coverPool": "0x0000000000000000000000000000000000000000",
+      "assetUsdFeed": "0x0000000000000000000000000000000000000000"
+    },
+    "registrationPostState": {
+      "blockNumber": 11598343,
+      "coverPoolsLength": 2,
+      "poolOrder": [
+        "0xdfaf9c1ce55f18ab7850edd84f2175ce734985fa",
+        "0xbbd327336d5135e146312dd16f2491c1e6ce8822"
+      ],
+      "coverPoolOrder": [
+        "0x55cb69271da9937d0cb3c548409fd3f77586df79",
+        "0x8917f4c377dd0e5bd4909d8a00b508f38c0f3f4f"
+      ],
+      "coverPool": "0x8917f4c377dd0e5bd4909d8a00b508f38c0f3f4f",
+      "assetUsdFeed": "0xda725125d8ff0588496382427ab65bc8f8d639eb"
+    }
+  },
+  "security": {
+    "poolImplementationSource": "shared timelock-owned UpgradeableBeacon",
+    "registrationAuthority": "Registry.addPool through TimelockController only",
+    "assetFeedAuthority": "Sepolia test admin; testnet-only mutable feed",
+    "depositManipulationControl": "depositCap equals seeded totalAssets",
+    "settlementBinding": "TEE-signed settlement binds the incident's ordered pool addresses and per-pool budgets; DefiInsurance rechecks signature, topology, and caps onchain"
+  },
+  "notes": [
+    "This asset, feed, and pool are synthetic Sepolia-only fixtures and have no mainnet or production value.",
+    "The pool is deliberately sized near the existing wstETH pool's current USD value so both assets produce observable settlement payouts.",
+    "Registration was finalized and independently verified through PublicNode and EthPandaOps before the expanded live E2E began."
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-29T00:19:18Z",
+  "purpose": "TESTNET ONLY: refresh all settlement oracle timestamps before replacement measured Nitro settlement UI E2E while preserving answers",
+  "expectedPreState": {
+    "poolUsdFeedRound": "4",
+    "poolUsdAnswer": "400000000000",
+    "underlyingUsdFeedRound": "4",
+    "underlyingUsdAnswer": "100000000"
+  },
+  "expectedPostState": {
+    "poolUsdFeedRound": "5",
+    "poolUsdAnswer": "400000000000",
+    "underlyingUsdFeedRound": "5",
+    "underlyingUsdAnswer": "100000000"
+  },
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "Sepolia staging pool USD feed updateAnswer",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x00E79aFB10A84D153803F00e73900803179D594e",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000005d21dba000",
+        "nonce": "0x23c",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "Sepolia staging insured-underlying USD feed updateAnswer",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xA1BEA76BD8FB29bcec20Ad6F97e541283Ab82275",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000000005f5e100",
+        "nonce": "0x23d",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

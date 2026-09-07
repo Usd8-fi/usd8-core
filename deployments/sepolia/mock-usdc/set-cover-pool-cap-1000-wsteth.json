@@ -1,0 +1,20 @@
+{
+  "chain": 11155111,
+  "purpose": "Set the active mock-USDC Sepolia cover-pool capacity to 1000 wstETH",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SingleAssetCoverPool",
+      "function": "setDepositCap(uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xEcbfc3b78CD4B29ED589b78c46a8819dA8924432",
+        "gas": "0xca9f",
+        "value": "0x0",
+        "input": "0x8665120300000000000000000000000000000000000000000000003635c9adc5dea00000",
+        "nonce": "0x1be",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

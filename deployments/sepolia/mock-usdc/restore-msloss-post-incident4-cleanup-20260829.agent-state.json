@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "25d1ec69a3885e67d9366a7ed0f9971095263d7d8290f9864794835a5d5699e6",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 576,
+      "label": "SepoliaLossToken.mint restore vault after incident 4 cleanup",
+      "transactionHash": "0x58a1cc13ef39140ef8b9e5704584d4e2ea28bd86896112d6387203e0471f5f5f",
+      "status": "confirmed",
+      "blockNumber": 11589598,
+      "contractAddress": null
+    }
+  ]
+}

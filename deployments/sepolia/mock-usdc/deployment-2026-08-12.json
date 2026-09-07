@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "network": "ethereum-sepolia",
+  "chainId": 11155111,
+  "kind": "mock-usdc-staging",
+  "deployedAt": "2026-08-12T08:19:50Z",
+  "gitCommit": "1193a20edd86beab619dacca7963cc3f02d43fdd",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "contracts": {
+    "mockUsdc": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+    "aaveUsdcVault": "0xfB82Cf1A712B3d0357132Fd153e33081bEabC1Dd",
+    "morphoUsdcVault": "0x327aA8c33765bEbf0B13c3DDAc981deF9036b225",
+    "registry": "0x7d09C1e9eE03350A177C2a542E90285B55E8a218",
+    "usd8": "0xfDb7546dEA188d52E8eE98b789Da2d695dA702A7",
+    "treasury": "0x26F85ec30a753451d218f4Dc526F696D2d805097",
+    "savingsBootstrap": "0xf0AAdA730Ac763e5364C093c8C8Cb79479629945",
+    "savingsVault": "0x830e05aA59f71d5F2977c8089fad14C0E6aD1440",
+    "savingsAdapter": "0x7d4994562975087947F1b1DCDc3356cFE09371E8",
+    "coverPool": "0xEcbfc3b78CD4B29ED589b78c46a8819dA8924432",
+    "defiInsurance": "0xC74439a7a3d5Db8A48766A5fc2d200bd2858026d",
+    "usd8PriceOracle": "0x87a97a45A173570E8D04EB9A8667d5D4469dD1b0",
+    "aaveStrategy": "0xA852E6FBa66002A44990c31E3f6cB584A82fBc2E",
+    "morphoStrategy": "0x098FcA26B326781d2D9e5Cea22b75983c375DaA6"
+  },
+  "reused": {
+    "timelock": "0x158494e7b95c0e5F87e8dB4Ad1Be5c32de99F645",
+    "registryImplementation": "0x3928643211920936330be418F9573a2485004B49",
+    "usd8Implementation": "0x9f234eDA223Dc3014722578576D8Fb2C54dd01d2",
+    "treasuryImplementation": "0xAf4fF0C92bee40299723643534Cd1e8D89F50087",
+    "defiInsuranceImplementation": "0x0fF406C9FE9359A0F0C1343625E8A160b0aE0d15",
+    "coverPoolImplementation": "0x2a1f0C53172a46faF41b7034Dd6001922dcA3f43",
+    "coverPoolBeacon": "0x8C1A8522d5c5b40dB64e41B1cEbf7F3Ea40b7D48",
+    "morphoVaultV2Factory": "0xb3fE2D5f8Af90f194B01db546397058Fcebb85D1",
+    "booster": "0xC0012770848FCD350AB11906e93ba9fdfDA19f4c",
+    "coverAsset": "0xdfaf9C1CE55f18AB7850EDd84F2175ce734985fa",
+    "coverAssetUsdOracle": "0x00E79aFB10A84D153803F00e73900803179D594e",
+    "aaveSgho": "0x6e5eb99a5923bEA10Eb3990Ec8Da84e70007E668",
+    "ghoUsdOracle": "0xA1BEA76BD8FB29bcec20Ad6F97e541283Ab82275",
+    "skySusds": "0x5279e60d104110dB53b9d00a54F323E978be3757",
+    "usdsUsdOracle": "0x9951918957c4466a223E7E8D00c6a326be61018C",
+    "usdcUsdOracle": "0x9989a6bB00C1737A9A0175408053a04A6f3eD74b"
+  },
+  "evidence": {
+    "deploymentArtifactSha256": "29fbb87ffc41791d602765dc5b0f3dc3f68a66a14d3283010c92ce630a33fadd",
+    "deploymentReceiptsSha256": "6737d08d9a8a46b7c6dfc0e169351c22ea747a5dc947beca09ed713695ed2ce8",
+    "deploymentReceipts": "39/39 confirmed, live status 1, blocks 11471920-11471958",
+    "smokeArtifactSha256": "da7ae1e53068bfe71556df359798afe770207bad0bf0c1f9d05eaf7a04874db7",
+    "smokeReceiptsSha256": "519c7d141182287e154b8c13d886f15f89249cc9529f3154be0d5748426012f1",
+    "smokeReceipts": "3/3 confirmed, live status 1, blocks 11471968-11471970",
+    "topologyVerifier": "passed",
+    "mintRedeemSmoke": "1 mUSDC -> 1 USD8 -> 1 mUSDC exact; balances restored; allowance zero; 10 mUSDC Treasury seed unchanged",
+    "forgeTests": "461 passed, 0 failed, 4 skipped"
+  },
+  "notes": [
+    "This is a public Sepolia staging deployment, not a production deployment.",
+    "The prior canonical-USDC Sepolia topology was not modified.",
+    "Sepolia Mock USDC is six decimals and is admin-mintable by the autonomous Sepolia signer.",
+    "Exactly fourteen new contract instances were created; implementations and shared dependencies were reused."
+  ]
+}

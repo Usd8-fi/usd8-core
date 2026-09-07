@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "4c38ce84e5790975e86ac9ee144989ddbfea5ee6a34baa88e4d8db92d61bd486",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 637,
+      "label": "SepoliaTestToken.mint refreshed TWAP baseline",
+      "transactionHash": "0xf9feb5813f221e58c8d483f2f33df48077c1761470fc42a7c427eabcb674d28d",
+      "status": "confirmed",
+      "blockNumber": 11600956,
+      "contractAddress": null
+    }
+  ]
+}

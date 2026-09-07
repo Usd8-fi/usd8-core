@@ -1,0 +1,113 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: add 5,000 Sepolia Mock USDC to each previously funded external test participant",
+  "recipients": [
+    "0x07011c665d3c27eee72c8459c4f87c8221a6fcdd",
+    "0x0963f85cebc7a29d18f97e8c42c13df73f2baa2e",
+    "0x704a3117090256be6a6db52d7d5af823ad569c7a",
+    "0x8ca72d405cfa5128f2623aab437a8741c57983a7",
+    "0x9b49f5a74a521a18d3050d9b6ba71154dd294763",
+    "0xb446b0c85cc4ef5f5ebf495c4fdd38ecc5284176",
+    "0xb60c01de607ff9085d6dad8613bf31a91d575902"
+  ],
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f1900000000000000000000000007011c665d3c27eee72c8459c4f87c8221a6fcdd000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x21d",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f190000000000000000000000000963f85cebc7a29d18f97e8c42c13df73f2baa2e000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x21e",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000704a3117090256be6a6db52d7d5af823ad569c7a000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x21f",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f190000000000000000000000008ca72d405cfa5128f2623aab437a8741c57983a7000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x220",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f190000000000000000000000009b49f5a74a521a18d3050d9b6ba71154dd294763000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x221",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000b446b0c85cc4ef5f5ebf495c4fdd38ecc5284176000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x222",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x31cd4d9299ac2d55bb8590c9557edd3ff08cf35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000b60c01de607ff9085d6dad8613bf31a91d575902000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x223",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

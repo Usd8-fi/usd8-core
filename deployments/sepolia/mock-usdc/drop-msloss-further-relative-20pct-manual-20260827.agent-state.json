@@ -1,0 +1,14 @@
+{
+  "artifactSha256": "ed8c5b1856532fabca73b56f40233acfef38045193e3e6c9cef398622fc6fb59",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 551,
+      "label": "SepoliaLossVault",
+      "transactionHash": "0x26116a8563e45e4786971bb0adae068fb92489fff61a78fc7e4437b40102070e",
+      "status": "sent"
+    }
+  ]
+}

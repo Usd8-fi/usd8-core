@@ -1,0 +1,25 @@
+{
+  "artifactSha256": "93999b9548f573231d060fc11a728ed03a250111038f01ae53e3f0ffebefffa0",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 633,
+      "label": "SepoliaTestToken.mint restore msLOSS parity",
+      "transactionHash": "0x6fada793c4b4cbea55909b252ba994c727fc2ac8f6194dec9b7897c1d0776733",
+      "status": "confirmed",
+      "blockNumber": 11600537,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 634,
+      "label": "SepoliaLossVault.realizeLoss refreshed expanded E2E",
+      "transactionHash": "0x752d4e931023998cdcd7563e7148b43082c9492542d051192d3875fc942ea321",
+      "status": "confirmed",
+      "blockNumber": 11600538,
+      "contractAddress": null
+    }
+  ]
+}

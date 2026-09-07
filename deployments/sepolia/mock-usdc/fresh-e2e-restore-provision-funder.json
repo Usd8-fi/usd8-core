@@ -1,0 +1,34 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: restore msLOSS to 1:1 and provision normal claimant for genuine-loss E2E",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken",
+      "function": "",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc0000000000000000000000000000000000000000000002e70bd42ac00bfdfffc",
+        "nonce": "0x216",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC",
+      "function": "",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000ed6db48f8cdce82ee37ba8760ceefe569167f3c40000000000000000000000000000000000000000000000000000000001312d00",
+        "nonce": "0x217",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "410579d356df73e8b18be200d4795c946be9b44b269b0fda85fae006a0310fde",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 636,
+      "label": "SepoliaLossVault.realizeLoss sustained-TWAP expanded E2E",
+      "transactionHash": "0x5e1ca0215a64db0137f0d564b4aa5e46230ddebd3868b3f4ede0f5c554232561",
+      "status": "confirmed",
+      "blockNumber": 11600664,
+      "contractAddress": null
+    }
+  ]
+}

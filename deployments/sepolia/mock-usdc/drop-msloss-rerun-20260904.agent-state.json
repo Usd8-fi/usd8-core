@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "22e7559bb8da6e73c9eecf9f4789e3fcf41cc54fbeae5b1935a4a7fda32a7762",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 839,
+      "label": "SepoliaLossVault.realizeLoss 22% claim-UI rerun",
+      "transactionHash": "0xd51a658302830fb556bde9865fdd16683c13c3b013ea3828cd6347c6aa9e6e18",
+      "status": "confirmed",
+      "blockNumber": 11632411,
+      "contractAddress": null
+    }
+  ]
+}

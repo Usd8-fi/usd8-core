@@ -1,0 +1,34 @@
+{
+  "artifactSha256": "d6f76c5d0f8dc8565b5256d52ce04fb7ecdf22b9160696a64e9676802bec98d8",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 393,
+      "label": "MockSavingsGHO.mint",
+      "transactionHash": "0xfc338fa8a54358c500ac5a11fc858f9b365222a5d3c9f484e003b42520be4f70",
+      "status": "confirmed",
+      "blockNumber": 11528145,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 394,
+      "label": "MockSavingsGHO.mint",
+      "transactionHash": "0xaf79c810380ddb4b3929bb6cbb511255b9413e47f20f72cf00635890b490fd48",
+      "status": "confirmed",
+      "blockNumber": 11528146,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 395,
+      "label": "MockUSDC.mint",
+      "transactionHash": "0x848d3947ba0a2baeb5b102f3a0fc841744989bc65e44e8465fae409917984df1",
+      "status": "confirmed",
+      "blockNumber": 11528147,
+      "contractAddress": null
+    }
+  ]
+}

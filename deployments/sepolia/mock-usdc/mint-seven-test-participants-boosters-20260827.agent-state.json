@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "receipts": {
+    "0": {
+      "address": "0x07011c665d3c27eee72c8459c4f87c8221a6fcdd",
+      "amount": 100,
+      "nonce": 202608270001,
+      "transactionHash": "0xaf8698e46ff0a1d1475ff871b255f8b0a1c91f8cb6ce58bb32b98819c18aa2bf",
+      "blockNumber": 11576625
+    },
+    "1": {
+      "address": "0x0963f85cebc7a29d18f97e8c42c13df73f2baa2e",
+      "amount": 100,
+      "nonce": 202608270002,
+      "transactionHash": "0x50bb1852ff518ec3b2a9572ec2a445b0f40d589c8ea5b5134f64cbdbe42c7fd5",
+      "blockNumber": 11576626
+    },
+    "2": {
+      "address": "0x704a3117090256be6a6db52d7d5af823ad569c7a",
+      "amount": 200,
+      "nonce": 202608270003,
+      "transactionHash": "0xea984f4736f9dd8e19518a271da36a74a331aa9c995506de83d4a30f25528098",
+      "blockNumber": 11576627
+    },
+    "3": {
+      "address": "0x8ca72d405cfa5128f2623aab437a8741c57983a7",
+      "amount": 100,
+      "nonce": 202608270004,
+      "transactionHash": "0x86ec63501b10e1d90befbd08c6f465affc5a2bf8285ad294f0735351b8411f09",
+      "blockNumber": 11576628
+    },
+    "4": {
+      "address": "0x9b49f5a74a521a18d3050d9b6ba71154dd294763",
+      "amount": 200,
+      "nonce": 202608270005,
+      "transactionHash": "0xbfb71bc24ebe532941a86b8e47f0cec59768c34e7fce3c6163f6c08f43be137e",
+      "blockNumber": 11576630
+    },
+    "5": {
+      "address": "0xb446b0c85cc4ef5f5ebf495c4fdd38ecc5284176",
+      "amount": 100,
+      "nonce": 202608270006,
+      "transactionHash": "0xfc7cf774e665ece3b1942841563eb4f8a6895972134568404a706ecc70c33117",
+      "blockNumber": 11576631
+    },
+    "6": {
+      "address": "0xb60c01de607ff9085d6dad8613bf31a91d575902",
+      "amount": 100,
+      "nonce": 202608270007,
+      "transactionHash": "0x415f30e294a0ec7135c94d07a389b42621f66395f3b5ee66e42ca01ebc72cc28",
+      "blockNumber": 11576633
+    }
+  },
+  "initialBalances": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "note": "Sepolia staging only. Mint 5000 msLOSS shares to 0x7e381cD6d93ADb4b1406d1f23Fdcf1B223346f46 by minting mLOSS to the funder and depositing it into the SepoliaLossVault at the prevailing share rate.",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken.mint",
+      "function": "mint(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x186a0",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000724e8951d39e14cebcb5fb02638f49a637c9783800000000000000000000000000000000000000000000002fb474098f67c00000",
+        "nonce": "0x35e",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken.approve",
+      "function": "approve(address,uint256)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x186a0",
+        "value": "0x0",
+        "input": "0x095ea7b3000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc00000000000000000000000000000000000000000000002fb474098f67c00000",
+        "nonce": "0x35f",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault.mint",
+      "function": "mint(uint256,address)",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xd5b2a08f474f77ef29211ccc59cd65e5fa6734dc",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x94bf804d00000000000000000000000000000000000000000000010f0cf064dd592000000000000000000000000000007e381cd6d93adb4b1406d1f23fdcf1b223346f46",
+        "nonce": "0x360",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

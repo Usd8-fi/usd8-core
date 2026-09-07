@@ -1,0 +1,52 @@
+{
+  "artifactSha256": "0a9fab49c967de9a70a54396fd4803c1e8c822fbaae4182f84e1bc67dbb18e55",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 370,
+      "label": "approve(address,uint256)",
+      "transactionHash": "0x14bd2382f720c51b46eb2c1571f5eb2e47bb3fcdf0a3d891a0f121657c5d082b",
+      "status": "confirmed",
+      "blockNumber": 11472205,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 371,
+      "label": "mintUSD8(uint256)",
+      "transactionHash": "0xbdfca64cb11eb1638e41609938e2d707cd3fa8f3eaf4d17e4c4a468de8083fa9",
+      "status": "confirmed",
+      "blockNumber": 11472206,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 372,
+      "label": "approve(address,uint256)",
+      "transactionHash": "0xc54c42bb51e65ddaba7320129142f042de201efbb6d05b4a15e6b545e02a720a",
+      "status": "confirmed",
+      "blockNumber": 11472207,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 373,
+      "label": "mint(uint256,address)",
+      "transactionHash": "0x50c59e180b7c5fdf39b2c9c97d3c4eccea6ff8332375a4a92d75c198fbe7d2fa",
+      "status": "confirmed",
+      "blockNumber": 11472208,
+      "contractAddress": null
+    },
+    {
+      "index": 4,
+      "nonce": 374,
+      "label": "transfer(address,uint256)",
+      "transactionHash": "0xd2670f9f943d93e60ea2dad66c11a993a3626cd775a90edd0bbdfd4b2d20bc24",
+      "status": "confirmed",
+      "blockNumber": 11472209,
+      "contractAddress": null
+    }
+  ]
+}

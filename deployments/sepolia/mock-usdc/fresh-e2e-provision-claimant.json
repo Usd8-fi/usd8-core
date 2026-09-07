@@ -1,0 +1,62 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: normal claimant provisions USD8 bond and approvals",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC",
+      "function": "",
+      "transaction": {
+        "from": "0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000002a722ed12982623dff64dc0adba40e734a5f59c30000000000000000000000000000000000000000000000000000000001312d00",
+        "nonce": "0x16",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "Treasury",
+      "function": "",
+      "transaction": {
+        "from": "0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4",
+        "to": "0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x8d0972280000000000000000000000000000000000000000000000000000000001312d00",
+        "nonce": "0x17",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "USD8",
+      "function": "",
+      "transaction": {
+        "from": "0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4",
+        "to": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000004e346ccd0a46d51ebae6810d653791982968d5020000000000000000000000000000000000000000000000008ac7230489e80000",
+        "nonce": "0x18",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "msLOSS",
+      "function": "",
+      "transaction": {
+        "from": "0xED6DB48F8cDcE82EE37ba8760CeEfE569167F3c4",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x493e0",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000004e346ccd0a46d51ebae6810d653791982968d5020000000000000000000000000000000000000000000000000de0b6b3a7640000",
+        "nonce": "0x19",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

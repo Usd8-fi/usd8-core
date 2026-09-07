@@ -1,0 +1,32 @@
+{
+  "transactions": [
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "MockGHO.approve",
+      "contractAddress": "0x521d2f1b4408e63db79986df1f72c6754473e53b",
+      "function": "approve(address,uint256)",
+      "functionAbi": "function approve(address spender, uint256 amount)",
+      "arguments": [
+        "0x6e5eb99a5923bEA10Eb3990Ec8Da84e70007E668",
+        "10000000000000000000000"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0x521d2f1b4408e63db79986df1f72c6754473e53b",
+        "gas": "0xea60",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000006e5eb99a5923bea10eb3990ec8da84e70007e66800000000000000000000000000000000000000000000021e19e0c9bab2400000",
+        "nonce": "0x188",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    }
+  ],
+  "receipts": [],
+  "libraries": [],
+  "pending": [],
+  "returns": {},
+  "chain": 11155111
+}

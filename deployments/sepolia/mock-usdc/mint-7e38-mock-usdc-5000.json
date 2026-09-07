@@ -1,0 +1,30 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: mint 5,000 Sepolia Mock USDC to requested recipient",
+  "recipient": "0x7e381cD6d93ADb4b1406d1f23Fdcf1B223346f46",
+  "transactions": [
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.mint",
+      "contractAddress": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+      "function": "mint(address,uint256)",
+      "functionAbi": "function mint(address to, uint256 amount)",
+      "arguments": [
+        "0x7e381cD6d93ADb4b1406d1f23Fdcf1B223346f46",
+        "5000000000"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0xca64",
+        "value": "0x0",
+        "input": "0x40c10f190000000000000000000000007e381cd6d93adb4b1406d1f23fdcf1b223346f46000000000000000000000000000000000000000000000000000000012a05f200",
+        "nonce": "0x226",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    }
+  ]
+}

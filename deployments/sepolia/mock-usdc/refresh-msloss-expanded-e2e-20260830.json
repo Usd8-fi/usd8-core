@@ -1,0 +1,43 @@
+{
+  "chain": 11155111,
+  "createdAt": "2026-08-30T18:21:26Z",
+  "purpose": "TESTNET ONLY: restore and realize a fresh exact bounded 22% msLOSS impairment after the prior E2E lookback expired",
+  "lossVault": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+  "underlying": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+  "lossRecipient": "0x000000000000000000000000000000000000dEaD",
+  "restoreAssets": "9152996962025316455697",
+  "lossAssets": "9152996962025316455697",
+  "expectedPreAssets": "32451534683544303797467",
+  "expectedSupply": "41604531645569620253164",
+  "expectedRestoredAssets": "41604531645569620253164",
+  "expectedPostAssets": "32451534683544303797467",
+  "expectedPostRatioWad": "779999999999999999",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestToken.mint restore msLOSS parity",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc0000000000000000000000000000000000000000000001f02f59824e448a9511",
+        "nonce": "0x279",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault.realizeLoss refreshed expanded E2E",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xd35d26ed000000000000000000000000000000000000000000000000000000000000dead0000000000000000000000000000000000000000000001f02f59824e448a9511",
+        "nonce": "0x27a",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}
