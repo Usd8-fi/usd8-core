@@ -7,7 +7,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+#[cfg(any(feature = "lambda", feature = "worker", feature = "sepolia"))]
+pub mod completion_verifier;
 mod kms_recipient_cms;
+#[cfg(any(feature = "lambda", feature = "worker", feature = "sepolia"))]
+pub mod settlement_verifier;
 #[cfg(feature = "worker")]
 pub use kms_recipient_cms::decrypt_kms_recipient_envelope;
 pub use kms_recipient_cms::{KmsRecipientEnvelope, parse_kms_recipient_cms};
@@ -417,6 +421,33 @@ fn normalize_registry(value: &str) -> Result<String, ProtocolError> {
     normalize_address(value).map_err(|_| ProtocolError::InvalidRegistry)
 }
 
+/// Network identity is release policy, never a public request field.
+pub const fn configured_chain_id() -> u64 {
+    if cfg!(feature = "sepolia") {
+        11_155_111
+    } else {
+        1
+    }
+}
+
+/// Registry-scoped incident numbers identify the canonical protocol work.
+/// A module supplied by a caller (or an uploaded artifact) is not authoritative.
+pub fn canonical_work_id(
+    request: &CanonicalRequest,
+    configured_module: &str,
+) -> Result<String, ServiceError> {
+    let mut hash = Sha256::new();
+    hash.update(b"USD8_CANONICAL_WORK_V1\0");
+    hash.update(configured_chain_id().to_be_bytes());
+    hash.update(
+        normalize_address(configured_module)
+            .map_err(|_| ServiceError::InvalidRequest)?
+            .as_bytes(),
+    );
+    hash.update(serde_json::to_vec(request).map_err(|_| ServiceError::InvalidRequest)?);
+    Ok(hex::encode(hash.finalize()))
+}
+
 pub fn derive_job_id(
     secret: &[u8],
     idempotency_key: &str,
@@ -538,7 +569,7 @@ impl SettlementLocator {
 
     pub fn key(&self) -> String {
         format!(
-            "settlements/v1/{}/{}/{}/{}/{}.json",
+            "settlements/v2/{}/{}/{}/{}/{}.json",
             self.chain_id, self.registry, self.defi_insurance, self.incident_id, self.root
         )
     }
@@ -624,6 +655,7 @@ fn valid_dns_label(value: &str, min: usize, max: usize) -> bool {
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub registry: String,
+    pub defi_insurance: String,
     pub job_secret: Vec<u8>,
     pub max_result_bytes: usize,
     pub max_inline_result_bytes: usize,
@@ -643,6 +675,10 @@ pub enum ServiceError {
     InvalidRequest,
     #[error("job not found")]
     NotFound,
+    #[error("settlement is not eligible at the finalized head")]
+    SettlementNotEligible,
+    #[error("global worker budget exhausted")]
+    AdmissionLimited,
     #[error("service unavailable")]
     Unavailable,
     #[error("request write unavailable")]
@@ -667,8 +703,43 @@ pub enum ServiceError {
     InvalidStoredResult,
 }
 
+/// An opaque storage revision returned atomically with the bytes (S3 ETag).
+#[derive(Clone, Debug)]
+pub struct VersionedObject {
+    pub bytes: Vec<u8>,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkAttempt {
+    generation: u64,
+    stored: StoredRequest,
+    launch_retry_at: u64,
+    launched: bool,
+    completed: bool,
+}
+
 #[async_trait]
 pub trait JobStore: Send + Sync {
+    /// Fail closed unless the backend provides real conditional atomic writes.
+    async fn get_versioned(
+        &self,
+        _key: &str,
+        _max_bytes: usize,
+    ) -> Result<Option<VersionedObject>, ServiceError> {
+        Err(ServiceError::Unavailable)
+    }
+    /// None means create-only; Some means replace only the exact read revision.
+    /// Return false on contention, never perform a read-then-unconditional-put.
+    async fn compare_exchange(
+        &self,
+        _key: &str,
+        _revision: Option<&str>,
+        _value: &[u8],
+    ) -> Result<bool, ServiceError> {
+        Err(ServiceError::Unavailable)
+    }
     async fn create(&self, key: &str, value: &[u8]) -> Result<CreateOutcome, ServiceError>;
     async fn get(&self, key: &str, max_bytes: usize) -> Result<Option<Vec<u8>>, ServiceError>;
     async fn download_url(&self, key: &str, ttl_seconds: u64) -> Result<String, ServiceError>;
@@ -676,6 +747,38 @@ pub trait JobStore: Send + Sync {
 
 #[async_trait]
 pub trait InstanceLauncher: Send + Sync {
+    /// Cheap authoritative admission, before any new attempt or paid reservation.
+    /// Active/completed work reconnects without running this precheck again.
+    async fn precheck(&self, request: &CanonicalRequest) -> Result<(), ServiceError> {
+        if matches!(request, CanonicalRequest::Open(_)) {
+            Ok(())
+        } else {
+            Err(ServiceError::Unavailable)
+        }
+    }
+    /// True only for positively observed terminated instances of this exact job.
+    /// Missing instances or API errors must NOT free a potentially billable slot.
+    async fn is_terminated(&self, _job_id: &str) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
+    /// Reclaim only with trusted evidence fenced against all delayed launches.
+    /// Production may prove absence using a configured complete-inventory bound.
+    async fn can_release_reservation(
+        &self,
+        job_id: &str,
+        launch_until: u64,
+        now: u64,
+    ) -> Result<bool, ServiceError> {
+        if now <= launch_until.saturating_add(900) {
+            return Ok(false);
+        }
+        self.is_terminated(job_id).await
+    }
+    /// Production implementations must check the deadline again immediately
+    /// before RunInstances, after preparing immutable capabilities.
+    async fn launch_before(&self, job_id: &str, _deadline: u64) -> Result<(), ServiceError> {
+        self.launch(job_id).await
+    }
     /// Must use `job_id` as EC2 RunInstances.ClientToken so retries cannot launch duplicates.
     async fn launch(&self, job_id: &str) -> Result<(), ServiceError>;
 }
@@ -836,15 +939,71 @@ fn settlement_locator_from_terminal(
     Ok(Some(locator))
 }
 
+/// Both limits are global per job bucket, not per Lambda process or caller.
+#[derive(Clone, Copy, Debug)]
+pub struct AdmissionPolicy {
+    /// Zero selects cost-only admission; positive limits require fenced EC2 proof.
+    pub max_active_workers: usize,
+    pub max_starts_per_hour: usize,
+}
+impl Default for AdmissionPolicy {
+    fn default() -> Self {
+        Self {
+            max_active_workers: 0,
+            max_starts_per_hour: 16,
+        }
+    }
+}
+
+const ADMISSION_KEY: &str = "control/admission/v1.json";
+const MAX_CONTROL_BYTES: usize = 524_288;
+// Two windows cover conservative retention of timestamp-less legacy slots.
+const MAX_RESERVATIONS: usize = 2048;
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdmissionLedger {
+    reservations: Vec<WorkerReservation>,
+    starts: Vec<u64>,
+    #[serde(default)]
+    observed_at: u64,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkerReservation {
+    job_id: String,
+    launch_until: u64,
+    // Legacy reservations predate this field; their launch deadline is a
+    // conservative upper bound on the accounting timestamp.
+    #[serde(default)]
+    started_at: Option<u64>,
+}
+
+/// Independent control-plane verification seam. Return InvalidStoredResult for
+/// a definitively invalid candidate; transient RPC/storage failures must return
+/// Unavailable (or a transport error), never a permanent invalid verdict.
+#[async_trait]
+pub trait CompletionVerifier: Send + Sync {
+    async fn verify(
+        &self,
+        request: &CanonicalRequest,
+        terminal: &TerminalEnvelope,
+    ) -> Result<(), ServiceError>;
+}
+
 pub struct App<S, L> {
     config: AppConfig,
     store: Arc<S>,
     launcher: Arc<L>,
+    clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    admission: AdmissionPolicy,
+    completion_verifier: Option<Arc<dyn CompletionVerifier>>,
 }
 
 impl<S: JobStore, L: InstanceLauncher> App<S, L> {
     pub fn new(config: AppConfig, store: Arc<S>, launcher: Arc<L>) -> Result<Self, ServiceError> {
         normalize_registry(&config.registry).map_err(|_| ServiceError::InvalidRequest)?;
+        normalize_address(&config.defi_insurance).map_err(|_| ServiceError::InvalidRequest)?;
         if config.job_secret.len() < 32
             || config.max_result_bytes == 0
             || config.max_inline_result_bytes == 0
@@ -858,7 +1017,135 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
             config,
             store,
             launcher,
+            admission: AdmissionPolicy::default(),
+            completion_verifier: None,
+            clock: Arc::new(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|t| t.as_secs())
+                    .unwrap_or(0)
+            }),
         })
+    }
+
+    pub fn with_completion_verifier(mut self, verifier: Arc<dyn CompletionVerifier>) -> Self {
+        self.completion_verifier = Some(verifier);
+        self
+    }
+
+    pub fn with_admission_policy(mut self, policy: AdmissionPolicy) -> Result<Self, ServiceError> {
+        if policy.max_active_workers > 128 || !(1..=1024).contains(&policy.max_starts_per_hour) {
+            return Err(ServiceError::InvalidRequest);
+        }
+        self.admission = policy;
+        Ok(self)
+    }
+
+    async fn reserve_worker(&self, job_id: &str, launch_until: u64) -> Result<(), ServiceError> {
+        for _ in 0..16 {
+            let current = self
+                .store
+                .get_versioned(ADMISSION_KEY, MAX_CONTROL_BYTES)
+                .await?;
+            let mut ledger: AdmissionLedger = match &current {
+                Some(value) => serde_json::from_slice(&value.bytes)
+                    .map_err(|_| ServiceError::InvalidStoredResult)?,
+                None => AdmissionLedger::default(),
+            };
+            if ledger.reservations.len() > MAX_RESERVATIONS || ledger.starts.len() > 1024 {
+                return Err(ServiceError::InvalidStoredResult);
+            }
+            let now = (self.clock)();
+            // A rollback must not revive an attempt whose charge was pruned.
+            if now == 0
+                || now < ledger.observed_at
+                || ledger.starts.iter().any(|started| *started > now)
+            {
+                return Err(ServiceError::Unavailable);
+            }
+            ledger.observed_at = now;
+            if let Some(slot) = ledger
+                .reservations
+                .iter()
+                .find(|slot| slot.job_id == job_id)
+            {
+                return if slot.launch_until == launch_until {
+                    Ok(())
+                } else {
+                    Err(ServiceError::InvalidStoredResult)
+                };
+            }
+            let mut retained = Vec::new();
+            for slot in ledger.reservations {
+                if JobPaths::new(&slot.job_id).is_err() {
+                    return Err(ServiceError::InvalidStoredResult);
+                }
+                // Errors/unknown inventory retain this slot, without discarding
+                // already-proven cleanup for other reservations.
+                let released = if self.admission.max_active_workers == 0 {
+                    // This is cost-accounting retention, not proof of EC2 absence.
+                    let retain_until = slot
+                        .started_at
+                        .unwrap_or(slot.launch_until)
+                        .saturating_add(3600)
+                        .max(slot.launch_until.saturating_add(900));
+                    now > retain_until
+                } else {
+                    matches!(
+                        self.launcher
+                            .can_release_reservation(&slot.job_id, slot.launch_until, now)
+                            .await,
+                        Ok(true)
+                    )
+                };
+                if !released {
+                    retained.push(slot);
+                }
+            }
+            ledger.reservations = retained;
+            ledger.starts.retain(|started| {
+                now.checked_sub(*started)
+                    .is_none_or(|elapsed| elapsed <= 3600)
+            });
+            let denied = (self.admission.max_active_workers > 0
+                && ledger.reservations.len() >= self.admission.max_active_workers)
+                || ledger.starts.len() >= self.admission.max_starts_per_hour
+                || ledger.reservations.len() >= MAX_RESERVATIONS;
+            if !denied {
+                ledger.starts.push(now);
+                ledger.reservations.push(WorkerReservation {
+                    job_id: job_id.into(),
+                    launch_until,
+                    started_at: Some(now),
+                });
+            }
+            // Commit proof-driven cleanup even when this request is rate-limited.
+            // CAS loss rereads the entire ledger; never overwrite a concurrent
+            // reservation, and never refund a still-in-window hourly charge.
+            let bytes = serde_json::to_vec(&ledger).map_err(|_| ServiceError::Unavailable)?;
+            if self
+                .store
+                .compare_exchange(
+                    ADMISSION_KEY,
+                    current.as_ref().map(|v| v.revision.as_str()),
+                    &bytes,
+                )
+                .await?
+            {
+                return if denied {
+                    Err(ServiceError::AdmissionLimited)
+                } else {
+                    Ok(())
+                };
+            }
+        }
+        Err(ServiceError::Unavailable)
+    }
+
+    /// Inject a trusted clock for deterministic lease tests, never from API input.
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub async fn submit(
@@ -868,7 +1155,11 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
     ) -> Result<SubmitOutcome, ServiceError> {
         let request = canonicalize_request(body, &self.config.registry)
             .map_err(|_| ServiceError::InvalidRequest)?;
-        self.submit_canonical(idempotency_key, request).await
+        // Validate the legacy retry header, but never use it as settlement identity.
+        derive_job_id(&self.config.job_secret, idempotency_key, &request)
+            .map_err(|_| ServiceError::InvalidRequest)?;
+        let work_key = canonical_work_id(&request, &self.config.defi_insurance)?;
+        self.submit_canonical(&work_key, request).await
     }
 
     pub async fn submit_open(
@@ -878,71 +1169,205 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
     ) -> Result<SubmitOutcome, ServiceError> {
         let request = canonicalize_open_request(body, &self.config.registry)
             .map_err(|_| ServiceError::InvalidRequest)?;
-        self.submit_canonical(idempotency_key, request).await
+        derive_job_id(&self.config.job_secret, idempotency_key, &request)
+            .map_err(|_| ServiceError::InvalidRequest)?;
+        let mut hash = Sha256::new();
+        hash.update(canonical_work_id(&request, &self.config.defi_insurance)?.as_bytes());
+        hash.update(idempotency_key.as_bytes());
+        self.submit_canonical(&hex::encode(hash.finalize()), request)
+            .await
     }
 
     async fn submit_canonical(
         &self,
-        idempotency_key: &str,
+        work_id: &str,
         request: CanonicalRequest,
     ) -> Result<SubmitOutcome, ServiceError> {
-        let job_id = derive_job_id(&self.config.job_secret, idempotency_key, &request)
-            .map_err(|_| ServiceError::InvalidRequest)?;
-        let paths = JobPaths::new(&job_id).map_err(|_| ServiceError::InvalidRequest)?;
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| ServiceError::Unavailable)?
-            .as_secs();
-        let stored = StoredRequest {
-            schema_version: STORED_REQUEST_SCHEMA_VERSION,
-            job_id: job_id.clone(),
-            request: request.clone(),
-            created_at,
-            expires_at: created_at.saturating_add(self.config.job_ttl_seconds),
-        };
-        let bytes = serde_json::to_vec(&stored).map_err(|_| ServiceError::InvalidRequest)?;
-        let stored = match self.store.create(&paths.request, &bytes).await? {
-            CreateOutcome::Created => stored,
-            CreateOutcome::Exists(existing) => serde_json::from_slice::<StoredRequest>(&existing)
-                .map_err(|_| ServiceError::InvalidStoredResult)?,
-        };
-        if stored.schema_version != STORED_REQUEST_SCHEMA_VERSION
-            || stored.job_id != job_id
-            || stored.request != request
-            || stored.expires_at.saturating_sub(stored.created_at) != self.config.job_ttl_seconds
-        {
-            return Err(ServiceError::InvalidStoredResult);
-        }
-        if self
-            .store
-            .get(&paths.terminal, self.config.max_result_bytes)
-            .await?
-            .is_some()
-        {
+        let work_key = format!("control/work/{work_id}.json");
+        for _ in 0..16 {
+            let now = (self.clock)();
+            if now == 0 {
+                return Err(ServiceError::Unavailable);
+            }
+            let current = self
+                .store
+                .get_versioned(&work_key, MAX_STORED_REQUEST_BYTES)
+                .await?;
+            let mut generation = 0;
+            let mut resume = None;
+            if let Some(current) = &current {
+                let mut state: WorkAttempt = serde_json::from_slice(&current.bytes)
+                    .map_err(|_| ServiceError::InvalidStoredResult)?;
+                if state.stored.request != request
+                    || !stored_request_is_live(&state.stored, state.stored.created_at)
+                {
+                    return Err(ServiceError::InvalidStoredResult);
+                }
+                let job_id = state.stored.job_id.clone();
+                let paths =
+                    JobPaths::new(&job_id).map_err(|_| ServiceError::InvalidStoredResult)?;
+                let candidate_bytes = self.completion_bytes(&paths).await;
+                let (terminal, mut invalid_completion) = match candidate_bytes.clone() {
+                    Ok(Some(bytes)) => match self.parse_terminal(&bytes, Some(&job_id)) {
+                        Ok(terminal) => (Some(terminal), false),
+                        Err(ServiceError::InvalidStoredResult) => (None, true),
+                        Err(error) => return Err(error),
+                    },
+                    Ok(None) => (None, false),
+                    Err(ServiceError::InvalidStoredResult) => (None, true),
+                    Err(error) => return Err(error),
+                };
+                let mut verified_completion = state.completed;
+                if !state.completed
+                    && let Some(terminal) = terminal
+                        .as_ref()
+                        .filter(|t| t.status == TerminalStatus::Completed)
+                {
+                    match self.verify_completion(&state.stored, terminal).await {
+                        Ok(()) => verified_completion = true,
+                        Err(ServiceError::InvalidStoredResult) => invalid_completion = true,
+                        Err(error) => return Err(error),
+                    }
+                }
+                if verified_completion {
+                    let terminal = terminal.as_ref().ok_or(ServiceError::InvalidStoredResult)?;
+                    self.verify_completion(&state.stored, terminal).await?;
+                    let bytes = candidate_bytes?.ok_or(ServiceError::InvalidStoredResult)?;
+                    self.retain_completion(&state.stored, &bytes).await?;
+                    if !state.completed {
+                        state.completed = true;
+                        if !self
+                            .store
+                            .compare_exchange(
+                                &work_key,
+                                Some(&current.revision),
+                                &serde_json::to_vec(&state)
+                                    .map_err(|_| ServiceError::Unavailable)?,
+                            )
+                            .await?
+                        {
+                            continue;
+                        }
+                    }
+                    self.publish_settlement(&state.stored, &bytes, terminal)
+                        .await?;
+                    return Ok(SubmitOutcome {
+                        accepted: true,
+                        job_id,
+                    });
+                }
+                if (terminal.is_some() && !invalid_completion) || now > state.stored.expires_at {
+                    generation = state
+                        .generation
+                        .checked_add(1)
+                        .ok_or(ServiceError::Unavailable)?;
+                } else if !invalid_completion
+                    && !state.launched
+                    && now >= state.launch_retry_at
+                    && now < state.stored.created_at.saturating_add(120)
+                {
+                    state.launch_retry_at = now.saturating_add(60);
+                    resume = Some(state);
+                } else {
+                    return Ok(SubmitOutcome {
+                        accepted: true,
+                        job_id,
+                    });
+                }
+            }
+            self.launcher.precheck(&request).await?;
+            let state = match resume {
+                Some(state) => state,
+                None => {
+                    let job_id = derive_job_id(
+                        &self.config.job_secret,
+                        &format!("{work_id}:{generation}"),
+                        &request,
+                    )
+                    .map_err(|_| ServiceError::InvalidRequest)?;
+                    WorkAttempt {
+                        generation,
+                        stored: StoredRequest {
+                            schema_version: STORED_REQUEST_SCHEMA_VERSION,
+                            job_id,
+                            request: request.clone(),
+                            created_at: now,
+                            expires_at: now.saturating_add(self.config.job_ttl_seconds),
+                        },
+                        launch_retry_at: now.saturating_add(60),
+                        launched: false,
+                        completed: false,
+                    }
+                }
+            };
+            let bytes = serde_json::to_vec(&state).map_err(|_| ServiceError::InvalidRequest)?;
+            if !self
+                .store
+                .compare_exchange(
+                    &work_key,
+                    current.as_ref().map(|v| v.revision.as_str()),
+                    &bytes,
+                )
+                .await?
+            {
+                continue;
+            }
+            let job_id = state.stored.job_id.clone();
+            let paths = JobPaths::new(&job_id).map_err(|_| ServiceError::InvalidRequest)?;
+            let request_bytes =
+                serde_json::to_vec(&state.stored).map_err(|_| ServiceError::InvalidRequest)?;
+            match self.store.create(&paths.request, &request_bytes).await? {
+                CreateOutcome::Created => (),
+                CreateOutcome::Exists(existing) if existing == request_bytes => (),
+                _ => return Err(ServiceError::InvalidStoredResult),
+            }
+            // Recheck the generation/launch lease after I/O. A stale invocation
+            // cannot mark a replacement generation launched or complete.
+            if let Some(owned) = self
+                .store
+                .get_versioned(&work_key, MAX_STORED_REQUEST_BYTES)
+                .await?
+                && owned.bytes == bytes
+                && (self.clock)() < state.stored.created_at.saturating_add(120)
+            {
+                self.reserve_worker(&job_id, state.stored.created_at.saturating_add(120))
+                    .await?;
+                let fresh = self
+                    .store
+                    .get_versioned(&work_key, MAX_STORED_REQUEST_BYTES)
+                    .await?;
+                if (self.clock)() >= state.stored.created_at.saturating_add(120)
+                    || fresh.as_ref().is_none_or(|v| v.bytes != bytes)
+                {
+                    return Ok(SubmitOutcome {
+                        accepted: true,
+                        job_id,
+                    });
+                }
+                self.launcher
+                    .launch_before(&job_id, state.stored.created_at.saturating_add(120))
+                    .await?;
+                let mut launched = state;
+                launched.launched = true;
+                self.store
+                    .compare_exchange(
+                        &work_key,
+                        Some(&owned.revision),
+                        &serde_json::to_vec(&launched).map_err(|_| ServiceError::Unavailable)?,
+                    )
+                    .await?;
+            }
             return Ok(SubmitOutcome {
                 accepted: true,
                 job_id,
             });
         }
-        if created_at > stored.expires_at {
-            return Ok(SubmitOutcome {
-                accepted: true,
-                job_id,
-            });
-        }
-        self.launcher.launch(&job_id).await?;
-        Ok(SubmitOutcome {
-            accepted: true,
-            job_id,
-        })
+        Err(ServiceError::Unavailable)
     }
 
     pub async fn poll(&self, job_id: &str) -> Result<PollOutcome, ServiceError> {
         let paths = JobPaths::new(job_id).map_err(|_| ServiceError::InvalidRequest)?;
-        let terminal = self
-            .store
-            .get(&paths.terminal, self.config.max_result_bytes)
-            .await?;
+        let terminal = self.completion_bytes(&paths).await?;
         let bytes = match terminal {
             Some(bytes) => bytes,
             None => {
@@ -980,7 +1405,38 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
             }
         };
         let terminal = self.parse_terminal(&bytes, Some(job_id))?;
-        self.publish_settlement(&paths, &bytes, &terminal).await?;
+        if terminal.status == TerminalStatus::Completed {
+            let request_bytes = match self
+                .store
+                .get(
+                    &format!("control/completion-requests/{job_id}.json"),
+                    MAX_STORED_REQUEST_BYTES,
+                )
+                .await?
+            {
+                Some(bytes) => bytes,
+                None => self
+                    .store
+                    .get(&paths.request, MAX_STORED_REQUEST_BYTES)
+                    .await?
+                    .ok_or(ServiceError::InvalidStoredResult)?,
+            };
+            let stored: StoredRequest = serde_json::from_slice(&request_bytes)
+                .map_err(|_| ServiceError::InvalidStoredResult)?;
+            if stored.job_id != job_id || !stored_request_is_live(&stored, stored.created_at) {
+                return Err(ServiceError::InvalidStoredResult);
+            }
+            self.verify_completion(&stored, &terminal).await?;
+            self.retain_completion(&stored, &bytes).await?;
+            self.publish_settlement(&stored, &bytes, &terminal).await?;
+            return self
+                .terminal_outcome(
+                    &format!("control/completions/{job_id}.json"),
+                    bytes,
+                    terminal,
+                )
+                .await;
+        }
         self.terminal_outcome(&paths.terminal, bytes, terminal)
             .await
     }
@@ -1001,18 +1457,36 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
         {
             return Err(ServiceError::InvalidRequest);
         }
-        let key = locator.key();
-        let bytes = self
-            .store
-            .get(&key, self.config.max_result_bytes)
-            .await?
-            .ok_or(ServiceError::NotFound)?;
+        let mut key = locator.key();
+        let bytes = match self.store.get(&key, self.config.max_result_bytes).await? {
+            Some(bytes) => bytes,
+            None => {
+                key = locator
+                    .key()
+                    .replacen("settlements/v2/", "settlements/v1/", 1);
+                self.store
+                    .get(&key, self.config.max_result_bytes)
+                    .await?
+                    .ok_or(ServiceError::NotFound)?
+            }
+        };
         let terminal = self.parse_terminal(&bytes, None)?;
         if terminal.status != TerminalStatus::Completed
             || settlement_locator_from_terminal(&terminal, &self.config.registry)? != Some(locator)
         {
             return Err(ServiceError::InvalidStoredResult);
         }
+        let request = CanonicalRequest::Settlement(CanonicalSettlementRequest {
+            incident_id: incident_id.to_owned(),
+            registry: normalize_registry(registry).map_err(|_| ServiceError::InvalidRequest)?,
+        });
+        verify_job_request_binding(&terminal.job_id, &request)
+            .map_err(|_| ServiceError::InvalidStoredResult)?;
+        self.completion_verifier
+            .as_ref()
+            .ok_or(ServiceError::Unavailable)?
+            .verify(&request, &terminal)
+            .await?;
         self.terminal_outcome(&key, bytes, terminal).await
     }
 
@@ -1036,9 +1510,124 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
         Ok(terminal)
     }
 
+    async fn verify_completion(
+        &self,
+        stored: &StoredRequest,
+        terminal: &TerminalEnvelope,
+    ) -> Result<(), ServiceError> {
+        if matches!(stored.request, CanonicalRequest::Open(_)) {
+            return Ok(());
+        }
+        self.completion_verifier
+            .as_ref()
+            .ok_or(ServiceError::Unavailable)?
+            .verify(&stored.request, terminal)
+            .await?;
+        let locator = settlement_locator_from_terminal(terminal, &self.config.registry)?
+            .ok_or(ServiceError::InvalidStoredResult)?;
+        if !matches!(&stored.request, CanonicalRequest::Settlement(request)
+            if request.incident_id == locator.incident_id && request.registry == locator.registry)
+            || locator.defi_insurance
+                != normalize_address(&self.config.defi_insurance)
+                    .map_err(|_| ServiceError::InvalidRequest)?
+        {
+            return Err(ServiceError::InvalidStoredResult);
+        }
+        Ok(())
+    }
+
+    /// Seal a verified completion using the same CAS namespace as retry takeover.
+    /// If takeover won first, an old worker can keep its own evidence but cannot
+    /// publish into shared discovery or overwrite the new attempt.
+    async fn seal_settlement_completion(
+        &self,
+        stored: &StoredRequest,
+    ) -> Result<bool, ServiceError> {
+        let work_id = canonical_work_id(&stored.request, &self.config.defi_insurance)?;
+        let key = format!("control/work/{work_id}.json");
+        for _ in 0..16 {
+            let Some(current) = self
+                .store
+                .get_versioned(&key, MAX_STORED_REQUEST_BYTES)
+                .await?
+            else {
+                return Ok(false);
+            };
+            let mut state: WorkAttempt = serde_json::from_slice(&current.bytes)
+                .map_err(|_| ServiceError::InvalidStoredResult)?;
+            if state.stored != *stored {
+                return Ok(false);
+            }
+            if state.completed {
+                return Ok(true);
+            }
+            state.completed = true;
+            if self
+                .store
+                .compare_exchange(
+                    &key,
+                    Some(&current.revision),
+                    &serde_json::to_vec(&state).map_err(|_| ServiceError::Unavailable)?,
+                )
+                .await?
+            {
+                return Ok(true);
+            }
+        }
+        Err(ServiceError::Unavailable)
+    }
+
+    async fn completion_bytes(&self, paths: &JobPaths) -> Result<Option<Vec<u8>>, ServiceError> {
+        // Authenticate any currently supplied candidate; use durable evidence only
+        // after the worker terminal has expired, never to mask a corrupt candidate.
+        match self
+            .store
+            .get(&paths.terminal, self.config.max_result_bytes)
+            .await?
+        {
+            Some(bytes) => Ok(Some(bytes)),
+            None => {
+                self.store
+                    .get(
+                        &paths
+                            .terminal
+                            .replacen("terminal/", "control/completions/", 1),
+                        self.config.max_result_bytes,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn retain_completion(
+        &self,
+        stored: &StoredRequest,
+        bytes: &[u8],
+    ) -> Result<(), ServiceError> {
+        // Both immutable objects precede the completion CAS. A crash at any point
+        // can be replayed; no sealed state depends on lifecycle-expiring bytes.
+        for (key, value) in [
+            (
+                format!("control/completions/{}.json", stored.job_id),
+                bytes.to_vec(),
+            ),
+            (
+                format!("control/completion-requests/{}.json", stored.job_id),
+                serde_json::to_vec(stored).map_err(|_| ServiceError::Unavailable)?,
+            ),
+        ] {
+            if let CreateOutcome::Exists(existing) = self.store.create(&key, &value).await?
+                && existing != value
+            {
+                return Err(ServiceError::InvalidStoredResult);
+            }
+        }
+        Ok(())
+    }
+
     async fn publish_settlement(
         &self,
-        paths: &JobPaths,
+        stored: &StoredRequest,
         bytes: &[u8],
         terminal: &TerminalEnvelope,
     ) -> Result<(), ServiceError> {
@@ -1046,13 +1635,6 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
         else {
             return Ok(());
         };
-        let request_bytes = self
-            .store
-            .get(&paths.request, self.config.max_result_bytes)
-            .await?
-            .ok_or(ServiceError::InvalidStoredResult)?;
-        let stored: StoredRequest = serde_json::from_slice(&request_bytes)
-            .map_err(|_| ServiceError::InvalidStoredResult)?;
         let request_matches = matches!(
             &stored.request,
             CanonicalRequest::Settlement(request)
@@ -1067,9 +1649,16 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
             return Err(ServiceError::InvalidStoredResult);
         }
 
+        // Callers have authenticated and durably retained these exact bytes.
+        if !self.seal_settlement_completion(stored).await? {
+            return Ok(());
+        }
         let key = locator.key();
         if let CreateOutcome::Exists(existing) = self.store.create(&key, bytes).await? {
             let existing_terminal = self.parse_terminal(&existing, None)?;
+            verify_job_request_binding(&existing_terminal.job_id, &stored.request)
+                .map_err(|_| ServiceError::InvalidStoredResult)?;
+            self.verify_completion(stored, &existing_terminal).await?;
             if existing_terminal.status != TerminalStatus::Completed
                 || settlement_locator_from_terminal(&existing_terminal, &self.config.registry)?
                     != Some(locator)

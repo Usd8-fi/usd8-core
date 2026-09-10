@@ -1,9 +1,7 @@
 #![cfg(feature = "worker")]
 
 use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
-use rand_core::OsRng;
-use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
-use sha2::Sha256;
+
 use usd8_tee_job_api::{
     KmsRecipientEnvelope, decrypt_kms_recipient_envelope, parse_kms_recipient_cms,
 };
@@ -31,13 +29,28 @@ fn parses_aws_kms_recipient_ber_envelope() {
 
 #[test]
 fn decrypts_rsa_oaep_aes256_cbc_recipient_envelope() {
-    let private_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
-    let public_key = RsaPublicKey::from(&private_key);
+    use aws_lc_rs::encoding::{AsDer, PublicKeyX509Der};
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey, PublicEncryptingKey};
+
+    let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+    // Same SPKI DER bytes supplied to the NSM attestation document.
+    let spki: PublicKeyX509Der<'static> = private_key.public_key().as_der().unwrap();
+    let public_key = PublicEncryptingKey::from_der(spki.as_ref()).unwrap();
+    assert_eq!(public_key.key_size_bits(), 2048);
+    let reencoded: PublicKeyX509Der<'static> = public_key.as_der().unwrap();
+    assert_eq!(spki.as_ref(), reencoded.as_ref());
+    let public_key = aws_lc_rs::rsa::OaepPublicEncryptingKey::new(public_key).unwrap();
     let symmetric_key = [0x42u8; 32];
     let iv = [0x24u8; 16];
     let plaintext = b"kms recipient plaintext";
-    let encrypted_key = public_key
-        .encrypt(&mut OsRng, Oaep::new::<Sha256>(), &symmetric_key)
+    let mut encrypted_key = vec![0; public_key.ciphertext_size()];
+    public_key
+        .encrypt(
+            &aws_lc_rs::rsa::OAEP_SHA256_MGF1SHA256,
+            &symmetric_key,
+            &mut encrypted_key,
+            None,
+        )
         .unwrap();
     let ciphertext = cbc::Encryptor::<aes::Aes256>::new_from_slices(&symmetric_key, &iv)
         .unwrap()
@@ -48,9 +61,105 @@ fn decrypts_rsa_oaep_aes256_cbc_recipient_envelope() {
         ciphertext,
     };
 
-    let decrypted = decrypt_kms_recipient_envelope(&private_key, &envelope).unwrap();
+    let decrypted = decrypt_kms_recipient_envelope(private_key, &envelope).unwrap();
 
     assert_eq!(decrypted.as_slice(), plaintext);
+}
+
+fn encrypted_fixture(
+    key: &aws_lc_rs::rsa::PrivateDecryptingKey,
+    symmetric_key: &[u8],
+    label: Option<&[u8]>,
+) -> KmsRecipientEnvelope {
+    let public = aws_lc_rs::rsa::OaepPublicEncryptingKey::new(key.public_key()).unwrap();
+    let mut encrypted_key = vec![0; public.ciphertext_size()];
+    public
+        .encrypt(
+            &aws_lc_rs::rsa::OAEP_SHA256_MGF1SHA256,
+            symmetric_key,
+            &mut encrypted_key,
+            label,
+        )
+        .unwrap();
+    KmsRecipientEnvelope {
+        encrypted_key,
+        iv: vec![0x24; 16],
+        ciphertext: cbc::Encryptor::<aes::Aes256>::new_from_slices(&[0x42; 32], &[0x24; 16])
+            .unwrap()
+            .encrypt_padded_vec_mut::<Pkcs7>(b"test-only plaintext"),
+    }
+}
+
+#[test]
+fn rejects_ciphertext_for_another_recipient() {
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
+    let intended = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+    let envelope = encrypted_fixture(&intended, &[0x42; 32], None);
+    let wrong = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+    assert_eq!(
+        decrypt_kms_recipient_envelope(wrong, &envelope).unwrap_err(),
+        "RSA_UNWRAP_FAILED"
+    );
+}
+
+#[test]
+fn rejects_nonempty_cryptographic_oaep_label() {
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
+    let key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+    let envelope = encrypted_fixture(&key, &[0x42; 32], Some(b"not-empty"));
+    assert_eq!(
+        decrypt_kms_recipient_envelope(key, &envelope).unwrap_err(),
+        "RSA_UNWRAP_FAILED"
+    );
+}
+
+#[test]
+fn rejects_wrong_unwrapped_aes_key_length() {
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
+    for length in [0, 16, 31, 33] {
+        let key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let envelope = encrypted_fixture(&key, &vec![0x42; length], None);
+        assert_eq!(
+            decrypt_kms_recipient_envelope(key, &envelope).unwrap_err(),
+            "CMS_KEY_OR_IV_LENGTH"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_rsa_ciphertext_length() {
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
+    for length in [0, 255, 257] {
+        let key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let mut envelope = encrypted_fixture(&key, &[0x42; 32], None);
+        envelope.encrypted_key.resize(length, 0);
+        assert_eq!(
+            decrypt_kms_recipient_envelope(key, &envelope).unwrap_err(),
+            "RSA_UNWRAP_FAILED"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_iv_or_content_padding() {
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
+    for bad_iv in [true, false] {
+        let key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let mut envelope = encrypted_fixture(&key, &[0x42; 32], None);
+        let expected = if bad_iv {
+            envelope.iv.pop();
+            "CMS_KEY_OR_IV_LENGTH"
+        } else {
+            // CBC: flipping the preceding block's final byte deterministically
+            // changes the final PKCS#7 padding byte without changing its peers.
+            envelope.ciphertext[15] ^= 1;
+            "CMS_CONTENT_DECRYPT_FAILED"
+        };
+        assert_eq!(
+            decrypt_kms_recipient_envelope(key, &envelope).unwrap_err(),
+            expected
+        );
+    }
 }
 
 fn mutate_nth(haystack: &mut [u8], needle: &[u8], occurrence: usize, index: usize, value: u8) {

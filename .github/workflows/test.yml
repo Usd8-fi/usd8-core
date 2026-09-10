@@ -83,10 +83,6 @@ jobs:
         working-directory: offchain-rust
         run: cargo build --release --locked
 
-      - name: Audit Rust dependencies
-        working-directory: offchain-rust
-        run: cargo audit --deny warnings
-
       - name: Check TEE job API formatting
         working-directory: offchain-rust/job-api
         run: cargo +1.94.1 fmt --check
@@ -101,13 +97,12 @@ jobs:
           cargo +1.94.1 test --locked --all-features
           python3 -m unittest discover -s deploy/tests -v
 
-      - name: Audit TEE job API dependencies
-        working-directory: offchain-rust/job-api
-        run: cargo +1.94.1 audit --deny warnings
-
       - name: Test standalone real-history helpers
         working-directory: offchain-rust
         run: python3 -m unittest bench/test_real_history.py -v
+
+      - name: Independent score and Python Linux release gates
+        run: bash offchain-rust/job-api/deploy/release-quality-gates.sh
 
       - name: Run Forge tests
         run: forge test --no-match-contract SettlementIntegrationTest -vvv

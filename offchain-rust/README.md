@@ -18,15 +18,16 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo build --release --locked
-cargo audit --deny warnings
+python3 job-api/deploy/audit-dependencies.py
 ```
 
-`cargo audit` ignores four unmaintained-only RustSec notices plus
-RUSTSEC-2023-0071, for which no fixed RSA release exists. The RSA exception is
-limited to an ephemeral per-request key that performs one KMS-recipient OAEP
-decrypt, so it cannot expose the repeated adaptive timing oracle required by
-Marvin. Remove it when upstream publishes a fixed stable release; remove the
-other exceptions when their pinned dependencies no longer require them.
+The isolated four-graph audit helper permits only the operator-approved
+maintenance notices RUSTSEC-2021-0127 (`serde_cbor` through the official AWS NSM
+SDK), RUSTSEC-2024-0388 (`derivative`), and RUSTSEC-2024-0436 (`paste`). No RSA
+vulnerability or additional advisory is exempted. The RSA backend and Alloy
+macro dependency have been migrated rather than exempted; see
+[job-api/deploy/DEPENDENCY-AUDIT-EXCEPTIONS.md](job-api/deploy/DEPENDENCY-AUDIT-EXCEPTIONS.md)
+for configuration precedence, exact flags, and upstream remediation requirements.
 
 ## Production bootstrap
 
@@ -353,9 +354,12 @@ GET /jobs/<jobId>
 {"jobId":"<jobId>","status":"completed","apiVerified":false,"payload":{}}
 ```
 
-After a completed settlement terminal passes the Lambda's structural and request-binding
-checks, Lambda conditionally saves the same immutable terminal under its public settlement
-identity before returning it to the polling client. A later claimant does not need the
+Before accepting a completed settlement, Lambda independently recomputes its EIP-712
+digest and Merkle commitments, recovers its signer, and checks canonical chain/Registry/module,
+incident PCR, and signer authorization. Historical accepted roots use authenticated on-chain
+acceptance evidence when the original signer has retired. Transient verification failures fail
+closed without consuming a new canonical attempt. Only authenticated results may enter the
+shared settlement index. A later claimant does not need the
 original relayer's private job ID. The claimant reads the standing root from the contract and
 requests:
 
@@ -378,7 +382,17 @@ or EIF path.
 
 ### Idempotency and S3 layout
 
-The 32-byte job ID is:
+Settlement work has a separate persistent canonical identity derived solely from the
+operation domain, configured chain/Registry/module, and incident. Caller retry keys do not
+change that identity. An atomic work record selects one active attempt or completed result;
+a genuine failed/expired attempt advances a fenced server-controlled generation. A durable
+rolling-hour launch budget also limits distinct jobs. `USD8_MAX_ACTIVE_WORKERS=0` selects
+cost-only admission without making availability depend on EC2 visibility. A positive value
+additionally enables the conservative active-reservation cap; that optional mode needs
+trusted termination reconciliation and may fail closed when evidence is unavailable.
+
+The 32-byte attempt job ID retains this wire-compatible request binding (for settlement,
+the server-controlled canonical work/generation supplies the retry discriminator):
 
 ```text
 opaque = HMAC-SHA256(jobSecret,
@@ -388,8 +402,8 @@ jobId = hex(opaque || commitment)
 ```
 
 The HMAC secret is a random deployment secret of at least 32 bytes, supplied to
-Lambda as base64. The opaque half keeps job IDs unguessable and binds a caller
-retry to the same canonical request. Before RPC or KMS access, the enclave
+Lambda as base64. The opaque half keeps attempt job IDs unguessable; settlement callers
+reconnect through the persistent canonical record independently of their retry key. Before RPC or KMS access, the enclave
 recomputes the public commitment half from the canonical request, so an
 untrusted parent cannot substitute another request under the original job ID.
 S3 conditionally creates the request with
@@ -399,9 +413,15 @@ Lambda timeout cannot create another instance.
 
 ```text
 requests/<jobId>.json    immutable request plus createdAt/expiresAt
+launch/<jobId>.json      immutable attempt capabilities
 terminal/<jobId>.json    immutable completed-or-failed envelope
-settlements/v1/<chainId>/<registry>/<defiInsurance>/<incidentId>/<root>.json
-                          immutable claimant-discoverable completed envelope
+control/work/<canonicalWorkId>.json            fenced canonical attempt
+control/admission/v1.json                      aggregate admission ledger
+control/completions/<jobId>.json               permanent verified terminal bytes
+control/completion-requests/<jobId>.json        permanent trusted request identity
+settlements/v2/<chainId>/<registry>/<defiInsurance>/<incidentId>/<root>.json
+                          verified-only claimant-discoverable completed envelope
+settlements/v1/...      read-only legacy fallback, independently authenticated
 ```
 
 The worker conditionally creates the single terminal key, so success and failure
@@ -412,16 +432,19 @@ Version 3 removes caller-supplied `referenceBlock` from open requests and change
 job-ID domain separation. Rollout must first stop intake and drain or expire every
 version-2 request, then deploy the API, parent, and enclave together; version-3
 components intentionally reject version-2 queued jobs and clients.
-If no terminal exists after that deadline, polling returns `expired`; retrying the
-same deterministic job does not relaunch it. A caller that intentionally needs a
-new computation after expiry must use a new idempotency key. A completed or failed
-terminal suppresses relaunch even if its request object must be recreated.
+If no terminal exists after that deadline, polling returns `expired`. A later settlement
+POST may atomically create one replacement generation under the same canonical work identity;
+changing a caller key does not create an additional attempt. Attempts retain immutable launch
+capabilities and a bounded launch horizon. Permanent verified completion data must outlive
+temporary request/terminal objects. Retention is launch 1 day, terminal 30 days, requests 31 days;
+canonical control and settlement objects have no automatic expiry.
 It caps reads at 16 MiB and never returns raw AWS errors. Terminals up to 5 MiB
 remain inline. Larger terminals return a five-minute presigned S3 `download`
 containing the URL, exact byte length, and SHA-256 of the complete immutable
 terminal object. Clients download that object, verify its byte hash, then verify
 the signature and attestation before use. Responses remain
-`apiVerified:false`: Lambda performs structural validation only.
+`apiVerified:false`: the independent signature-promotion gate does not replace the client's
+full attestation verification or the contract's final acceptance checks.
 
 ### Lambda configuration
 
@@ -429,6 +452,10 @@ Required environment variables:
 
 ```text
 USD8_REGISTRY
+USD8_DEFI_INSURANCE
+USD8_PRECHECK_RPC_URL
+USD8_MAX_ACTIVE_WORKERS
+USD8_MAX_STARTS_PER_HOUR
 USD8_JOB_BUCKET
 USD8_JOB_HMAC_KEY_B64
 USD8_TEE_AMI_ID
@@ -453,9 +480,12 @@ alone does not create per-tenant ownership.
 
 Enforce separate policies. Lambda needs only:
 
-- conditional `s3:PutObject` under `requests/` and `settlements/`, plus
-  `s3:GetObject` under `requests/`, `terminal/`, and `settlements/`; it must not
-  write worker-owned `terminal/` state;
+- create-only writes for immutable requests, launch capabilities, and results;
+  conditional ETag updates for API-only `control/` work/admission records;
+  prefix-scoped reads/listing for those objects and verified `settlements/`;
+  exact per-job presigned worker terminal upload capabilities, not worker-role
+  access to shared results or control state;
+- complete `ec2:DescribeInstances` evidence for admission reconciliation;
 - `ec2:RunInstances` restricted to the approved AMI, subnet, security group,
   instance profile and instance type;
 - `iam:PassRole` for only the TEE instance role;
@@ -510,19 +540,22 @@ For each release:
 5. run `deploy/finalize-release.sh <build-dir> <final-dir>` with explicit AMI,
    Lambda, KMS and IAM inputs; it binds all artifacts, policies and expected AWS
    configuration into one read-only manifest;
-6. update KMS, IAM, Lambda and the on-chain PCR commitment only from that final
-   bundle, then apply the manifest-bound browser CORS rule to the exact job bucket:
+6. obtain independent approval of the finalized release baseline and its pinned
+   SHA-256; candidate self-hashing is not approval;
+7. execute the reviewed cutover only through the mandatory deployment entrypoint:
    ```bash
-   aws s3api put-bucket-cors \
-     --bucket "$JOB_BUCKET" \
-     --cors-configuration "file://$FINAL_DIR/bucket-cors.json" \
-     --region eu-central-1
+   python3 job-api/deploy/deploy-release.py "$FINAL_DIR/release-manifest.json" \
+     --security-baseline "$APPROVED_SECURITY_BASELINE" \
+     --baseline-sha256 "$APPROVED_BASELINE_SHA256" \
+     --rpc-url "$SEPOLIA_RPC_URL" -- \
+     /path/to/reviewed-cutover-program its reviewed arguments
    ```
-7. run `deploy/verify-release.py <final-dir>/release-manifest.json --live
-   --rpc-url "$SEPOLIA_RPC_URL"` and fail the deployment unless the live chain
-   ID, Registry bytecode, Registry PCR commitment, and authorized DefiInsurance
-   signer, plus the job-bucket CORS, AMI, Lambda code/configuration, Function URL
-   authorization, KMS policy and IAM policies exactly match the manifest.
+   The cutover program applies the manifest-bound KMS, IAM, Lambda, on-chain PCR,
+   and job-bucket CORS changes. `deploy-release.py` then executes the required live
+   verifier with the same independently pinned baseline. Any inaccessible or
+   mismatched live state exits nonzero as deployed-but-unverified, never success.
+   See `job-api/deploy/RELEASE-GATES.md` for plan mode, rollback preparation, and
+   the complete baseline and authority requirements.
 
 Rebuild only when measured code or dependencies change. AMI snapshot and private
 S3 artifact storage remain while all compute is terminated.

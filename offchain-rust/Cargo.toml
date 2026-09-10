@@ -20,8 +20,8 @@ name = "usd8-settlement"
 path = "src/main.rs"
 
 [dependencies]
-alloy-primitives = "=1.6.0"
-alloy-sol-types = "=1.6.0"
+alloy-primitives = "=1.7.2"
+alloy-sol-types = "=1.7.2"
 async-trait = "=0.1.89"
 ciborium = "=0.2.2"
 hex = "=0.4.3"
