@@ -1,0 +1,17 @@
+{
+  "CORSRules": [
+    {
+      "AllowedMethods": ["GET"],
+      "AllowedOrigins": [
+        "https://usd8.fi",
+        "https://usd8-fi.github.io",
+        "http://127.0.0.1:4173",
+        "http://localhost:4173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173"
+      ],
+      "ExposeHeaders": ["Content-Length"],
+      "MaxAgeSeconds": 300
+    }
+  ]
+}

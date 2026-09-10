@@ -1,0 +1,15 @@
+{
+  "AllowOrigins": [
+    "https://usd8.fi",
+    "https://usd8-fi.github.io",
+    "http://127.0.0.1:4173",
+    "http://localhost:4173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173"
+  ],
+  "AllowMethods": ["GET"],
+  "AllowHeaders": ["content-type"],
+  "ExposeHeaders": ["cache-control", "x-usd8-score-cache"],
+  "MaxAge": 300,
+  "AllowCredentials": false
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=USD8 one-shot Nitro Enclave settlement job
+After=network-online.target nitro-enclaves-allocator.service
+Wants=network-online.target
+Requires=nitro-enclaves-allocator.service
+ConditionPathExists=/run/usd8/job.env
+SuccessAction=poweroff
+FailureAction=poweroff
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/usd8/release.env
+EnvironmentFile=/run/usd8/job.env
+ExecStart=/opt/usd8/usd8-tee-parent
+TimeoutStartSec=25min
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/usd8 /run/nitro_enclaves /var/log/nitro_enclaves
