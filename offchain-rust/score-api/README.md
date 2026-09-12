@@ -28,6 +28,13 @@ The public display score ordinarily uses a fixed UTC daily snapshot, separate fr
 `grossEarnedScore` is the visible total accrued through that daily reference block.
 `maturedGrossEarnedScore` is accrued only through `scoreCutoffBlock` (`referenceBlock - minHoldingRequired`). `availableScore` is `max(maturedGrossEarnedScore - scoreSpent, 0)`, so recent score remains visible but cannot be spent before it matures. Claim/settlement code must independently replay the authoritative score and must not use this public snapshot.
 
+The public Score service uses a score-only maximum initial `eth_getLogs` range of 5,000
+blocks to reduce empty-history request overhead. This does not change settlement's measured
+`BootstrapConfig`/`MAX_LOG_RANGE` of 1,000 blocks. Score queries retain the 1,000-result cap,
+response-byte cap, adaptive range bisection, complete single-block receipt fallback, and the
+reader's per-chunk request, transport-attempt, bisection, and duration budgets. The wider
+initial range therefore changes request granularity, not completeness or fail-closed behavior.
+
 The same response also includes `snapshotTimestamp`, `grossScorePerSecond`, and
 `maturingScorePerSecond` so the frontend can extrapolate Total and Available Score locally
 between daily snapshots without polling. Rates use the protocol's twelve-second block target

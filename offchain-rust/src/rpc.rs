@@ -1,4 +1,4 @@
-use crate::config::{MAX_LOG_RANGE, MAX_LOG_RESULT_CAP};
+use crate::config::MAX_LOG_RESULT_CAP;
 use async_trait::async_trait;
 use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -16,6 +16,9 @@ const MAX_RPC_TIMEOUT_MS: u64 = 120_000;
 const MAX_RPC_RETRIES: u32 = 8;
 const MAX_RPC_RETRY_DELAY_MS: u64 = 10_000;
 const DEFAULT_RPC_RESPONSE_BYTE_CAP: usize = 16 * 1024 * 1024;
+// Hard ceiling for callers that use a wider initial query before the same
+// result-cap bisection and per-chunk safety budgets apply.
+const MAX_INITIAL_LOG_RANGE: u64 = 5_000;
 const MAX_LOG_REQUESTS_PER_CHUNK: u64 = 4_096;
 const MAX_LOG_BISECTIONS_PER_CHUNK: u64 = 2_048;
 const MAX_LOG_TRANSPORT_ATTEMPTS_PER_CHUNK: u64 =
@@ -743,7 +746,7 @@ pub async fn get_logs_chunked<R: Rpc + ?Sized>(
     result_cap: usize,
 ) -> Result<(Vec<RpcLog>, LogMetrics), RpcError> {
     if max_range == 0
-        || max_range > MAX_LOG_RANGE
+        || max_range > MAX_INITIAL_LOG_RANGE
         || result_cap == 0
         || result_cap > MAX_LOG_RESULT_CAP as usize
     {

@@ -351,7 +351,7 @@ fn filter() -> LogFilter {
 }
 
 #[tokio::test]
-async fn chunked_logs_recover_silent_caps_and_preserve_order() {
+async fn score_sized_initial_log_range_recovers_silent_caps_and_preserves_order() {
     let source = vec![
         log(1, 0),
         log(2, 1),
@@ -366,7 +366,7 @@ async fn chunked_logs_recover_silent_caps_and_preserve_order() {
         calls: Arc::new(Mutex::new(Vec::new())),
         error: None,
     };
-    let (logs, metrics) = get_logs_chunked(&rpc, &filter(), 1, 6, 1000, 3)
+    let (logs, metrics) = get_logs_chunked(&rpc, &filter(), 1, 6, 5_000, 3)
         .await
         .unwrap();
     assert_eq!(logs.len(), 6);
@@ -378,6 +378,24 @@ async fn chunked_logs_recover_silent_caps_and_preserve_order() {
     );
     assert!(metrics.bisections > 0);
     assert!(rpc.calls.lock().unwrap().len() > 1);
+}
+
+#[tokio::test]
+async fn initial_log_range_above_hard_ceiling_is_rejected() {
+    let error = get_logs_chunked(
+        &StaticLogs {
+            logs: Arc::new(Vec::new()),
+        },
+        &filter(),
+        1,
+        5_001,
+        5_001,
+        1_000,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, RpcError::InvalidLogPolicy));
 }
 
 #[derive(Clone)]

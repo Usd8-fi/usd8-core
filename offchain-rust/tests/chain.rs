@@ -1,9 +1,13 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Barrier;
+use usd8_settlement::Address;
 use usd8_settlement::chain::{
-    assert_anchors_unchanged, assert_contract_code_at, chain_id, finalized_settlement_anchors,
+    assert_anchors_unchanged, assert_contract_code_at, chain_id, erc20_transfers_for_accounts,
+    finalized_settlement_anchors,
 };
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
 
@@ -137,5 +141,75 @@ async fn historical_code_check_rejects_eoa_or_missing_contract() {
         .unwrap_err()
         .to_string()
         .contains("Registry")
+    );
+}
+
+type BatchBarriers = Arc<Mutex<BTreeMap<String, (Arc<Barrier>, usize)>>>;
+
+#[derive(Clone, Default)]
+struct OverlapRpc {
+    batches: BatchBarriers,
+}
+
+#[async_trait]
+impl Rpc for OverlapRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        assert_eq!(method, "eth_getLogs");
+        let topics = params[0]["topics"].as_array().unwrap();
+        let options = topics
+            .iter()
+            .find(|topic| topic.is_array())
+            .expect("account topic options");
+        let key = serde_json::to_string(options).unwrap();
+        let barrier = {
+            let mut batches = self.batches.lock().unwrap();
+            let (barrier, requests) = batches
+                .entry(key)
+                .or_insert_with(|| (Arc::new(Barrier::new(2)), 0));
+            *requests += 1;
+            Arc::clone(barrier)
+        };
+        barrier.wait().await;
+        Ok(json!([]))
+    }
+
+    fn metrics(&self) -> RpcMetrics {
+        RpcMetrics::default()
+    }
+}
+
+#[tokio::test]
+async fn account_transfer_filters_overlap_within_every_batch() {
+    let rpc = OverlapRpc::default();
+    let accounts = (1..=65)
+        .map(|value| Address::from_bytes([value; 20]))
+        .collect::<BTreeSet<_>>();
+
+    let (transfers, metrics) = tokio::time::timeout(
+        Duration::from_secs(1),
+        erc20_transfers_for_accounts(
+            &rpc,
+            Address::from_bytes([0x80; 20]),
+            &accounts,
+            1,
+            1,
+            1_000,
+            1_000,
+        ),
+    )
+    .await
+    .expect("outgoing and incoming filters did not overlap")
+    .unwrap();
+
+    assert!(transfers.is_empty());
+    assert_eq!(metrics.requests, 4);
+    assert_eq!(
+        rpc.batches
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, requests)| *requests)
+            .collect::<Vec<_>>(),
+        vec![2, 2]
     );
 }

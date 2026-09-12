@@ -3885,9 +3885,14 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 name = "usd8-score-api"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "async-trait",
  "aws-config",
  "aws-sdk-dynamodb",
  "aws-types",
+ "futures-util",
+ "hex",
  "lambda_http",
  "num-bigint 0.5.1",
  "num-traits",
