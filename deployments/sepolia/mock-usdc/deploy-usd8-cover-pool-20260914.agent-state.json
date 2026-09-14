@@ -1,0 +1,70 @@
+{
+  "artifactSha256": "db155f8252ba3e6e325e54c23a546437a9cc827e0a1c9c418ac9812c4ba79c38",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 893,
+      "label": "BeaconProxy",
+      "transactionHash": "0x246a029ea65caa4f3d1215a2b47df80354c3adc9ab7e93dc85033ddcce795dd2",
+      "status": "confirmed",
+      "blockNumber": 11701610,
+      "contractAddress": "0x6388c3826902f7d7812e632d0b63ea44d9c1e5cf"
+    },
+    {
+      "index": 1,
+      "nonce": 894,
+      "label": "approve(address,uint256)",
+      "transactionHash": "0x7463aefd81564ba4a3c9c93a3382a84687fe008b685d5bc274e65c93964866c8",
+      "status": "confirmed",
+      "blockNumber": 11701611,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 895,
+      "label": "mintUSD8(uint256)",
+      "transactionHash": "0x5db739b55f584bd2f91de6b7bea4f7886709abd767d956b395b87f6753d8e018",
+      "status": "confirmed",
+      "blockNumber": 11701612,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 896,
+      "label": "approve(address,uint256)",
+      "transactionHash": "0xc53660fcf3c06abd5210d61178d77cb99bd57ee61a1ca268245235f42439caf3",
+      "status": "confirmed",
+      "blockNumber": 11701613,
+      "contractAddress": null
+    },
+    {
+      "index": 4,
+      "nonce": 897,
+      "label": "BeaconProxy",
+      "transactionHash": "0x983f3e318651d84fda0dc9a361b4bc4aded662c473be67c2a8398395e175d9d1",
+      "status": "confirmed",
+      "blockNumber": 11701614,
+      "contractAddress": null
+    },
+    {
+      "index": 5,
+      "nonce": 898,
+      "label": "updateAnswer(int256)",
+      "transactionHash": "0x15329197750bcae32101af6b80c5e3b3e92078ee00b0116057810b1c5cbbd7d7",
+      "status": "confirmed",
+      "blockNumber": 11701615,
+      "contractAddress": null
+    },
+    {
+      "index": 6,
+      "nonce": 899,
+      "label": "schedule(address,uint256,bytes,bytes32,bytes32,uint256)",
+      "transactionHash": "0x44a3a7010fef9e950d9d62b48f4252127f00beee1549731301a843671c20ec45",
+      "status": "confirmed",
+      "blockNumber": 11701616,
+      "contractAddress": null
+    }
+  ]
+}

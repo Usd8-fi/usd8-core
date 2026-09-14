@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "4753ac9c18a205c15bea9c250a50b4fdb077a2e014b06846c506a89fb28ac422",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 901,
+      "label": "setDepositCap(uint256)",
+      "transactionHash": "0x66e4181bf55d1eb660c79764f30bc0fe167322c956854100489127a6fb2988b2",
+      "status": "confirmed",
+      "blockNumber": 11701839,
+      "contractAddress": null
+    }
+  ]
+}
