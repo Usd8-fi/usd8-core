@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "81bea12058538f746f89dca32580e85ce85ababe0151bbc1cff11dae41f360f9",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 892,
+      "label": "TimelockController.executeBatch self-cover upgrade",
+      "transactionHash": "0x9a514fff9c99a929500267614598904715957e2e63ecd0f00110d85694e6afc0",
+      "status": "confirmed",
+      "blockNumber": 11701516,
+      "contractAddress": null
+    }
+  ]
+}

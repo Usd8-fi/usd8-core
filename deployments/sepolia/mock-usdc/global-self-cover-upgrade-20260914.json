@@ -1,0 +1,78 @@
+{
+  "chain": 11155111,
+  "network": "Ethereum Sepolia",
+  "purpose": "TESTNET ONLY: globally permit insured tokens to also be registered cover-pool assets",
+  "implementationSourceCommit": "44c8c79a76ec5cc76c88ac117074cfacb8de14ff",
+  "registryProxy": "0xB34D92cd05005DF36050370433819597a9BaC693",
+  "defiInsuranceProxy": "0x4E346CcD0a46D51ebaE6810d653791982968d502",
+  "timelock": "0x158494e7b95c0e5F87e8dB4Ad1Be5c32de99F645",
+  "operationId": "0x28e6a48eb4e97c9fbae98a1ed93407b22519c66833dd4a0ec30c18a4ad7a00d1",
+  "delaySeconds": 1800,
+  "oldImplementations": {
+    "registry": "0x1C3FA0b6efb61Df4b94f7AAbD4ec4BED63f1C52d",
+    "defiInsurance": "0xd4b928e6cb7aab9d52cd3a0bcf0155feadaf39cd"
+  },
+  "newImplementations": {
+    "registry": "0x810044C2a5514292fC81075fa2A909Ebf561623D",
+    "defiInsurance": "0x298Bc687B248B640F89D51f5dE35dEE1a9ac9061"
+  },
+  "runtimeEvidence": {
+    "registry": {
+      "sizeBytes": 14056,
+      "sha256": "908ac3552d6be9cba356d23775062e77145a04a45f3600d9b9f94f97f251aa79",
+      "compiledRuntimeExactMatch": true,
+      "proxiableUUID": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+      "implementationInitializerDisabled": true
+    },
+    "defiInsurance": {
+      "sizeBytes": 23655,
+      "sha256": "0c18724ec567ab113872eea6754c90d27ce8fc74c4c6091135dd08fb62c246b8",
+      "compiledRuntimeExactMatch": true,
+      "proxiableUUID": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+      "implementationInitializerDisabled": true
+    }
+  },
+  "upgradeCompatibility": {
+    "oldRegistryRuntimeExactParentCompilationMatch": true,
+    "oldDefiInsuranceRuntimeExactParentCompilationMatch": true,
+    "registryStorageLayoutSha256": "a2a8572da91b3d7cd434fffde461460ed3b50cb75d1ecad084227259733d8c5d",
+    "defiInsuranceStorageLayoutSha256": "7bbac2df22e16663264e9efe0e1042c64fd3619b07a56f6200c928c74e33bdf2",
+    "storageLayoutsIdenticalToPreviousImplementations": true
+  },
+  "transactions": {
+    "deployRegistryImplementation": "0xef6b9f9275406048bf2d71fde66dd14fa372f5d7ac802591f891fdb5f732cfb1",
+    "deployDefiInsuranceImplementation": "0xc71242d18137e6dde7d9186c3a7c572a81779d4f0463f6cf112c47e03451900b",
+    "scheduleBatch": "0x1ba1077d2fa559546ed4aad0c5ba496e85b1090598462944a94d33bc3b382288",
+    "executeBatch": "0x9a514fff9c99a929500267614598904715957e2e63ecd0f00110d85694e6afc0",
+    "executeBlock": 11701516,
+    "executeGasUsed": 98681
+  },
+  "postUpgradeState": {
+    "operationDone": true,
+    "betaMode": true,
+    "activeIncidentId": 0,
+    "nextIncidentId": 19,
+    "nextClaimId": 67,
+    "coverPoolsLength": 1,
+    "scoredTokensLength": 2,
+    "timelock": "0x158494e7b95c0e5F87e8dB4Ad1Be5c32de99F645",
+    "treasury": "0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3",
+    "usd8": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+    "defiInsurance": "0x4E346CcD0a46D51ebaE6810d653791982968d502",
+    "usd8PriceOracle": "0xf4AeDC595912cE5951c3a0AfDD8a61ebb07a8634",
+    "savingsVault": "0x7989B3EB6faD27e404b07433eBD265657359F4AB"
+  },
+  "semanticVerification": {
+    "description": "A read-only timelock-origin eth_call adding the registered wstETH cover-pool asset as an insured token now succeeds. It reverted with TokenConflict before the upgrade. The eth_call did not mutate state.",
+    "asset": "0xdfaf9C1CE55f18AB7850EDd84F2175ce734985fa",
+    "assetUsdFeed": "0x00E79aFB10A84D153803F00e73900803179D594e",
+    "beforeUpgradeRevertSelector": "0xd776b221",
+    "afterUpgradeCallResult": "0x",
+    "assetRemainsUninsuredAfterReadOnlyCall": true
+  },
+  "verificationRpcs": [
+    "https://ethereum-sepolia-rpc.publicnode.com",
+    "https://sepolia.gateway.tenderly.co"
+  ],
+  "verifiedAt": "2026-09-14T09:44:58+02:00"
+}

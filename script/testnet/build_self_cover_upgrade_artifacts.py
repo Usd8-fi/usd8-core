@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# dependencies = ["eth-abi", "eth-utils", "rlp", "eth-hash[pycryptodome]"]
+# ///
 """Build deterministic Sepolia artifacts for the global self-cover UUPS upgrade.
 
 This script does not load keys or broadcast. It freezes the current agent nonce,
@@ -27,7 +30,7 @@ ZERO32 = b"\0" * 32
 DELAY = 1_800
 
 
-def rpc(url: str, method: str, params: list[object]) -> object:
+def rpc(url: str, method: str, params: list[object]) -> str:
     request = Request(
         url,
         data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(),
@@ -37,7 +40,10 @@ def rpc(url: str, method: str, params: list[object]) -> object:
         payload = json.load(response)
     if "error" in payload:
         raise RuntimeError(f"{method}: {payload['error']}")
-    return payload["result"]
+    result = payload["result"]
+    if not isinstance(result, str):
+        raise RuntimeError(f"{method}: expected string result")
+    return result
 
 
 def selector(signature: str) -> bytes:
