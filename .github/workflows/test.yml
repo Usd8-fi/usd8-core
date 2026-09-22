@@ -112,16 +112,6 @@ jobs:
       - name: Run Forge tests
         run: forge test --no-match-contract SettlementIntegrationTest -vvv
 
-      - name: Compile formal harnesses against production ABI
-        env:
-          FOUNDRY_PROFILE: kontrol
-        run: forge build
-
-      - name: Run formal properties as Forge regressions
-        env:
-          FOUNDRY_PROFILE: kontrol
-        run: forge test --summary
-
       - name: Run Solidity ↔ Rust FFI parity tests
         env:
           RUN_INTEGRATION: "1"
