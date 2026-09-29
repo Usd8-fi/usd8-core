@@ -16,7 +16,7 @@ No vulnerability advisory, other maintenance warning, or yanked package is exemp
 - Yanked chacha20 0.10.1 lock entries were updated to 0.10.2.
 - RUSTSEC-2026-0253: S3 SDK 1.144.0 and Smithy HTTP client 1.4.0 permit patched lru 0.18.2.
 - RUSTSEC-2026-0173: Alloy primitives/sol-types 1.7.2 and its macro family remove proc-macro-error2 in favor of proc-macro-error3. ABI, typed-data, and golden payout vectors remain regression gates.
-- RUSTSEC-2023-0071: RustCrypto rsa was removed from job-api, including test resolution. Maintained aws-lc-rs 1.17.3 supplies fresh RSA2048 recipient keys and OAEP-SHA256/MGF1-SHA256 decryption. SPKI encoding, strict CMS parsing, empty OAEP label, AES key size, and zeroizing error/success buffers are covered by compatibility tests. Live Nitro verification is a separate release obligation.
+- RUSTSEC-2023-0071: RustCrypto rsa was removed from job-api, including test resolution. Maintained aws-lc-rs 1.18.1 supplies fresh RSA2048 recipient keys and OAEP-SHA256/MGF1-SHA256 decryption. SPKI encoding, strict CMS parsing, empty OAEP label, AES key size, and zeroizing error/success buffers are covered by compatibility tests. Live Nitro verification is a separate release obligation.
 
 ## Controlled four-graph gate
 
