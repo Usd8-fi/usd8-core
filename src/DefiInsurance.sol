@@ -421,7 +421,6 @@ contract DefiInsurance is
         }
         if (isNew) {
             // Add a new token.
-            if (registry().coverPool(insuredToken) != address(0)) revert TokenConflict();
             emit InsuredTokenAdded(insuredToken);
         } else if (_activeIncidentId() != 0) {
             revert IncidentsActive();

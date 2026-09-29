@@ -440,9 +440,6 @@ contract Registry is Initializable, UUPSUpgradeable {
         IERC20 asset = ICoverPool(pool).asset();
         if (address(asset) == address(0)) revert ZeroAddress();
         if (coverPool[asset] != address(0)) revert PoolExists(asset);
-        if (defiInsurance != address(0) && IDefiInsurance(defiInsurance).isInsuredToken(asset)) {
-            revert TokenConflict(asset);
-        }
         coverPool[asset] = pool;
         address oldFeed = assetUsdFeed[asset];
         assetUsdFeed[asset] = usdFeed;

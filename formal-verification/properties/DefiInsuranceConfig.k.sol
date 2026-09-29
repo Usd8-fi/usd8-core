@@ -202,17 +202,17 @@ contract DefiInsuranceConfigKontrolTest is DefiInsuranceKontrolBase {
         assert(defi.getInsuredToken(IERC20(address(insured))).maxCoverageBps == 1);
     }
 
-    function test_editInsuredTokenRejectsCoverPoolAsset() public {
+    function test_editInsuredTokenAcceptsCoverPoolAsset() public {
         DefiInsuranceHarnessPool pool = _registerPool(100, 50);
-        (bool success, bytes memory data) = address(defi)
+        (bool success,) = address(defi)
             .call(
                 abi.encodeCall(
                     DefiInsurance.editInsuredToken, (pool.asset(), uint256(1), address(feed), address(0), bytes(""))
                 )
             );
-        assert(!success);
-        assert(_sameBytes(data, abi.encodeWithSelector(DefiInsurance.TokenConflict.selector)));
-        assert(!defi.isInsuredToken(pool.asset()));
+        assert(success);
+        assert(defi.isInsuredToken(pool.asset()));
+        assert(defi.getInsuredToken(pool.asset()).maxCoverageBps == 1);
         assert(registry.coverPool(pool.asset()) == address(pool));
     }
 

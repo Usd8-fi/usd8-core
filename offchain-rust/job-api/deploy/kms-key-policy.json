@@ -27,6 +27,13 @@
       "Resource": "*"
     },
     {
+      "Sid": "ReadOnlyGrantAudit",
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::919437049909:user/hermes-tee-agent"},
+      "Action": "kms:ListGrants",
+      "Resource": "*"
+    },
+    {
       "Sid": "AttestedEnclaveDecryptOnly",
       "Effect": "Allow",
       "Principal": {"AWS": "arn:aws:iam::919437049909:role/USD8TeeInstanceRole"},

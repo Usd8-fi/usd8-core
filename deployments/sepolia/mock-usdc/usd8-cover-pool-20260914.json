@@ -1,0 +1,74 @@
+{
+  "chainId": 11155111,
+  "network": "sepolia",
+  "purpose": "Deploy, seed, register, and cap the USD8-denominated Cover Pool",
+  "sourceCommit": "73a00804d5e3048c17307acbf475e7110313dcb7",
+  "pool": {
+    "address": "0x6388c3826902F7D7812E632D0B63ea44D9C1e5Cf",
+    "name": "USD8 Cover Pool",
+    "symbol": "USD8-cp-USD8",
+    "shareDecimals": 21,
+    "asset": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+    "rewardToken": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+    "assetOracle": "0xf4AeDC595912cE5951c3a0AfDD8a61ebb07a8634",
+    "beacon": "0xe935806dC8B8C7b52E98dfA864A10E4bd9688e00",
+    "registry": "0xB34D92cd05005DF36050370433819597a9BaC693",
+    "depositCapAssets": "10000000000000000000000",
+    "depositCapDisplay": "10000 USD8",
+    "seedAssets": "1000000000000000000",
+    "seedDisplay": "1 USD8",
+    "seedReceiver": "0x000000000000000000000000000000000000dEaD",
+    "seedShares": "1000000000000000000000"
+  },
+  "deployment": {
+    "artifact": "deploy-usd8-cover-pool-20260914.json",
+    "artifactSha256": "db155f8252ba3e6e325e54c23a546437a9cc827e0a1c9c418ac9812c4ba79c38",
+    "transactions": [
+      { "nonce": 893, "action": "deploy pool", "hash": "0x246a029ea65caa4f3d1215a2b47df80354c3adc9ab7e93dc85033ddcce795dd2", "blockNumber": 11701610 },
+      { "nonce": 894, "action": "approve seed USDC", "hash": "0x7463aefd81564ba4a3c9c93a3382a84687fe008b685d5bc274e65c93964866c8", "blockNumber": 11701611 },
+      { "nonce": 895, "action": "mint seed USD8", "hash": "0x5db739b55f584bd2f91de6b7bea4f7886709abd767d956b395b87f6753d8e018", "blockNumber": 11701612 },
+      { "nonce": 896, "action": "approve pool seed", "hash": "0xc53660fcf3c06abd5210d61178d77cb99bd57ee61a1ca268245235f42439caf3", "blockNumber": 11701613 },
+      { "nonce": 897, "action": "deposit permanent seed", "hash": "0x983f3e318651d84fda0dc9a361b4bc4aded662c473be67c2a8398395e175d9d1", "blockNumber": 11701614 },
+      { "nonce": 898, "action": "refresh test USDC/USD feed at unchanged $1 answer", "hash": "0x15329197750bcae32101af6b80c5e3b3e92078ee00b0116057810b1c5cbbd7d7", "blockNumber": 11701615 },
+      { "nonce": 899, "action": "schedule Registry registration", "hash": "0x44a3a7010fef9e950d9d62b48f4252127f00beee1549731301a843671c20ec45", "blockNumber": 11701616 }
+    ]
+  },
+  "registration": {
+    "timelock": "0x158494e7b95c0e5F87e8dB4Ad1Be5c32de99F645",
+    "salt": "0x44a7fb7bb16f0ccdccc2e5e8801e286449414243804acf094722a41ddc60a358",
+    "operationId": "0xdf37838ff64586598500d32a956c9ccdb6b78309e55b5adf2eb7ae3c337d4cbf",
+    "readyAt": 1789374900,
+    "executionTransaction": "0x6b1ade616666fe1cb67f8ecf43ca4723537cb148f196b72e95eeddb65c72d572",
+    "executionBlock": 11701766,
+    "gasUsed": 242405,
+    "status": "confirmed"
+  },
+  "capacity": {
+    "artifact": "set-usd8-cover-pool-cap-10000-20260914.json",
+    "artifactSha256": "4753ac9c18a205c15bea9c250a50b4fdb077a2e014b06846c506a89fb28ac422",
+    "transaction": "0x66e4181bf55d1eb660c79764f30bc0fe167322c956854100489127a6fb2988b2",
+    "blockNumber": 11701839,
+    "gasUsed": 68590,
+    "status": "confirmed"
+  },
+  "verification": {
+    "rpcEndpoints": [
+      "https://ethereum-sepolia-rpc.publicnode.com",
+      "https://sepolia.gateway.tenderly.co"
+    ],
+    "operationDone": true,
+    "registryPoolMappingMatches": true,
+    "registryOracleMappingMatches": true,
+    "poolTopology": [
+      "0x55cb69271da9937d0Cb3c548409FD3f77586dF79",
+      "0x6388c3826902F7D7812E632D0B63ea44D9C1e5Cf"
+    ],
+    "activeIncidentId": "0",
+    "totalAssets": "1000000000000000000",
+    "depositCap": "10000000000000000000000",
+    "remainingCapacity": "9999000000000000000000",
+    "contractTests": { "passed": 519, "failed": 0, "skipped": 5 },
+    "forgeBuild": "passed",
+    "forgeFmtCheck": "passed"
+  }
+}

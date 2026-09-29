@@ -14,12 +14,16 @@ use usd8_settlement::chain::{
     defi_insurance_at, erc20_transfers_for_accounts, finalized_block, score_config_at,
     spent_score_at,
 };
-use usd8_settlement::config::{LOG_RESULT_CAP, MAX_LOG_RANGE};
+use usd8_settlement::config::LOG_RESULT_CAP;
 use usd8_settlement::rpc::{LogMetrics, Rpc};
 use usd8_settlement::score::score_cutoff_block;
 
 const CHECKPOINT_SCHEMA_VERSION: u32 = 3;
 pub const SCORE_SNAPSHOT_VERSION: u32 = 3;
+const MAX_PARALLEL_TOKEN_REPLAYS: usize = 4;
+// Score-only performance bound. Settlement continues to pass the committed
+// MAX_LOG_RANGE (1,000); all generic reader result and bisection bounds remain.
+const SCORE_MAX_INITIAL_LOG_RANGE: u64 = 5_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScoreNetwork {
@@ -504,57 +508,85 @@ async fn score_to_block<R: Rpc + ?Sized>(
     let mut missed = false;
     let tracked = BTreeSet::from([account]);
 
-    for scored in scored_tokens {
-        let Some(starting_block) = first_contributing_block(scored, target_block) else {
-            continue;
-        };
-        let stored = previous_tokens
-            .iter()
-            .find(|item| item.token == scored.token.to_string());
-        let mut checkpoint = if let Some(stored) = stored {
-            let cursor = checkpoint_cursor(stored)?;
-            let current_hash = block_by_number(rpc, cursor).await?.hash;
-            if !current_hash.eq_ignore_ascii_case(&stored.cursor_block_hash) {
-                return Err(IncrementalScoreError::CheckpointBlockHash);
+    for scored_chunk in scored_tokens.chunks(MAX_PARALLEL_TOKEN_REPLAYS) {
+        let replayed = futures_util::future::try_join_all(scored_chunk.iter().map(|scored| {
+            let tracked = &tracked;
+            async move {
+                let Some(starting_block) = first_contributing_block(scored, target_block) else {
+                    return Ok::<_, IncrementalScoreError>((
+                        None,
+                        BigUint::zero(),
+                        LogMetrics::default(),
+                        false,
+                        false,
+                    ));
+                };
+                let stored = previous_tokens
+                    .iter()
+                    .find(|item| item.token == scored.token.to_string());
+                let mut checkpoint = if let Some(stored) = stored {
+                    let cursor = checkpoint_cursor(stored)?;
+                    let current_hash = block_by_number(rpc, cursor).await?.hash;
+                    if !current_hash.eq_ignore_ascii_case(&stored.cursor_block_hash) {
+                        return Err(IncrementalScoreError::CheckpointBlockHash);
+                    }
+                    stored.clone()
+                } else {
+                    let balance = balance_of_at(rpc, scored.token, account, starting_block).await?;
+                    let hash = block_by_number(rpc, starting_block).await?.hash;
+                    new_token_checkpoint(scored, starting_block, balance, hash)
+                };
+                let cursor = checkpoint_cursor(&checkpoint)?;
+                let (transfer_metrics, token_advanced) = if cursor < target_block {
+                    let (transfers, transfer_metrics) = erc20_transfers_for_accounts(
+                        rpc,
+                        scored.token,
+                        tracked,
+                        cursor + 1,
+                        target_block,
+                        SCORE_MAX_INITIAL_LOG_RANGE,
+                        LOG_RESULT_CAP,
+                    )
+                    .await?;
+                    advance_token_checkpoint(
+                        &mut checkpoint,
+                        scored,
+                        account,
+                        &transfers,
+                        target_block,
+                        target_block_hash.to_owned(),
+                    )?;
+                    (transfer_metrics, true)
+                } else if cursor > target_block {
+                    return Err(IncrementalScoreError::CursorRollback);
+                } else {
+                    (LogMetrics::default(), false)
+                };
+                let actual_balance =
+                    balance_of_at(rpc, scored.token, account, target_block).await?;
+                if checkpoint_balance(&checkpoint)? != actual_balance {
+                    return Err(IncrementalScoreError::Malformed("replayedBalance"));
+                }
+                let token_numerator = token_numerator(&checkpoint, scored, target_block)?;
+                Ok((
+                    Some(checkpoint),
+                    token_numerator,
+                    transfer_metrics,
+                    token_advanced,
+                    stored.is_none(),
+                ))
             }
-            stored.clone()
-        } else {
-            missed = true;
-            let balance = balance_of_at(rpc, scored.token, account, starting_block).await?;
-            let hash = block_by_number(rpc, starting_block).await?.hash;
-            new_token_checkpoint(scored, starting_block, balance, hash)
-        };
-        let cursor = checkpoint_cursor(&checkpoint)?;
-        if cursor < target_block {
-            let (transfers, transfer_metrics) = erc20_transfers_for_accounts(
-                rpc,
-                scored.token,
-                &tracked,
-                cursor + 1,
-                target_block,
-                MAX_LOG_RANGE,
-                LOG_RESULT_CAP,
-            )
-            .await?;
-            metrics = merge_metrics(metrics, transfer_metrics);
-            advance_token_checkpoint(
-                &mut checkpoint,
-                scored,
-                account,
-                &transfers,
-                target_block,
-                target_block_hash.to_owned(),
-            )?;
-            advanced = true;
-        } else if cursor > target_block {
-            return Err(IncrementalScoreError::CursorRollback);
+        }))
+        .await?;
+        for (checkpoint, token_numerator, token_metrics, token_advanced, token_missed) in replayed {
+            if let Some(checkpoint) = checkpoint {
+                next_tokens.push(checkpoint);
+            }
+            numerator += token_numerator;
+            metrics = merge_metrics(metrics, token_metrics);
+            advanced |= token_advanced;
+            missed |= token_missed;
         }
-        let actual_balance = balance_of_at(rpc, scored.token, account, target_block).await?;
-        if checkpoint_balance(&checkpoint)? != actual_balance {
-            return Err(IncrementalScoreError::Malformed("replayedBalance"));
-        }
-        numerator += token_numerator(&checkpoint, scored, target_block)?;
-        next_tokens.push(checkpoint);
     }
     Ok((next_tokens, numerator, metrics, advanced, missed))
 }
@@ -608,9 +640,13 @@ pub async fn compute_incremental_score_at<R: Rpc + ?Sized>(
             &cutoff_anchor.hash,
         )
         .await?;
-    let previous_visible_tokens = previous
-        .as_ref()
-        .map_or(&[][..], |checkpoint| checkpoint.visible_tokens.as_slice());
+    // A cold calculation has already proven and replayed the complete history through the
+    // maturity cutoff. Continue the visible view from that exact checkpoint instead of
+    // redundantly replaying the account's full history a second time.
+    let previous_visible_tokens = previous.as_ref().map_or_else(
+        || matured_tokens.as_slice(),
+        |checkpoint| checkpoint.visible_tokens.as_slice(),
+    );
     let (visible_tokens, visible_numerator, visible_metrics, visible_advanced, visible_missed) =
         score_to_block(
             rpc,

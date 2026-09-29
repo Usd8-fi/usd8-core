@@ -64,6 +64,15 @@ class MeasuredRegistryTest(unittest.TestCase):
         self.assertIn('USD8_PRECHECK_RPC_URL: $precheckRpcUrlSha256', source)
         self.assertNotIn('USD8_PRECHECK_RPC_URL: $USD8_PRECHECK_RPC_URL', source)
 
+    def test_finalization_supports_score_composition_and_current_runtime_environment(self):
+        source = FINALIZE_RELEASE.read_text()
+        self.assertIn('SCORE_PACKAGE', source)
+        self.assertIn('SCORE_CONFIG_JSON', source)
+        self.assertIn('scoreLambda', source)
+        self.assertIn('USD8_DEFI_INSURANCE: $defiInsurance', source)
+        self.assertIn('deploy-release.py', source)
+        self.assertNotIn('RELEASE_DEPLOYED_AND_LIVE_VERIFIED', source)
+
     def test_finalization_labels_output_as_a_candidate_pending_live_verification(self) -> None:
         source = FINALIZE_RELEASE.read_text()
         self.assertIn('RELEASE_CANDIDATE_CREATED=', source)

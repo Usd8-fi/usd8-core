@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "d4f84b5304c4b1f83a62339ce3f92285808be166952ec8b29854f8d0e1a40aa2",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 900,
+      "label": "execute(address,uint256,bytes,bytes32,bytes32)",
+      "transactionHash": "0x6b1ade616666fe1cb67f8ecf43ca4723537cb148f196b72e95eeddb65c72d572",
+      "status": "confirmed",
+      "blockNumber": 11701766,
+      "contractAddress": null
+    }
+  ]
+}

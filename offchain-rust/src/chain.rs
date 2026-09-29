@@ -1593,9 +1593,26 @@ pub async fn erc20_transfers_for_accounts<R: Rpc + ?Sized>(
                 ],
             },
         ];
-        for filter in filters {
-            let (logs, query_metrics) =
-                get_logs_chunked(rpc, &filter, from_block, to_block, max_range, result_cap).await?;
+        let [outgoing_filter, incoming_filter] = filters;
+        let (outgoing, incoming) = tokio::try_join!(
+            get_logs_chunked(
+                rpc,
+                &outgoing_filter,
+                from_block,
+                to_block,
+                max_range,
+                result_cap
+            ),
+            get_logs_chunked(
+                rpc,
+                &incoming_filter,
+                from_block,
+                to_block,
+                max_range,
+                result_cap
+            )
+        )?;
+        for (logs, query_metrics) in [outgoing, incoming] {
             metrics = merge_log_metrics(metrics, query_metrics);
             for log in logs {
                 let key = (log.block_number, log.log_index);

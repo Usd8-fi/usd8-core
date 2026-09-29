@@ -10,7 +10,7 @@
     {
       "Sid": "UseDedicatedScoreCheckpointTable",
       "Effect": "Allow",
-      "Action": ["dynamodb:GetItem", "dynamodb:PutItem"],
+      "Action": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
       "Resource": "arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints-sepolia"
     }
   ]

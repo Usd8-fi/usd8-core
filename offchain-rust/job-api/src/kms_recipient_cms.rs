@@ -18,28 +18,38 @@ pub struct KmsRecipientEnvelope {
 
 #[cfg(feature = "worker")]
 pub fn decrypt_kms_recipient_envelope(
-    private_key: &rsa::RsaPrivateKey,
+    private_key: aws_lc_rs::rsa::PrivateDecryptingKey,
     envelope: &KmsRecipientEnvelope,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, &'static str> {
+    use aws_lc_rs::rsa::{OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey};
     use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
-    use rsa::Oaep;
-    use sha2::Sha256;
 
-    let symmetric_key = zeroize::Zeroizing::new(
-        private_key
-            .decrypt(Oaep::new::<Sha256>(), &envelope.encrypted_key)
-            .map_err(|_| "RSA_UNWRAP_FAILED")?,
-    );
-    if symmetric_key.len() != 32 || envelope.iv.len() != 16 {
+    // Consume the per-request key: no reuse or private-key serialization.
+    let private_key =
+        OaepPrivateDecryptingKey::new(private_key).map_err(|_| "RSA_UNWRAP_FAILED")?;
+    // AWS-LC requires a modulus-sized output buffer. Keep its full initialized
+    // length until drop so even failed/short decrypt output is wiped.
+    let mut symmetric_key = zeroize::Zeroizing::new(vec![0u8; private_key.min_output_size()]);
+    let symmetric_key_len = private_key
+        .decrypt(
+            &OAEP_SHA256_MGF1SHA256,
+            &envelope.encrypted_key,
+            symmetric_key.as_mut_slice(),
+            None, // Empty OAEP label, matching the strictly parsed CMS parameters.
+        )
+        .map_err(|_| "RSA_UNWRAP_FAILED")?
+        .len();
+    drop(private_key);
+    if symmetric_key_len != 32 || envelope.iv.len() != 16 {
         return Err("CMS_KEY_OR_IV_LENGTH");
     }
+    let symmetric_key = &symmetric_key[..symmetric_key_len];
     let mut plaintext = zeroize::Zeroizing::new(envelope.ciphertext.clone());
-    let plaintext_len =
-        cbc::Decryptor::<aes::Aes256>::new_from_slices(symmetric_key.as_slice(), &envelope.iv)
-            .map_err(|_| "CMS_KEY_OR_IV_LENGTH")?
-            .decrypt_padded_mut::<Pkcs7>(plaintext.as_mut_slice())
-            .map_err(|_| "CMS_CONTENT_DECRYPT_FAILED")?
-            .len();
+    let plaintext_len = cbc::Decryptor::<aes::Aes256>::new_from_slices(symmetric_key, &envelope.iv)
+        .map_err(|_| "CMS_KEY_OR_IV_LENGTH")?
+        .decrypt_padded_mut::<Pkcs7>(plaintext.as_mut_slice())
+        .map_err(|_| "CMS_CONTENT_DECRYPT_FAILED")?
+        .len();
     plaintext.truncate(plaintext_len);
     Ok(plaintext)
 }

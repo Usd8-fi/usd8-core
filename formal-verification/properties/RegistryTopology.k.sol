@@ -207,7 +207,7 @@ contract RegistryTopologyKontrolTest is Test {
         assert(assets[2] == assetC && pools[2] == address(poolC));
     }
 
-    function test_addPoolRejectsZeroDuplicateConflictAndUnauthorizedAtomically() public {
+    function test_addPoolRejectsZeroDuplicateAndUnauthorizedButAcceptsInsuredAssetAtomically() public {
         registry.addPool(address(poolA), address(feed));
         (bool duplicate, bytes memory duplicateData) =
             address(registry).call(abi.encodeCall(Registry.addPool, (address(poolA), address(feed))));
@@ -225,14 +225,15 @@ contract RegistryTopologyKontrolTest is Test {
         assert(!zeroAsset && _selector(zeroAssetData) == Registry.ZeroAddress.selector);
 
         insurance.setInsured(assetB, true);
-        (bool conflict, bytes memory conflictData) =
+        (bool insuredAssetAdded,) =
             address(registry).call(abi.encodeCall(Registry.addPool, (address(poolB), address(feed))));
-        assert(!conflict && _selector(conflictData) == Registry.TokenConflict.selector);
+        assert(insuredAssetAdded);
         (bool unauthorized, bytes memory unauthorizedData) =
             _callAs(ADMIN, abi.encodeCall(Registry.addPool, (address(poolC), address(feed))));
         assert(!unauthorized && _selector(unauthorizedData) == Registry.UnauthorizedTimelock.selector);
-        assert(registry.coverPoolsLength() == 1);
+        assert(registry.coverPoolsLength() == 2);
         _assertAligned(0, assetA, address(poolA));
+        _assertAligned(1, assetB, address(poolB));
     }
 
     function test_removeFirstUsesSwapAndPopAndDeletesOnlyRemovedMappings() public {

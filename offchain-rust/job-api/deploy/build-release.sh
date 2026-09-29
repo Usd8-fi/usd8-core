@@ -28,8 +28,10 @@ CONTEXT="$STAGE/context"
 RELEASE="$STAGE/release"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$CONTEXT" "$RELEASE" "$STAGE/source"
-git -C "$REPO_ROOT" archive "$GIT_COMMIT" offchain-rust | tar -x -C "$STAGE/source"
+git -C "$REPO_ROOT" archive "$GIT_COMMIT" offchain-rust .github/workflows | tar -x -C "$STAGE/source"
 ROOT="$STAGE/source/offchain-rust"
+# CI and the actual Linux release path exercise independent Cargo graphs.
+USD8_REGISTRY="$REGISTRY" bash "$ROOT/job-api/deploy/release-quality-gates.sh"
 
 SOURCE_SHA256=$(python3 - "$ROOT" <<'PY'
 import hashlib

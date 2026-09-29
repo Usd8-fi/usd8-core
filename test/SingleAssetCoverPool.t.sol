@@ -446,12 +446,13 @@ contract SingleAssetCoverPoolTest is Test {
         registry.addPool(address(pool), FEED);
     }
 
-    function test_AddPoolRejectsInsuredToken() public {
+    function test_AddPoolAcceptsInsuredToken() public {
         SingleAssetCoverPool conflictingPool = _deployPool(IERC20(address(lp1)));
 
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(Registry.TokenConflict.selector, IERC20(address(lp1))));
         registry.addPool(address(conflictingPool), FEED);
+        assertEq(registry.coverPool(IERC20(address(lp1))), address(conflictingPool));
+        assertEq(registry.assetUsdFeed(IERC20(address(lp1))), FEED);
     }
 
     function test_RemovePool() public {
@@ -712,16 +713,58 @@ contract SingleAssetCoverPoolTest is Test {
 
     // ════════════════════ Insured token management ════════════════════
 
-    function test_AddInsuredTokenRejectsStakeAsset() public {
+    function test_AddInsuredTokenAcceptsStakeAsset() public {
         vm.prank(admin);
-        vm.expectRevert(DefiInsurance.TokenConflict.selector);
         defi.editInsuredToken(IERC20(address(usdc)), 8000, FEED, address(0), "");
+        assertEq(defi.getInsuredToken(IERC20(address(usdc))).maxCoverageBps, 8000);
     }
 
     function test_AddInsuredTokenAcceptsUSD8() public {
         vm.prank(admin);
         defi.editInsuredToken(IERC20(address(usd8)), 8000, FEED, address(0), "");
         assertEq(defi.getInsuredToken(IERC20(address(usd8))).maxCoverageBps, 8000);
+    }
+
+    function test_SameTokenCanBeInsuredAndFundItsOwnClaim() public {
+        SingleAssetCoverPool usd8Pool = _deployPool(IERC20(address(usd8)));
+        vm.startPrank(admin);
+        defi.editInsuredToken(IERC20(address(usd8)), 8000, FEED, address(0), "");
+        registry.addPool(address(usd8Pool), FEED);
+
+        usd8.mint(alice, 100e18);
+        usd8.mint(bob, 60e18);
+        usd8.mint(admin, 5e18);
+        usd8.approve(address(usd8Pool), 5e18);
+        vm.stopPrank();
+
+        vm.startPrank(alice);
+        usd8.approve(address(usd8Pool), 100e18);
+        usd8Pool.deposit(100e18, alice);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        usd8Pool.receiveProfitDistribution(5e18);
+
+        vm.prank(admin);
+        defi.openClaimIncident(IERC20(address(usd8)), uint64(block.number - 1));
+        vm.startPrank(bob);
+        usd8.approve(address(defi), 60e18);
+        uint256 claimId = defi.fileClaim(IERC20(address(usd8)), 50e18, 1, 0, 0, "");
+        vm.stopPrank();
+
+        uint256[] memory amounts = new uint256[](2);
+        amounts[1] = 40e18;
+        (,,,, uint64 claimDeadline,,,,,) = defi.incidents(1);
+        vm.warp(claimDeadline + 1);
+        _settle(1, _leaf(1, claimId, bob, amounts));
+        (,,,, uint64 correctionDeadline,,,,,) = defi.incidents(1);
+        vm.warp(correctionDeadline + 1);
+        _finalize(claimId, amounts, 1);
+
+        assertEq(usd8.balanceOf(bob), 50e18); // 40 payout + returned 10 bond.
+        assertEq(usd8Pool.totalAssets(), 50e18); // 40 claimant + 10 protocol fee.
+        assertEq(usd8Pool.rewardReserve(), 5e18);
+        assertEq(usd8.balanceOf(address(usd8Pool)), 55e18);
     }
 
     /// @dev End-to-end USD8 self-cover: the TEE attests a backing loss off-chain

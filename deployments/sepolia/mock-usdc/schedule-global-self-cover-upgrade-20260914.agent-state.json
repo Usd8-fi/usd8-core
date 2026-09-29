@@ -1,0 +1,34 @@
+{
+  "artifactSha256": "a5806369101439b5e9d32e63c30b7cb79cdf6cbec7938db199ec9f29509009fa",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 889,
+      "label": "Registry implementation",
+      "transactionHash": "0xef6b9f9275406048bf2d71fde66dd14fa372f5d7ac802591f891fdb5f732cfb1",
+      "status": "confirmed",
+      "blockNumber": 11701364,
+      "contractAddress": "0x810044c2a5514292fc81075fa2a909ebf561623d"
+    },
+    {
+      "index": 1,
+      "nonce": 890,
+      "label": "DefiInsurance implementation",
+      "transactionHash": "0xc71242d18137e6dde7d9186c3a7c572a81779d4f0463f6cf112c47e03451900b",
+      "status": "confirmed",
+      "blockNumber": 11701365,
+      "contractAddress": "0x298bc687b248b640f89d51f5de35dee1a9ac9061"
+    },
+    {
+      "index": 2,
+      "nonce": 891,
+      "label": "TimelockController.scheduleBatch self-cover upgrade",
+      "transactionHash": "0x1ba1077d2fa559546ed4aad0c5ba496e85b1090598462944a94d33bc3b382288",
+      "status": "confirmed",
+      "blockNumber": 11701366,
+      "contractAddress": null
+    }
+  ]
+}

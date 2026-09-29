@@ -112,9 +112,49 @@ struct RuntimeNetwork {
     rpc: HttpRpc,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkPolicy {
+    calculation_timeout_ms: u64,
+    lease_seconds: u64,
+    failure_cooldown_seconds: u64,
+    budget_window_seconds: u64,
+    budget_max_attempts: u64,
+}
+impl WorkPolicy {
+    fn from_json(raw: Option<&str>) -> Result<Self, Error> {
+        let policy: Self = match raw {
+            Some(raw) => serde_json::from_str(raw)?,
+            None => Self::default(),
+        };
+        if !(1..=25_000).contains(&policy.calculation_timeout_ms)
+            || !(1..=300).contains(&policy.lease_seconds)
+            || policy.lease_seconds < policy.calculation_timeout_ms.div_ceil(1000) + 5
+            || !(1..=3600).contains(&policy.failure_cooldown_seconds)
+            || !(policy.lease_seconds..=86_400).contains(&policy.budget_window_seconds)
+            || !(1..=1000).contains(&policy.budget_max_attempts)
+        {
+            return Err("invalid USD8_SCORE_WORK_POLICY_JSON bounds".into());
+        }
+        Ok(policy)
+    }
+}
+impl Default for WorkPolicy {
+    fn default() -> Self {
+        Self {
+            calculation_timeout_ms: 20_000,
+            lease_seconds: 30,
+            failure_cooldown_seconds: 30,
+            budget_window_seconds: 60,
+            budget_max_attempts: 10,
+        }
+    }
+}
+
 struct App {
     dynamodb: aws_sdk_dynamodb::Client,
     table: String,
+    work_policy: WorkPolicy,
     networks: BTreeMap<u64, RuntimeNetwork>,
     allowed_origin: String,
 }
@@ -236,7 +276,100 @@ fn checkpoint_key(chain_id: u64, registry: Address, account: Address) -> String 
     format!("{chain_id}#{registry}#{account}")
 }
 
+#[derive(Debug)]
+struct Lease {
+    generation: u64,
+}
+
 impl App {
+    // Shared by every chain/Registry/account in this table, not a process-local limiter.
+    // Tokens are never refunded: failed attempts also consume the work budget.
+    async fn reserve_budget(&self, now: u64) -> Result<bool, Error> {
+        let request = self
+            .dynamodb
+            .update_item()
+            .table_name(&self.table)
+            .key(
+                "pk",
+                AttributeValue::S(format!(
+                    "work-budget#{}",
+                    now / self.work_policy.budget_window_seconds
+                )),
+            )
+            .update_expression("SET expiresAt = :ttl ADD used :one")
+            .condition_expression("attribute_not_exists(used) OR used < :limit")
+            .expression_attribute_values(
+                ":ttl",
+                AttributeValue::N((now + DAILY_EPOCH_SECONDS).to_string()),
+            )
+            .expression_attribute_values(":one", AttributeValue::N("1".into()))
+            .expression_attribute_values(
+                ":limit",
+                AttributeValue::N(self.work_policy.budget_max_attempts.to_string()),
+            );
+        match request.send().await {
+            Ok(_) => Ok(true),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|e| e.is_conditional_check_failed_exception()) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        key: &str,
+        epoch: u64,
+        expected: Option<u64>,
+        now: u64,
+    ) -> Result<Option<Lease>, Error> {
+        use aws_sdk_dynamodb::types::ReturnValue;
+        let version_condition = if expected.is_some() {
+            "#v = :expected"
+        } else {
+            "attribute_not_exists(#v)"
+        };
+        let mut request = self.dynamodb.update_item().table_name(&self.table)
+            .key("pk", AttributeValue::S(key.to_owned()))
+            .update_expression("SET leaseUntil = :until, retryAfter = :retry, attemptedAt = :now, expiresAt = :ttl, snapshotGeneration = :epoch ADD generation :one")
+            .condition_expression(format!("(attribute_not_exists(leaseUntil) OR leaseUntil <= :now) AND (attribute_not_exists(retryAfter) OR retryAfter <= :now) AND ({version_condition})"))
+            .expression_attribute_names("#v", "version")
+            .expression_attribute_values(":until", AttributeValue::N((now + self.work_policy.lease_seconds).to_string()))
+            .expression_attribute_values(":retry", AttributeValue::N((now + self.work_policy.lease_seconds + self.work_policy.failure_cooldown_seconds).to_string()))
+            .expression_attribute_values(":ttl", AttributeValue::N((now + CHECKPOINT_TTL_SECONDS).to_string()))
+            .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+            .expression_attribute_values(":epoch", AttributeValue::N(epoch.to_string()))
+            .expression_attribute_values(":one", AttributeValue::N("1".into()))
+            .return_values(ReturnValue::AllNew);
+        if let Some(expected) = expected {
+            request = request
+                .expression_attribute_values(":expected", AttributeValue::N(expected.to_string()));
+        }
+        match request.send().await {
+            Ok(output) => Ok(Some(Lease {
+                generation: output
+                    .attributes
+                    .as_ref()
+                    .and_then(|attrs| attrs.get("generation"))
+                    .and_then(|v| v.as_n().ok())
+                    .ok_or("lease generation missing")?
+                    .parse()?,
+            })),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|e| e.is_conditional_check_failed_exception()) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn load(
         &self,
         network: &RuntimeNetwork,
@@ -260,10 +393,13 @@ impl App {
         let Some(item) = output.item else {
             return Ok(None);
         };
-        let payload = item
-            .get("payload")
-            .and_then(|value| value.as_s().ok())
-            .ok_or("checkpoint payload missing")?;
+        // Admission creates metadata-only rows before a first successful replay.
+        let Some(payload_value) = item.get("payload") else {
+            return Ok(None);
+        };
+        let payload = payload_value
+            .as_s()
+            .map_err(|_| "invalid checkpoint payload")?;
         if payload.len() > MAX_CHECKPOINT_BYTES {
             return Err("checkpoint payload exceeds size limit".into());
         }
@@ -298,6 +434,7 @@ impl App {
         cursor_block: u64,
         expected_version: Option<u64>,
         last_refresh_at: Option<u64>,
+        lease: &Lease,
     ) -> Result<bool, Error> {
         let payload = serde_json::to_string(&PersistedCheckpoint {
             checkpoint: checkpoint.clone(),
@@ -307,47 +444,43 @@ impl App {
         if payload.len() > MAX_CHECKPOINT_BYTES {
             return Err("checkpoint payload exceeds size limit".into());
         }
-        let next_version = expected_version.unwrap_or(0).saturating_add(1);
-        let expires_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs()
-            .saturating_add(CHECKPOINT_TTL_SECONDS);
-        let mut request = self
-            .dynamodb
-            .put_item()
-            .table_name(&self.table)
-            .item(
-                "pk",
-                AttributeValue::S(checkpoint_key(
-                    network.score.chain_id,
-                    network.registry,
-                    account,
-                )),
-            )
-            .item("payload", AttributeValue::S(payload))
-            .item("version", AttributeValue::N(next_version.to_string()))
-            .item("cursorBlock", AttributeValue::N(cursor_block.to_string()))
-            .item(
-                "snapshotEpoch",
-                AttributeValue::N(snapshot_epoch.to_string()),
-            )
-            .item("expiresAt", AttributeValue::N(expires_at.to_string()));
-        if let Some(last_refresh_at) = last_refresh_at {
-            request = request.item(
-                "lastRefreshAt",
-                AttributeValue::N(last_refresh_at.to_string()),
-            );
-        }
-        request = if let Some(version) = expected_version {
-            request
-                .condition_expression("#version = :expected")
-                .expression_attribute_names("#version", "version")
-                .expression_attribute_values(":expected", AttributeValue::N(version.to_string()))
+        let next_version = expected_version
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("checkpoint version overflow")?;
+        // Expiry uses save-construction time, not the server's commit-time clock.
+        // A delayed pre-expiry write may complete late, but cannot supersede a newer generation/version.
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let version_condition = if expected_version.is_some() {
+            "#version = :expected"
         } else {
-            request
-                .condition_expression("attribute_not_exists(#pk)")
-                .expression_attribute_names("#pk", "pk")
+            "attribute_not_exists(#version)"
         };
+        let mut update = "SET payload = :payload, #version = :version, cursorBlock = :cursor, snapshotEpoch = :epoch, expiresAt = :ttl, leaseUntil = :zero, retryAfter = :zero".to_owned();
+        if last_refresh_at.is_some() {
+            update.push_str(", lastRefreshAt = :refresh");
+        }
+        let mut request = self.dynamodb.update_item().table_name(&self.table)
+            .key("pk", AttributeValue::S(checkpoint_key(network.score.chain_id, network.registry, account)))
+            .update_expression(update)
+            .condition_expression(format!("generation = :generation AND leaseUntil > :now AND snapshotGeneration = :epoch AND ({version_condition})"))
+            .expression_attribute_names("#version", "version")
+            .expression_attribute_values(":payload", AttributeValue::S(payload))
+            .expression_attribute_values(":version", AttributeValue::N(next_version.to_string()))
+            .expression_attribute_values(":cursor", AttributeValue::N(cursor_block.to_string()))
+            .expression_attribute_values(":epoch", AttributeValue::N(snapshot_epoch.to_string()))
+            .expression_attribute_values(":ttl", AttributeValue::N((now + CHECKPOINT_TTL_SECONDS).to_string()))
+            .expression_attribute_values(":zero", AttributeValue::N("0".into()))
+            .expression_attribute_values(":generation", AttributeValue::N(lease.generation.to_string()))
+            .expression_attribute_values(":now", AttributeValue::N(now.to_string()));
+        if let Some(version) = expected_version {
+            request = request
+                .expression_attribute_values(":expected", AttributeValue::N(version.to_string()));
+        }
+        if let Some(refresh) = last_refresh_at {
+            request = request
+                .expression_attribute_values(":refresh", AttributeValue::N(refresh.to_string()));
+        }
         match request.send().await {
             Ok(_) => Ok(true),
             Err(error)
@@ -372,8 +505,11 @@ fn response(
         || "no-store".to_owned(),
         |seconds| format!("public, max-age={seconds}, s-maxage={seconds}"),
     );
-    Ok(Response::builder()
-        .status(status)
+    let mut builder = Response::builder().status(status);
+    if status == 503 {
+        builder = builder.header("retry-after", "60");
+    }
+    Ok(builder
         .header("content-type", "application/json")
         .header("access-control-allow-origin", origin)
         .header("vary", "origin")
@@ -404,121 +540,156 @@ fn unavailable_checkpoint_history(error: &IncrementalScoreError) -> bool {
     )
 }
 
+fn deferred_score(
+    stored: Option<&StoredCheckpoint>,
+    status: &str,
+) -> Result<CalculatedScore, Error> {
+    if let Some(mut snapshot) = stored
+        .and_then(|stored| stored.snapshot.clone())
+        .filter(|snapshot| snapshot.snapshot_version == usd8_score_api::SCORE_SNAPSHOT_VERSION)
+    {
+        snapshot.cache_status = status.to_owned();
+        snapshot.log_requests = "0".to_owned();
+        return Ok(CalculatedScore {
+            value: serde_json::to_value(snapshot)?,
+            cache_max_age: 0,
+        });
+    }
+    Err("score work deferred; retry later".into())
+}
+
 async fn calculate(
     app: &App,
     network: &RuntimeNetwork,
     account: Address,
     force_refresh: bool,
 ) -> Result<CalculatedScore, Error> {
-    let finalized = finalized_block(&network.rpc).await?;
-    let epoch = completed_utc_epoch(finalized.timestamp)
-        .ok_or("finalized score head predates the first completed UTC day")?;
+    tokio::time::timeout(
+        std::time::Duration::from_millis(app.work_policy.calculation_timeout_ms),
+        calculate_inner(app, network, account, force_refresh),
+    )
+    .await
+    .map_err(|_| -> Error { "score calculation deadline exceeded".into() })?
+}
+
+async fn calculate_inner(
+    app: &App,
+    network: &RuntimeNetwork,
+    account: Address,
+    force_refresh: bool,
+) -> Result<CalculatedScore, Error> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let epoch = completed_utc_epoch(now).ok_or("score clock predates first UTC day")?;
     let cache_max_age = daily_cache_max_age(epoch, now);
-    for attempt in 0..2 {
-        let stored = app.load(network, account).await?;
-        if let Some(mut snapshot) = stored
-            .as_ref()
-            .filter(|value| {
-                is_current_daily_snapshot(
-                    value.snapshot_epoch,
-                    value
-                        .snapshot
-                        .as_ref()
-                        .map_or(0, |snapshot| snapshot.snapshot_version),
-                    epoch,
-                ) && (!force_refresh || refresh_throttled(value.last_refresh_at, now))
-            })
-            .and_then(|value| value.snapshot.clone())
-        {
-            snapshot.cache_status = if force_refresh {
-                "refresh-throttled"
-            } else {
-                "daily-hit"
-            }
-            .to_owned();
-            snapshot.log_requests = "0".to_owned();
-            return Ok(CalculatedScore {
-                value: serde_json::to_value(snapshot)?,
-                cache_max_age: if force_refresh { 0 } else { cache_max_age },
-            });
-        }
-        let reference = if force_refresh {
-            finalized.clone()
-        } else {
-            let reference_number = block_at_or_before_timestamp(
-                &network.rpc,
-                epoch.saturating_sub(1),
-                finalized.number,
-            )
-            .await?;
-            block_by_number(&network.rpc, reference_number).await?
-        };
-        let previous = stored.as_ref().map(|value| value.checkpoint.clone());
-        let computed = compute_incremental_score_at(
-            &network.rpc,
-            &network.score,
-            network.registry,
-            account,
-            reference.clone(),
-            previous,
-        )
-        .await;
-        let (snapshot, checkpoint) = match computed {
-            Ok(value) => value,
-            Err(error)
-                if stored.is_some()
-                    && (stale_checkpoint(&error) || unavailable_checkpoint_history(&error)) =>
-            {
-                eprintln!(
-                    "discarding unavailable score checkpoint for chain {} account {account}: {error}",
-                    network.score.chain_id,
-                );
-                compute_incremental_score_at(
-                    &network.rpc,
-                    &network.score,
-                    network.registry,
-                    account,
-                    reference,
-                    None,
-                )
-                .await?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let cursor_block = snapshot.reference_block.parse::<u64>()?;
-        let value = serde_json::to_value(&snapshot)?;
-        if app
-            .save(
-                network,
-                account,
-                &checkpoint,
-                &snapshot,
+    let stored = app.load(network, account).await?;
+    if let Some(mut snapshot) = stored
+        .as_ref()
+        .filter(|value| {
+            is_current_daily_snapshot(
+                value.snapshot_epoch,
+                value.snapshot.as_ref().map_or(0, |s| s.snapshot_version),
                 epoch,
-                cursor_block,
-                stored.as_ref().map(|value| value.version),
-                force_refresh.then_some(now),
+            ) && (!force_refresh || refresh_throttled(value.last_refresh_at, now))
+        })
+        .and_then(|value| value.snapshot.clone())
+    {
+        snapshot.cache_status = if force_refresh {
+            "refresh-throttled"
+        } else {
+            "daily-hit"
+        }
+        .to_owned();
+        snapshot.log_requests = "0".to_owned();
+        return Ok(CalculatedScore {
+            value: serde_json::to_value(snapshot)?,
+            cache_max_age: if force_refresh { 0 } else { cache_max_age },
+        });
+    }
+    let key = checkpoint_key(network.score.chain_id, network.registry, account);
+    let Some(lease) = app
+        .acquire(&key, epoch, stored.as_ref().map(|s| s.version), now)
+        .await?
+    else {
+        // A new holder may already have committed since our read. Never replay on CAS loss.
+        let latest = app.load(network, account).await?;
+        return deferred_score(latest.as_ref(), "updating");
+    };
+    if !app
+        .reserve_budget(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+        .await?
+    {
+        return deferred_score(stored.as_ref(), "work-throttled");
+    }
+    // All historical RPC, including reference lookup and fallback replay, is after admission.
+    let finalized = finalized_block(&network.rpc).await?;
+    if completed_utc_epoch(finalized.timestamp) != Some(epoch) {
+        return deferred_score(stored.as_ref(), "updating");
+    }
+    let reference = if force_refresh {
+        finalized.clone()
+    } else {
+        let reference_number =
+            block_at_or_before_timestamp(&network.rpc, epoch.saturating_sub(1), finalized.number)
+                .await?;
+        block_by_number(&network.rpc, reference_number).await?
+    };
+    let previous = stored.as_ref().map(|value| value.checkpoint.clone());
+    let computed = compute_incremental_score_at(
+        &network.rpc,
+        &network.score,
+        network.registry,
+        account,
+        reference.clone(),
+        previous,
+    )
+    .await;
+    let (snapshot, checkpoint) = match computed {
+        Ok(value) => value,
+        Err(error)
+            if stored.is_some()
+                && (stale_checkpoint(&error) || unavailable_checkpoint_history(&error)) =>
+        {
+            eprintln!(
+                "discarding unavailable score checkpoint for chain {} account {account}: {error}",
+                network.score.chain_id,
+            );
+            compute_incremental_score_at(
+                &network.rpc,
+                &network.score,
+                network.registry,
+                account,
+                reference,
+                None,
             )
             .await?
-        {
-            return Ok(CalculatedScore {
-                value,
-                cache_max_age: if force_refresh { 0 } else { cache_max_age },
-            });
         }
-        if attempt == 0 {
-            continue;
-        }
-        eprintln!(
-            "score checkpoint update contention for chain {} account {account}; returning computed snapshot",
-            network.score.chain_id,
-        );
+        Err(error) => return Err(error.into()),
+    };
+    let cursor_block = snapshot.reference_block.parse::<u64>()?;
+    let value = serde_json::to_value(&snapshot)?;
+    if app
+        .save(
+            network,
+            account,
+            &checkpoint,
+            &snapshot,
+            epoch,
+            cursor_block,
+            stored.as_ref().map(|value| value.version),
+            force_refresh.then_some(now),
+            &lease,
+        )
+        .await?
+    {
         return Ok(CalculatedScore {
             value,
             cache_max_age: if force_refresh { 0 } else { cache_max_age },
         });
     }
-    unreachable!("score checkpoint retry loop always returns")
+
+    // A rejected save must not return its computed result as a fresh snapshot.
+    let latest = app.load(network, account).await?;
+    deferred_score(latest.as_ref(), "updating")
 }
 
 async fn handle(app: Arc<App>, request: Request) -> Result<Response<Body>, Error> {
@@ -605,11 +776,18 @@ async fn main() -> Result<(), Error> {
     let app = Arc::new(App {
         dynamodb: aws_sdk_dynamodb::Client::new(&sdk),
         table: required("USD8_SCORE_TABLE")?,
+        work_policy: WorkPolicy::from_json(
+            env::var("USD8_SCORE_WORK_POLICY_JSON").ok().as_deref(),
+        )?,
         networks: runtime_networks()?,
         allowed_origin: required("USD8_ALLOWED_ORIGIN")?,
     });
     lambda_http::run(service_fn(move |request| handle(app.clone(), request))).await
 }
+
+#[cfg(test)]
+#[path = "../runtime_tests.rs"]
+mod runtime_tests;
 
 #[cfg(test)]
 mod tests {

@@ -86,6 +86,8 @@ fn main() {
 #[cfg(target_os = "linux")]
 mod linux {
     use aws_credential_types::Credentials;
+    use aws_lc_rs::encoding::{AsDer, PublicKeyX509Der};
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
     use aws_nitro_enclaves_nsm_api::api::{Request, Response};
     use aws_nitro_enclaves_nsm_api::driver::{nsm_exit, nsm_init, nsm_process_request};
     use aws_sdk_kms::error::ProvideErrorMetadata;
@@ -96,9 +98,6 @@ mod linux {
     };
     use aws_types::region::Region;
     use base64::Engine;
-    use rand_core::OsRng;
-    use rsa::pkcs8::EncodePublicKey;
-    use rsa::{RsaPrivateKey, RsaPublicKey};
     use serde_bytes::ByteBuf;
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -251,13 +250,14 @@ mod linux {
         purpose: &str,
         user_data: &[u8],
     ) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), Error> {
-        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).map_err(|_| "LOCAL_RSA_FAILED")?;
-        let public_key = RsaPublicKey::from(&private_key)
-            .to_public_key_der()
-            .map_err(|_| "LOCAL_RSA_FAILED")?
-            .as_bytes()
-            .to_vec();
-        let document = attestation(&public_key, user_data).map_err(|_| "NSM_ATTESTATION_FAILED")?;
+        let private_key =
+            PrivateDecryptingKey::generate(KeySize::Rsa2048).map_err(|_| "LOCAL_RSA_FAILED")?;
+        let public_key: PublicKeyX509Der<'static> = private_key
+            .public_key()
+            .as_der()
+            .map_err(|_| "LOCAL_RSA_FAILED")?;
+        let document =
+            attestation(public_key.as_ref(), user_data).map_err(|_| "NSM_ATTESTATION_FAILED")?;
         let recipient = RecipientInfo::builder()
             .key_encryption_algorithm(KeyEncryptionMechanism::RsaesOaepSha256)
             .attestation_document(Blob::new(document.clone()))
@@ -303,7 +303,7 @@ mod linux {
             .ciphertext_for_recipient()
             .ok_or("KMS_RESPONSE_FAILED")?;
         let envelope = parse_kms_recipient_cms(wrapped.as_ref()).map_err(|_| "CMS_PARSE_FAILED")?;
-        let plaintext = decrypt_kms_recipient_envelope(&private_key, &envelope)?;
+        let plaintext = decrypt_kms_recipient_envelope(private_key, &envelope)?;
         Ok((plaintext, document))
     }
 
