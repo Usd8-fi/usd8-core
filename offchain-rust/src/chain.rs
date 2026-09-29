@@ -669,6 +669,66 @@ pub async fn max_cover_pool_payout_bps_at<R: Rpc + ?Sized>(
     Ok(u256_to_big(value))
 }
 
+pub async fn scored_tokens_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    block_number: u64,
+) -> Result<Vec<ScoredToken>, ChainError> {
+    let token_addresses = contract_call(
+        rpc,
+        registry,
+        &IRegistry::getScoredTokensCall {},
+        Some(block_number),
+    )
+    .await?;
+    let mut seen = HashSet::new();
+    let mut scored_tokens = Vec::with_capacity(token_addresses.len());
+    for token in token_addresses {
+        let token = from_alloy(token);
+        if !seen.insert(token) {
+            return Err(ChainError::InvalidConfiguration(format!(
+                "duplicate scored token {token}"
+            )));
+        }
+        let rates = contract_call(
+            rpc,
+            registry,
+            &IRegistry::getScoredRateHistoryCall {
+                token: to_alloy(token),
+            },
+            Some(block_number),
+        )
+        .await?;
+        if rates.is_empty() {
+            return Err(ChainError::InvalidConfiguration(format!(
+                "scored token {token} has no rate history"
+            )));
+        }
+        let mut previous = None;
+        let rates = rates
+            .into_iter()
+            .map(|point| {
+                if previous.is_some_and(|block| point.fromBlock <= block) {
+                    return Err(ChainError::InvalidConfiguration(format!(
+                        "rate history for {token} is not strictly ascending"
+                    )));
+                }
+                previous = Some(point.fromBlock);
+                Ok(RatePoint {
+                    from_block: point.fromBlock,
+                    rate: BigUint::from(point.rate),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        scored_tokens.push(ScoredToken {
+            token,
+            decimals: decimals_at(rpc, token, block_number).await?,
+            rates,
+        });
+    }
+    Ok(scored_tokens)
+}
+
 pub async fn incident_config_at<R: Rpc + ?Sized>(
     rpc: &R,
     config: &BootstrapConfig,
@@ -707,58 +767,7 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
         ));
     }
 
-    let token_addresses = contract_call(
-        rpc,
-        config.registry,
-        &IRegistry::getScoredTokensCall {},
-        Some(open_block),
-    )
-    .await?;
-    let mut seen = HashSet::new();
-    let mut scored_tokens = Vec::with_capacity(token_addresses.len());
-    for token in token_addresses {
-        let token = from_alloy(token);
-        if !seen.insert(token) {
-            return Err(ChainError::InvalidConfiguration(format!(
-                "duplicate scored token {token}"
-            )));
-        }
-        let rates = contract_call(
-            rpc,
-            config.registry,
-            &IRegistry::getScoredRateHistoryCall {
-                token: to_alloy(token),
-            },
-            Some(open_block),
-        )
-        .await?;
-        if rates.is_empty() {
-            return Err(ChainError::InvalidConfiguration(format!(
-                "scored token {token} has no rate history"
-            )));
-        }
-        let mut previous = None;
-        let rates = rates
-            .into_iter()
-            .map(|point| {
-                if previous.is_some_and(|block| point.fromBlock <= block) {
-                    return Err(ChainError::InvalidConfiguration(format!(
-                        "rate history for {token} is not strictly ascending"
-                    )));
-                }
-                previous = Some(point.fromBlock);
-                Ok(RatePoint {
-                    from_block: point.fromBlock,
-                    rate: BigUint::from(point.rate),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        scored_tokens.push(ScoredToken {
-            token,
-            decimals: decimals_at(rpc, token, open_block).await?,
-            rates,
-        });
-    }
+    let scored_tokens = scored_tokens_at(rpc, config.registry, open_block).await?;
 
     Ok(IncidentConfig {
         coverage_bps: u256_to_big(insured.maxCoverageBps),
@@ -1426,9 +1435,9 @@ pub async fn token_block_integral<R: Rpc + ?Sized>(
     ))
 }
 
-pub async fn earned_score_of<R: Rpc + ?Sized>(
+pub async fn earned_score_from_tokens<R: Rpc + ?Sized>(
     rpc: &R,
-    config: &IncidentConfig,
+    scored_tokens: &[ScoredToken],
     account: Address,
     as_of_block: u64,
     max_range: u64,
@@ -1436,7 +1445,7 @@ pub async fn earned_score_of<R: Rpc + ?Sized>(
 ) -> Result<(BigUint, LogMetrics), ChainError> {
     let mut numerator = BigUint::from(0u8);
     let mut metrics = LogMetrics::default();
-    for scored in &config.scored_tokens {
+    for scored in scored_tokens {
         for (index, point) in scored.rates.iter().enumerate() {
             let next_from = scored
                 .rates
@@ -1469,6 +1478,25 @@ pub async fn earned_score_of<R: Rpc + ?Sized>(
         numerator / BigUint::from(1_000_000_000_000_000_000u64),
         metrics,
     ))
+}
+
+pub async fn earned_score_of<R: Rpc + ?Sized>(
+    rpc: &R,
+    config: &IncidentConfig,
+    account: Address,
+    as_of_block: u64,
+    max_range: u64,
+    result_cap: usize,
+) -> Result<(BigUint, LogMetrics), ChainError> {
+    earned_score_from_tokens(
+        rpc,
+        &config.scored_tokens,
+        account,
+        as_of_block,
+        max_range,
+        result_cap,
+    )
+    .await
 }
 
 pub async fn twap_ratio_before<R: Rpc + ?Sized>(

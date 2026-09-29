@@ -13,7 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use usd8_settlement::Address;
 use usd8_settlement::abi::IERC20;
 use usd8_settlement::chain::{
-    IncidentConfig, RatePoint, ScoredToken, SettlementParams, earned_score_of,
+    IncidentConfig, RatePoint, ScoredToken, SettlementParams, earned_score_from_tokens,
+    earned_score_of,
 };
 use usd8_settlement::checkpoint::{BulkScoreSource, CheckpointError, CheckpointScoreSource};
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
@@ -228,13 +229,19 @@ fn checkpoint_path() -> PathBuf {
 
 #[tokio::test]
 async fn raw_score_matches_rate_segment_golden_vector() {
-    let (alice, alice_metrics) = earned_score_of(&rpc(), &cfg(), ka(ALICE), 10, 1000, 1000)
+    let config = cfg();
+    let (alice, alice_metrics) = earned_score_of(&rpc(), &config, ka(ALICE), 10, 1000, 1000)
         .await
         .unwrap();
-    let (bob, _) = earned_score_of(&rpc(), &cfg(), ka(BOB), 10, 1000, 1000)
+    let (alice_without_incident, _) =
+        earned_score_from_tokens(&rpc(), &config.scored_tokens, ka(ALICE), 10, 1000, 1000)
+            .await
+            .unwrap();
+    let (bob, _) = earned_score_of(&rpc(), &config, ka(BOB), 10, 1000, 1000)
         .await
         .unwrap();
     assert_eq!(alice, BigUint::from(900u16));
+    assert_eq!(alice_without_incident, alice);
     assert_eq!(bob, BigUint::from(300u16));
     assert_eq!(alice_metrics.requests, 4);
 }

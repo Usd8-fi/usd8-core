@@ -12,7 +12,7 @@ use usd8_settlement::abi::{
 };
 use usd8_settlement::chain::{
     derive_bootstrap_config_at, incident_at, incident_config_at, pool_state_at, pools_at,
-    price_usd_1e18, ratio_at, twap_ratio_before,
+    price_usd_1e18, ratio_at, scored_tokens_at, twap_ratio_before,
 };
 use usd8_settlement::config::BootstrapConfig;
 use usd8_settlement::rpc::{Rpc, RpcError, RpcMetrics};
@@ -248,6 +248,19 @@ async fn registry_root_derives_historical_runtime_configuration() {
             .unwrap(),
         Address::from_str(FEED).unwrap()
     );
+}
+
+#[tokio::test]
+async fn scored_tokens_can_be_loaded_without_an_incident() {
+    let rpc = fixture(I256::try_from(100_000_000i64).unwrap());
+    let tokens = scored_tokens_at(&rpc, Address::from_str(REGISTRY).unwrap(), 90)
+        .await
+        .unwrap();
+
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].token, Address::from_str(SCORED).unwrap());
+    assert_eq!(tokens[0].decimals, 6);
+    assert_eq!(tokens[0].rates[0].from_block, 5);
 }
 
 #[tokio::test]
