@@ -23,7 +23,7 @@ mod linux {
     use tokio::time::{sleep, timeout};
     use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
     use usd8_tee_job_api::{
-        JOB_WIRE_SCHEMA_VERSION, JobPaths, JobWireRequest, MAX_CIPHERTEXT_BYTES,
+        JOB_WIRE_SCHEMA_VERSION, JobPaths, JobWireRequest, MAX_CIPHERTEXT_BYTES, MAX_RESULT_BYTES,
         MAX_STORED_REQUEST_BYTES, MAX_WIRE_REQUEST_BYTES, STORED_REQUEST_SCHEMA_VERSION,
         StoredRequest, TerminalEnvelope, parent_timeout_seconds, read_frame_async,
         settlement_rpc_authority, write_frame_async,
@@ -34,7 +34,6 @@ mod linux {
     const JOB_PORT: u32 = 5000;
     const KMS_PROXY_PORT: u32 = 9001;
     const DRPC_PROXY_PORT: u32 = 9002;
-    const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 
     struct Config {
         job_id: String,
@@ -228,7 +227,7 @@ mod linux {
         write_frame_async(&mut stream, &wire, MAX_WIRE_REQUEST_BYTES).await?;
         let terminal = timeout(
             Duration::from_secs(response_timeout),
-            read_frame_async::<_, TerminalEnvelope>(&mut stream, MAX_RESPONSE),
+            read_frame_async::<_, TerminalEnvelope>(&mut stream, MAX_RESULT_BYTES),
         )
         .await??;
         if terminal.schema_version != 1 || terminal.job_id != config.job_id {

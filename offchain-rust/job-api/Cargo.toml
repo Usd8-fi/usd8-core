@@ -110,7 +110,9 @@ zeroize = { version = "=1.9.0", features = ["derive"], optional = true }
 aws-nitro-enclaves-nsm-api = { version = "=0.5.2", optional = true }
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["io-util", "macros", "rt-multi-thread"] }
+alloy-primitives = "=1.7.2"
+alloy-sol-types = "=1.7.2"
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "rt-multi-thread", "sync"] }
 
 [profile.release]
 lto = "thin"

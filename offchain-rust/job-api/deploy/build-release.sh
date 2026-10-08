@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+[[ -z "${CARGO_TARGET_DIR:-}" ]] || {
+  echo 'CARGO_TARGET_DIR must be unset or empty; release artifacts use archive-local targets' >&2; exit 2;
+}
+
 EXPECTED_SIGNER=${EXPECTED_SIGNER:?set EXPECTED_SIGNER}
 NETWORK=${NETWORK:?set NETWORK to sepolia}
 REGISTRY=${REGISTRY:?set REGISTRY}

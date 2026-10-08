@@ -44,6 +44,10 @@ pub struct LogMetrics {
 
 #[derive(Debug, Error)]
 pub enum RpcError {
+    #[error("RPC transport does not support JSON-RPC batching")]
+    UnsupportedBatch,
+    #[error("RPC batch exceeds 256 methods or 1048576 encoded request bytes")]
+    InvalidBatch,
     #[error("invalid RPC endpoint")]
     InvalidEndpoint,
     #[error("unsupported RPC endpoint scheme")]
@@ -340,37 +344,12 @@ impl HttpRpc {
         })
     }
 
-    fn retryable(error: &RpcError) -> bool {
-        match error {
-            RpcError::Transport { .. } => true,
-            RpcError::HttpStatus { status, .. } => {
-                *status == 408 || *status == 429 || (500..=504).contains(status)
-            }
-            _ => false,
-        }
-    }
-}
-
-#[async_trait]
-pub trait Rpc: Send + Sync {
-    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError>;
-    fn metrics(&self) -> RpcMetrics;
-}
-
-#[async_trait]
-impl Rpc for HttpRpc {
-    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        self.metrics
-            .logical_requests
-            .fetch_add(1, Ordering::Relaxed);
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-
+    async fn complete_request(&self, method: &str, body: &Value) -> Result<Value, RpcError> {
         let mut attempt = 0u32;
-        let mut value = loop {
-            let result = self.complete_attempt(method, &body).await;
+        loop {
+            let result = self.complete_attempt(method, body).await;
             match result {
-                Ok(value) => break value,
+                Ok(value) => return Ok(value),
                 Err(error) if attempt < self.retry_count && Self::retryable(&error) => {
                     self.metrics
                         .transport_retries
@@ -384,7 +363,131 @@ impl Rpc for HttpRpc {
                 }
                 Err(error) => return Err(error),
             }
+        }
+    }
+
+    fn retryable(error: &RpcError) -> bool {
+        match error {
+            RpcError::Transport { .. } => true,
+            RpcError::HttpStatus { status, .. } => {
+                *status == 408 || *status == 429 || (500..=504).contains(status)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[async_trait]
+pub trait Rpc: Send + Sync {
+    /// One transport envelope, ordered results. Never silently degrade to serial requests.
+    async fn batch_request(
+        &self,
+        _method: &str,
+        _params: Vec<Value>,
+    ) -> Result<Vec<Value>, RpcError> {
+        Err(RpcError::UnsupportedBatch)
+    }
+    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError>;
+    fn metrics(&self) -> RpcMetrics;
+}
+
+#[async_trait]
+impl Rpc for HttpRpc {
+    async fn batch_request(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<Vec<Value>, RpcError> {
+        if params.is_empty() || params.len() > 256 {
+            return Err(RpcError::InvalidBatch);
+        }
+        let count = params.len();
+        let first = self
+            .next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                id.checked_add(count as u64)
+            })
+            .map_err(|_| RpcError::InvalidBatch)?;
+        let body = Value::Array(params.into_iter().enumerate().map(|(index, params)| {
+            json!({"jsonrpc":"2.0", "id":first + index as u64, "method":method, "params":params})
+        }).collect());
+        // Count encoded bytes without allocating a potentially unbounded serialization.
+        struct ByteBudget(usize);
+        impl std::io::Write for ByteBudget {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_sub(bytes.len())
+                    .ok_or_else(|| std::io::Error::other("batch request byte cap"))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        serde_json::to_writer(ByteBudget(1024 * 1024), &body)
+            .map_err(|_| RpcError::InvalidBatch)?;
+        self.metrics
+            .logical_requests
+            .fetch_add(count as u64, Ordering::Relaxed);
+        let value = self.complete_request(method, &body).await?;
+        let invalid = || RpcError::InvalidResponse {
+            method: method.to_owned(),
+            message: "invalid batch response envelope or member".to_owned(),
         };
+        let members = value
+            .as_array()
+            .filter(|members| members.len() == count)
+            .ok_or_else(invalid)?;
+        let mut results = vec![None; count];
+        for member in members {
+            let id = member
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or_else(invalid)?;
+            let index = id
+                .checked_sub(first)
+                .filter(|i| *i < count as u64)
+                .ok_or_else(invalid)? as usize;
+            if results[index].is_some()
+                || member.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+            {
+                return Err(invalid());
+            }
+            if let Some(error) = member.get("error") {
+                if member.get("result").is_some() {
+                    return Err(invalid());
+                }
+                let code = error
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(invalid)?;
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?;
+                // Provider error text can echo credential-bearing URLs or request data.
+                return Err(RpcError::JsonRpc {
+                    code,
+                    message: "batch member failed".to_owned(),
+                });
+            }
+            results[index] = Some(member.get("result").ok_or_else(invalid)?.clone());
+        }
+        results
+            .into_iter()
+            .map(|result| result.ok_or_else(invalid))
+            .collect()
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.metrics
+            .logical_requests
+            .fetch_add(1, Ordering::Relaxed);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+
+        let mut value = self.complete_request(method, &body).await?;
 
         if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
             return Err(RpcError::InvalidResponse {

@@ -115,9 +115,9 @@ mod linux {
     use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
     use usd8_tee_job_api::{
         AttestedDigestKind, CanonicalRequest, JOB_WIRE_SCHEMA_VERSION, JobPaths, JobWireRequest,
-        MAX_ACCESS_KEY_ID_BYTES, MAX_CIPHERTEXT_BYTES, MAX_SECRET_ACCESS_KEY_BYTES,
-        MAX_SESSION_TOKEN_BYTES, MAX_WIRE_REQUEST_BYTES, TerminalEnvelope,
-        canonicalize_open_request, canonicalize_request, connect_proxy_port,
+        MAX_ACCESS_KEY_ID_BYTES, MAX_ARTIFACT_BYTES, MAX_CIPHERTEXT_BYTES, MAX_RESULT_BYTES,
+        MAX_SECRET_ACCESS_KEY_BYTES, MAX_SESSION_TOKEN_BYTES, MAX_WIRE_REQUEST_BYTES,
+        TerminalEnvelope, canonicalize_open_request, canonicalize_request, connect_proxy_port,
         decrypt_kms_recipient_envelope, enclave_timeout_seconds, extract_attested_digest,
         parse_kms_recipient_cms, read_frame_async, settlement_rpc_requires_drpc_key,
         settlement_rpc_url, sign_digest, stored_request_is_live, verify_job_request_binding,
@@ -126,10 +126,8 @@ mod linux {
     use zeroize::{Zeroize, Zeroizing};
 
     type Error = Box<dyn std::error::Error + Send + Sync>;
-    const MAX_ARTIFACT: usize = MAX_RESPONSE - 64 * 1024;
     const PARENT_CID: u32 = 3;
     const JOB_PORT: u32 = 5000;
-    const MAX_RESPONSE: usize = 16 * 1024 * 1024;
     static PROXY_STAGE: AtomicU8 = AtomicU8::new(0);
 
     fn enable_loopback() -> io::Result<()> {
@@ -365,7 +363,7 @@ mod linux {
                         super::settlement_score_mode(),
                         usd8_settlement::attested_runtime::AttestedRuntimeOptions {
                             proxy_url: Some("http://127.0.0.1:8080"),
-                            maximum_artifact_bytes: MAX_ARTIFACT,
+                            maximum_artifact_bytes: MAX_ARTIFACT_BYTES,
                         },
                     ),
                 )
@@ -383,7 +381,7 @@ mod linux {
                     &env::var("USD8_EXPECTED_SIGNER")?,
                     usd8_settlement::attested_runtime::AttestedRuntimeOptions {
                         proxy_url: Some("http://127.0.0.1:8080"),
-                        maximum_artifact_bytes: MAX_ARTIFACT,
+                        maximum_artifact_bytes: MAX_ARTIFACT_BYTES,
                     },
                 ),
             )
@@ -509,7 +507,7 @@ mod linux {
                 TerminalEnvelope::failed(&request.stored_request.job_id, code)
             }
         };
-        write_frame_async(&mut stream, &terminal, MAX_RESPONSE).await?;
+        write_frame_async(&mut stream, &terminal, MAX_RESULT_BYTES).await?;
         Ok(())
     }
 }

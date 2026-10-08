@@ -7,6 +7,10 @@ export PYTHONDONTWRITEBYTECODE=1
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1}
 # Audit all four independent graphs once, before other gates can fail early.
 python3 "$ROOT/job-api/deploy/audit-dependencies.py"
+cd "$ROOT"
+cargo +1.94.1 fmt --check
+cargo +1.94.1 test --locked --all-targets --features nitro,sepolia
+cargo +1.94.1 clippy --locked --all-targets --features nitro,sepolia -- -D warnings
 cd "$ROOT/job-api"
 cargo +1.94.1 fmt --check
 cargo +1.94.1 test --locked --all-targets --all-features
@@ -17,6 +21,7 @@ python3 "$ROOT/job-api/deploy/with-dynamodb-tests.py" -- \
   cargo +1.94.1 test --locked --all-targets --features lambda,sepolia -- --include-ignored
 cargo +1.94.1 clippy --locked --all-targets --features lambda,sepolia -- -D warnings
 cd "$ROOT/score-core"
+cargo +1.94.1 fmt --check
 cargo +1.94.1 test --locked --all-targets
 cargo +1.94.1 clippy --locked --all-targets -- -D warnings
 cd "$ROOT"

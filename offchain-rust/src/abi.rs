@@ -4,6 +4,19 @@
 use alloy_sol_types::sol;
 
 sol! {
+    interface IMulticall3 {
+        struct Call3 {
+            address target;
+            bool allowFailure;
+            bytes callData;
+        }
+        struct Result {
+            bool success;
+            bytes returnData;
+        }
+        function aggregate3(Call3[] calldata calls) external payable returns (Result[] memory returnData);
+    }
+
     interface IDefiInsurance {
         struct InsuredToken {
             uint16 maxCoverageBps;
@@ -32,6 +45,7 @@ sol! {
         );
         function nextIncidentId() external view returns (uint64);
         function incidentPhaseWindow(uint256 incidentId) external view returns (uint64);
+        function incidentPools(uint256 incidentId) external view returns (address[] memory);
         function isTeeSigner(address signer) external view returns (bool);
         function incidentOpenEligibilityHash(address insuredToken) external view returns (bytes32);
         function fileClaim(

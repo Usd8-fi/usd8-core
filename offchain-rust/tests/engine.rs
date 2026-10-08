@@ -1,3 +1,146 @@
+#[path = "support/cli_http.rs"]
+mod cli_http;
+mod support;
+
+fn stable_artifact(artifact: &Value) -> Value {
+    let mut stable = artifact.clone();
+    let elapsed = stable
+        .pointer_mut("/historicalLogMetrics/elapsedMs")
+        .unwrap();
+    assert!(elapsed.is_u64());
+    *elapsed = json!(0);
+    stable
+}
+
+#[test]
+fn artifact_comparison_ignores_only_elapsed_ms() {
+    let original = json!({
+        "root": "root", "digest": "digest", "anchor": {"hash": "hash"},
+        "config": {"chainId": 1}, "rows": [{"proof": ["proof"], "amounts": ["80"]}],
+        "historicalLogMetrics": {"elapsedMs": 2, "requests": 3},
+        "unknown": {"elapsedMs": 4}
+    });
+    let mut later = original.clone();
+    later["historicalLogMetrics"]["elapsedMs"] = json!(99);
+    assert_eq!(stable_artifact(&original), stable_artifact(&later));
+    for pointer in [
+        "/root",
+        "/digest",
+        "/anchor/hash",
+        "/config/chainId",
+        "/rows/0/proof/0",
+        "/rows/0/amounts/0",
+        "/historicalLogMetrics/requests",
+        "/unknown/elapsedMs",
+    ] {
+        let mut changed = later.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("changed");
+        assert_ne!(
+            stable_artifact(&original),
+            stable_artifact(&changed),
+            "{pointer}"
+        );
+    }
+    assert_eq!(original["historicalLogMetrics"]["elapsedMs"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settlement_cli_dispatch_preserves_local_proofs_and_tee_failure_output() {
+    let (mut rpc, config) = fixture();
+    for (to, selector, value) in [
+        (
+            REGISTRY,
+            IRegistry::defiInsuranceCall::SELECTOR,
+            encoded::<IRegistry::defiInsuranceCall>(&aa(DEFI)),
+        ),
+        (
+            DEFI,
+            IDefiInsurance::registryCall::SELECTOR,
+            encoded::<IDefiInsurance::registryCall>(&aa(REGISTRY)),
+        ),
+        (
+            REGISTRY,
+            IRegistry::maxOracleStalenessCall::SELECTOR,
+            encoded::<IRegistry::maxOracleStalenessCall>(&config.max_oracle_staleness),
+        ),
+        (
+            REGISTRY,
+            IRegistry::assetUsdFeedCall::SELECTOR,
+            encoded::<IRegistry::assetUsdFeedCall>(&aa(FEED)),
+        ),
+    ] {
+        Arc::make_mut(&mut rpc.responses).insert(
+            (to.to_owned(), format!("0x{}", hex::encode(selector))),
+            value,
+        );
+    }
+    let calls = rpc.calls.clone();
+    let (url, server) = cli_http::serve(rpc).await;
+    let path = artifact_path();
+    let local = cli_http::run(
+        "compute_settlement",
+        "7",
+        REGISTRY,
+        url.clone(),
+        vec!["--raw-score".into()],
+    )
+    .await;
+    assert!(
+        local.status.success(),
+        "{}",
+        String::from_utf8_lossy(&local.stderr)
+    );
+    let artifact: Value = serde_json::from_slice(&local.stdout).unwrap();
+    assert_eq!(artifact["rows"][0]["amounts"][0], "80");
+    assert_eq!(artifact["rows"][0]["scoreSpent"], "60");
+    assert!(artifact["rows"][0]["proof"].is_array());
+    assert!(artifact.get("nitroAttestationDocument").is_none());
+    assert!(local.stderr.is_empty());
+    let saved = cli_http::run(
+        "compute_settlement",
+        "7",
+        REGISTRY,
+        url.clone(),
+        vec![
+            "--raw-score".into(),
+            "--output".into(),
+            path.display().to_string(),
+        ],
+    )
+    .await;
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert!(saved.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&saved.stderr).contains("wrote verified artifact:"));
+    let saved_bytes = fs::read(&path).unwrap();
+    let saved_artifact: Value = serde_json::from_slice(&saved_bytes).unwrap();
+    assert_eq!(stable_artifact(&saved_artifact), stable_artifact(&artifact));
+    let before = calls.lock().unwrap().len();
+    let tee = cli_http::run(
+        "compute_settlement_tee",
+        "7",
+        REGISTRY,
+        url,
+        vec![
+            "--raw-score".into(),
+            "--output".into(),
+            path.display().to_string(),
+        ],
+    )
+    .await;
+    assert_eq!(tee.status.code(), Some(1));
+    assert!(tee.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&tee.stderr).contains("requires DRPC_KEY"));
+    assert!(!String::from_utf8_lossy(&tee.stderr).contains("wrote verified artifact:"));
+    assert_eq!(calls.lock().unwrap().len(), before);
+    assert_eq!(fs::read(&path).unwrap(), saved_bytes);
+    fs::remove_file(path).unwrap();
+    server.abort();
+}
+
 use alloy_primitives::aliases::U80;
 use alloy_primitives::{Address as AlloyAddress, Bytes, I256, U256};
 use alloy_sol_types::{SolCall, SolEvent};
@@ -107,7 +250,7 @@ impl Rpc for EngineRpc {
                     "hash": format!("0x{:064x}", number + 1_000),
                 }))
             }
-            "eth_call" => {
+            "eth_call" => support::dispatch(&params, |params| {
                 let to = params[0]["to"].as_str().unwrap().to_ascii_lowercase();
                 let data = params[0]["data"].as_str().unwrap();
                 let selector = data[..10].to_owned();
@@ -161,7 +304,7 @@ impl Rpc for EngineRpc {
                         code: -32000,
                         message: "missing canned call".to_owned(),
                     })
-            }
+            }),
             "eth_getLogs" => {
                 let filter = &params[0];
                 let address = filter["address"].as_str().unwrap();
@@ -457,6 +600,185 @@ fn checkpoint_integrity_key_is_redacted_from_debug_output() {
     let debug = format!("{mode:?}");
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("definitely-secret"));
+}
+
+#[tokio::test]
+async fn settlement_aggregate_faults_abort_without_artifact_or_fallback() {
+    for at in [0, 1, 2] {
+        for fault in [
+            "revert",
+            "envelope",
+            "trailing-envelope",
+            "count",
+            "failed",
+            "empty",
+            "malformed",
+            "trailing-subcall",
+        ] {
+            let (inner, config) = fixture();
+            let rpc = Arc::new(support::FaultRpc::new(inner, fault, at));
+            assert!(
+                build_settlement(rpc.clone(), &config, 7u8.into(), ScoreMode::Raw)
+                    .await
+                    .is_err(),
+                "{at} {fault}"
+            );
+            assert!(rpc.poisoned.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+}
+
+#[tokio::test]
+async fn engine_batches_spent_scores_for_all_claimants() {
+    let (mut rpc, config) = fixture();
+    let second_user = "0x0000000000000000000000000000000000009001";
+    let registrations = [USER, second_user]
+        .iter()
+        .enumerate()
+        .map(|(index, user)| ClaimEvent {
+            kind: EventKind::Register,
+            claim_id: BigUint::from(index + 1),
+            user: ka(user),
+            amount: 100u8.into(),
+            score_to_spend: 60u8.into(),
+            booster_amount: 0u8.into(),
+            block_number: 92,
+            log_index: index as u64,
+        })
+        .collect::<Vec<_>>();
+    let commitment: [u8; 32] = hex::decode(&claim_set_hash(&registrations).unwrap()[2..])
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let update_incident = |value: &Value| {
+        let data = hex::decode(&value.as_str().unwrap()[2..]).unwrap();
+        let mut incident = IDefiInsurance::incidentsCall::abi_decode_returns(&data).unwrap();
+        incident.unresolvedClaims = U256::from(2);
+        incident.claimSetHash = commitment.into();
+        encoded::<IDefiInsurance::incidentsCall>(&incident)
+    };
+    rpc.window_incident = update_incident(&rpc.window_incident);
+    let key = (
+        DEFI.into(),
+        format!("0x{}", hex::encode(IDefiInsurance::incidentsCall::SELECTOR)),
+    );
+    let updated = update_incident(&rpc.responses[&key]);
+    Arc::make_mut(&mut rpc.responses).insert(key, updated);
+    let logs = Arc::make_mut(&mut rpc.logs);
+    logs.push(event_log(
+        DEFI,
+        &IDefiInsurance::ClaimRegistered {
+            claimId: U256::from(2),
+            incidentId: U256::from(7),
+            user: aa(second_user),
+            insuredTokenAmount: 100,
+            scoreToSpend: U256::from(60),
+            boosterAmount: U256::ZERO,
+        },
+        92,
+        1,
+    ));
+    logs.push(event_log(
+        SCORED,
+        &IERC20::Transfer {
+            from: AlloyAddress::ZERO,
+            to: aa(second_user),
+            value: U256::from(100),
+        },
+        10,
+        2,
+    ));
+    let calls = rpc.calls.clone();
+    let run = build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+        .await
+        .unwrap();
+    verify_run(&run, &config).unwrap();
+    assert_eq!(run.output.rows.len(), 2);
+    assert!(
+        run.output
+            .rows
+            .iter()
+            .all(|row| row.score_spent == BigUint::from(60u8))
+    );
+    let count = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|method| *method == "eth_call")
+        .count();
+    println!("two-claimant engine eth_call count: {count}");
+    assert_eq!(count, 26); // pool topology and payout policy share one aggregate
+}
+
+#[tokio::test]
+async fn engine_batches_two_pool_storage_reads_in_one_request() {
+    let (mut rpc, _) = fixture();
+    let second_asset = "0x0000000000000000000000000000000000007001";
+    let second_pool = "0x0000000000000000000000000000000000006001";
+    let responses = Arc::make_mut(&mut rpc.responses);
+    responses.insert(
+        (
+            REGISTRY.into(),
+            format!("0x{}", hex::encode(IRegistry::coverPoolsCall::SELECTOR)),
+        ),
+        encoded::<IRegistry::coverPoolsCall>(&IRegistry::coverPoolsReturn {
+            assets: vec![aa(ASSET), aa(second_asset)],
+            poolAddrs: vec![aa(POOL), aa(second_pool)],
+        }),
+    );
+    responses.insert(
+        (
+            second_pool.into(),
+            format!(
+                "0x{}",
+                hex::encode(ISingleAssetCoverPool::assetCall::SELECTOR)
+            ),
+        ),
+        encoded::<ISingleAssetCoverPool::assetCall>(&aa(second_asset)),
+    );
+    responses.insert(
+        (
+            second_pool.into(),
+            format!(
+                "0x{}",
+                hex::encode(ISingleAssetCoverPool::totalAssetsCall::SELECTOR)
+            ),
+        ),
+        encoded::<ISingleAssetCoverPool::totalAssetsCall>(&U256::from(1000)),
+    );
+    responses.insert(
+        (
+            second_asset.into(),
+            format!("0x{}", hex::encode(IERC20::decimalsCall::SELECTOR)),
+        ),
+        encoded::<IERC20::decimalsCall>(&0),
+    );
+    let config = BootstrapConfig::derived(
+        ka(REGISTRY),
+        ka(DEFI),
+        BOOSTER_ID,
+        100,
+        [(ka(ASSET), ka(FEED)), (ka(second_asset), ka(FEED))]
+            .into_iter()
+            .collect(),
+        129_600,
+    )
+    .unwrap();
+    let calls = rpc.calls.clone();
+    let run = build_settlement(Arc::new(rpc), &config, 7u8.into(), ScoreMode::Raw)
+        .await
+        .unwrap();
+    verify_run(&run, &config).unwrap();
+    assert_eq!(run.pool_addrs, vec![ka(POOL), ka(second_pool)]);
+    assert_eq!(run.output.rows[0].amounts.len(), 2);
+    let count = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|method| *method == "eth_call")
+        .count();
+    println!("two-pool engine eth_call count: {count}");
+    assert_eq!(count, 25); // pool topology/policy and multi-pool storage are grouped
 }
 
 #[tokio::test]

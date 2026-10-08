@@ -70,6 +70,7 @@ jobs:
         run: |
           cargo test --locked
           cargo test --locked --features sepolia
+          cargo test --locked --all-features
 
       - name: Verify Rust package is standalone
         run: |
@@ -78,6 +79,8 @@ jobs:
           cd "$RUNNER_TEMP/usd8-rust-standalone/offchain-rust"
           cargo test --locked
           cargo build --release --locked
+          test ! -e target/release/usd8-ffi
+          test ! -e target/release/usd8-kernel
 
       - name: Build Rust settlement runtime
         working-directory: offchain-rust
@@ -106,6 +109,10 @@ jobs:
 
       - name: Run Forge tests
         run: forge test --no-match-contract SettlementIntegrationTest -vvv
+
+      - name: Build Rust FFI test tool
+        working-directory: offchain-rust
+        run: cargo build --release --locked --features ffi-tools --bin usd8-ffi
 
       - name: Run Solidity ↔ Rust FFI parity tests
         env:

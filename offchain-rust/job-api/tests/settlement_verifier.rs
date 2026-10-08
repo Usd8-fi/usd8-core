@@ -1,6 +1,8 @@
 #![cfg(any(feature = "sepolia", feature = "lambda", feature = "worker"))]
 #[path = "../src/settlement_verifier.rs"]
 mod settlement_verifier;
+#[path = "../../tests/support/mod.rs"]
+mod support;
 use serde_json::{Value, json};
 use settlement_verifier::Authorization::CurrentSigner;
 use settlement_verifier::*;
@@ -93,7 +95,7 @@ impl Rpc for MockRpc {
                 };
                 json!({"number":format!("0x{n:x}"),"timestamp":format!("0x{:x}",n*10),"hash":hash(n as u8)})
             }
-            "eth_call" => {
+            "eth_call" => support::dispatch(&params, |params| {
                 let data = params[0]["data"].as_str().unwrap();
                 let sel = &data[2..10];
                 let output = if sel == selector("defiInsurance()") {
@@ -127,12 +129,37 @@ impl Rpc for MockRpc {
                 } else {
                     panic!("unexpected call: {data}")
                 };
-                json!(format!("0x{output}"))
-            }
+                Ok(json!(format!("0x{output}")))
+            })?,
             _ => panic!("unexpected RPC {method}: {params}"),
         })
     }
 }
+#[tokio::test]
+async fn promotion_aggregate_faults_never_authorize_or_fallback() {
+    for at in [0, 1] {
+        for fault in [
+            "revert",
+            "envelope",
+            "trailing-envelope",
+            "count",
+            "failed",
+            "empty",
+            "malformed",
+            "trailing-subcall",
+        ] {
+            let rpc = support::FaultRpc::new(MockRpc::new(true), fault, at);
+            assert!(
+                verify_for_promotion(&rpc, &policy(), "1", &fixture())
+                    .await
+                    .is_err(),
+                "{at} {fault}"
+            );
+            assert!(rpc.poisoned.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+}
+
 #[tokio::test]
 async fn authorizes_recovered_signer_only_via_canonical_pinned_rpc() {
     let rpc = MockRpc::new(true);
@@ -141,6 +168,15 @@ async fn authorizes_recovered_signer_only_via_canonical_pinned_rpc() {
         .unwrap();
     assert_eq!(verified.authorization(), CurrentSigner);
     assert_eq!(verified.block().number, 20);
+    let count = rpc
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(method, _)| method == "eth_call")
+        .count();
+    println!("promotion eth_call count: {count}");
+    assert_eq!(count, 5);
     for (method, params) in rpc.calls.lock().unwrap().iter() {
         if method == "eth_call" {
             assert!(params[1].as_str().unwrap().starts_with("0x"));
@@ -260,6 +296,11 @@ impl<R: Rpc> Rpc for Corrupt<R> {
         Default::default()
     }
     async fn request(&self, method: &str, params: Value) -> std::result::Result<Value, RpcError> {
+        if method == "eth_call"
+            && let Some(result) = support::dispatch_wrapped(self, &params).await
+        {
+            return result;
+        }
         let mut value = self.inner.request(method, params.clone()).await?;
         if self.case == "network" && method == "eth_chainId" {
             value = json!("0x2");
@@ -442,6 +483,11 @@ impl Rpc for RecoveryRpc {
         Default::default()
     }
     async fn request(&self, method: &str, params: Value) -> std::result::Result<Value, RpcError> {
+        if method == "eth_call"
+            && let Some(result) = support::dispatch_wrapped(self, &params).await
+        {
+            return result;
+        }
         if method == "eth_call"
             && params[0]["data"]
                 .as_str()

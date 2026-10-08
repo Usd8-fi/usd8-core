@@ -1,11 +1,10 @@
-use crate::abi::IRegistry;
 use crate::chain::{
     BlockAnchor, ChainError, Incident, SettlementAnchors, assert_anchors_unchanged,
-    assert_contract_code_at, chain_id, contract_call, decimals_at, defi_insurance_at,
-    derive_bootstrap_config_at, earned_score_of, finalized_settlement_anchors, incident_at,
-    incident_claim_deadline_at, incident_config_at, incident_tee_pcr_hash_at,
-    max_cover_pool_payout_bps_at, min_balances_over, min_erc1155_balance_over, pool_state_at,
-    pools_at, price_usd_1e18, read_input_events, spent_score_at, twap_ratio_before,
+    assert_contract_code_at, chain_id, decimals_at, defi_insurance_at, derive_bootstrap_config_at,
+    earned_score_of, finalized_settlement_anchors, incident_at, incident_claim_deadline_at,
+    incident_config_at, incident_tee_pcr_hash_at, min_balances_over, min_erc1155_balance_over,
+    pool_policy_at, pool_states_at, price_usd_1e18, read_input_events, spent_scores_at,
+    twap_ratio_before,
 };
 use crate::checkpoint::{BulkScoreSource, CheckpointError, CheckpointScoreSource};
 use crate::config::{BootstrapConfig, ConfigError, LOG_RESULT_CAP, MAX_LOG_RANGE};
@@ -522,7 +521,22 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         provisional.open_block,
     )
     .await?;
-    let topology = pools_at(rpc.as_ref(), config, provisional.open_block).await?;
+    let live_ids = replay
+        .live_claim_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    let include_booster = events
+        .iter()
+        .any(|event| live_ids.contains(&event.claim_id) && !event.booster_amount.is_zero());
+    let policy = pool_policy_at(
+        rpc.as_ref(),
+        config,
+        provisional.open_block,
+        include_booster,
+    )
+    .await?;
+    let topology = policy.topology;
+    let booster = policy.booster;
     let mut pools = Vec::with_capacity(topology.pool_addrs.len());
     for (index, (asset, pool)) in topology
         .assets
@@ -553,8 +567,16 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             anchors.window_end.number,
         )
         .await?;
-        let state =
-            pool_state_at(rpc.as_ref(), config, asset, pool, anchors.window_end.number).await?;
+    }
+    let pool_pairs = topology
+        .assets
+        .iter()
+        .copied()
+        .zip(topology.pool_addrs.iter().copied())
+        .collect::<Vec<_>>();
+    for state in
+        pool_states_at(rpc.as_ref(), config, &pool_pairs, anchors.window_end.number).await?
+    {
         pools.push(PoolInput {
             balance: state.balance,
             asset_usd: state.asset_usd,
@@ -562,8 +584,7 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
         });
     }
 
-    let max_payout_bps =
-        max_cover_pool_payout_bps_at(rpc.as_ref(), config.registry, provisional.open_block).await?;
+    let max_payout_bps = policy.max_payout_bps;
     if max_payout_bps > BigUint::from(10_000u16) {
         return Err(EngineError::Invariant(format!(
             "maxCoverPoolPayoutBps exceeds 10000: {max_payout_bps}"
@@ -694,22 +715,13 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
     .await?;
     log_metrics = merge_metrics(log_metrics, eligibility_metrics);
 
-    let booster = if live_events
-        .iter()
-        .any(|event| !event.booster_amount.is_zero())
-    {
-        Some(
-            contract_call(
-                rpc.as_ref(),
-                config.registry,
-                &IRegistry::boosterConfigCall {},
-                Some(provisional.open_block),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let spent_scores = spent_scores_at(
+        rpc.as_ref(),
+        config.registry,
+        &claimant_accounts,
+        provisional.open_block,
+    )
+    .await?;
     let mut claims = Vec::with_capacity(live_events.len());
     for event in live_events {
         let min_held = minimums.get(&event.user).cloned().ok_or_else(|| {
@@ -756,13 +768,9 @@ pub async fn build_settlement<R: Rpc + ?Sized>(
             log_metrics = merge_metrics(log_metrics, score_metrics);
             score
         };
-        let spent_score = spent_score_at(
-            rpc.as_ref(),
-            config.registry,
-            event.user,
-            provisional.open_block,
-        )
-        .await?;
+        let spent_score = spent_scores.get(&event.user).cloned().ok_or_else(|| {
+            EngineError::Invariant(format!("missing spent score for {}", event.user))
+        })?;
         claims.push(ClaimInput {
             claim_id: event.claim_id.clone(),
             user: event.user,

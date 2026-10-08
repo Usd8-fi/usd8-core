@@ -18,6 +18,8 @@ struct FakeStore {
     download_requests: Mutex<Vec<(String, u64)>>,
     on_budget_write: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     fail_create_prefix: Mutex<Option<String>>,
+    fail_budget_response: std::sync::atomic::AtomicBool,
+    pause_budget_response: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 #[async_trait]
@@ -48,19 +50,34 @@ impl JobStore for FakeStore {
         value: &[u8],
     ) -> Result<bool, ServiceError> {
         tokio::task::yield_now().await; // force races between snapshot read and CAS
-        let mut objects = self.objects.lock().unwrap();
-        let actual = objects
-            .get(key)
-            .map(|bytes| hex::encode(Sha256::digest(bytes)));
-        if actual.as_deref() != revision {
-            return Ok(false);
-        }
-        if key == "control/admission/v1.json"
-            && let Some(callback) = &*self.on_budget_write.lock().unwrap()
         {
-            callback();
+            let mut objects = self.objects.lock().unwrap();
+            let actual = objects
+                .get(key)
+                .map(|bytes| hex::encode(Sha256::digest(bytes)));
+            if actual.as_deref() != revision {
+                return Ok(false);
+            }
+            if key == "control/admission/v1.json"
+                && let Some(callback) = &*self.on_budget_write.lock().unwrap()
+            {
+                callback();
+            }
+            objects.insert(key.into(), value.to_vec());
         }
-        objects.insert(key.into(), value.to_vec());
+        if key == "control/admission/v1.json" {
+            let pause = self.pause_budget_response.lock().unwrap().take();
+            if let Some((entered, resume)) = pause {
+                entered.notify_one();
+                resume.notified().await;
+            }
+            if self
+                .fail_budget_response
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ServiceError::Unavailable);
+            }
+        }
         Ok(true)
     }
     async fn create(&self, key: &str, value: &[u8]) -> Result<CreateOutcome, ServiceError> {
@@ -548,6 +565,200 @@ async fn expired_attempt_recovers() {
     let next = app.submit("second", BODY).await.unwrap();
     assert_ne!(first.job_id, next.job_id);
     assert_eq!(launcher.calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn capacity_denial_recovers_after_launch_window_without_duplicate_workers() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let store = Arc::new(FakeStore::default());
+    let launcher = Arc::new(FakeLauncher::default());
+    let clock = Arc::new(AtomicU64::new(10_000));
+    let time = clock.clone();
+    let app = app(store.clone(), launcher.clone())
+        .with_clock(Arc::new(move || time.load(Ordering::SeqCst)))
+        .with_admission_policy(usd8_tee_job_api::AdmissionPolicy {
+            max_active_workers: 0,
+            max_starts_per_hour: 1,
+        })
+        .unwrap();
+    app.submit("first", br#"{"incidentId":"6"}"#).await.unwrap();
+    clock.store(13_500, Ordering::SeqCst);
+    assert_eq!(
+        app.submit("denied", BODY).await.unwrap_err(),
+        ServiceError::AdmissionLimited
+    );
+    // A repeat denial must remain retryable, rather than falsely return accepted.
+    assert_eq!(
+        app.submit("still-full", BODY).await.unwrap_err(),
+        ServiceError::AdmissionLimited
+    );
+    clock.store(13_621, Ordering::SeqCst);
+    let (a, b) = tokio::join!(app.submit("retry-a", BODY), app.submit("retry-b", BODY));
+    let a = a.unwrap();
+    assert_eq!(a, b.unwrap());
+    assert_eq!(launcher.calls.lock().unwrap().len(), 2);
+    assert_eq!(launcher.calls.lock().unwrap()[1], a.job_id);
+    let stored: serde_json::Value = serde_json::from_slice(
+        &store.objects.lock().unwrap()[&format!("requests/{}.json", a.job_id)],
+    )
+    .unwrap();
+    assert_eq!(stored["createdAt"], 13_621);
+    assert_eq!(stored["expiresAt"], 15_421);
+    let ledger: serde_json::Value =
+        serde_json::from_slice(&store.objects.lock().unwrap()["control/admission/v1.json"])
+            .unwrap();
+    assert_eq!(ledger["starts"].as_array().unwrap().len(), 1);
+    assert_eq!(app.submit("again", BODY).await.unwrap(), a);
+    assert_eq!(launcher.calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn open_job_denied_by_active_cap_recovers_after_launch_window() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let store = Arc::new(FakeStore::default());
+    let launcher = Arc::new(FakeLauncher::default());
+    let clock = Arc::new(AtomicU64::new(10_000));
+    let time = clock.clone();
+    let app = app(store, launcher.clone())
+        .with_clock(Arc::new(move || time.load(Ordering::SeqCst)))
+        .with_admission_policy(usd8_tee_job_api::AdmissionPolicy {
+            max_active_workers: 1,
+            max_starts_per_hour: 16,
+        })
+        .unwrap();
+    app.submit("first", BODY).await.unwrap();
+    let open = br#"{"insuredToken":"0x3333333333333333333333333333333333333333"}"#;
+    clock.store(11_000, Ordering::SeqCst);
+    assert_eq!(
+        app.submit_open("open", open).await.unwrap_err(),
+        ServiceError::AdmissionLimited
+    );
+    clock.store(11_121, Ordering::SeqCst);
+    *launcher.terminated.lock().unwrap() = true;
+    let started = app.submit_open("open", open).await.unwrap();
+    assert_eq!(launcher.calls.lock().unwrap().len(), 2);
+    assert_eq!(launcher.calls.lock().unwrap()[1], started.job_id);
+}
+
+#[tokio::test]
+async fn delayed_capacity_denial_cannot_overwrite_a_successful_retry() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let store = Arc::new(FakeStore::default());
+    let launcher = Arc::new(FakeLauncher::default());
+    let clock = Arc::new(AtomicU64::new(10_000));
+    let time = clock.clone();
+    let app = Arc::new(
+        app(store.clone(), launcher.clone())
+            .with_clock(Arc::new(move || time.load(Ordering::SeqCst)))
+            .with_admission_policy(usd8_tee_job_api::AdmissionPolicy {
+                max_active_workers: 0,
+                max_starts_per_hour: 1,
+            })
+            .unwrap(),
+    );
+    app.submit("first", br#"{"incidentId":"6"}"#).await.unwrap();
+    clock.store(13_550, Ordering::SeqCst);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    *store.pause_budget_response.lock().unwrap() = Some((entered.clone(), resume.clone()));
+    let delayed = {
+        let app = app.clone();
+        tokio::spawn(async move { app.submit("delayed", BODY).await })
+    };
+    entered.notified().await;
+    // First caller is waiting on its denial response. A new lease owner can now
+    // reserve capacity and launch, while still within this attempt's deadline.
+    clock.store(13_611, Ordering::SeqCst);
+    let started = app.submit("retry", BODY).await.unwrap();
+    assert_eq!(launcher.calls.lock().unwrap().len(), 2);
+    resume.notify_one();
+    assert_eq!(
+        delayed.await.unwrap().unwrap_err(),
+        ServiceError::AdmissionLimited
+    );
+    clock.store(13_700, Ordering::SeqCst);
+    assert_eq!(app.submit("again", BODY).await.unwrap(), started);
+    assert_eq!(launcher.calls.lock().unwrap().len(), 2);
+    let states: Vec<serde_json::Value> = store
+        .objects
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(key, _)| key.starts_with("control/work/"))
+        .map(|(_, bytes)| serde_json::from_slice(bytes).unwrap())
+        .collect();
+    assert!(states.iter().all(|state| state["admissionDenied"] == false));
+}
+
+#[tokio::test]
+async fn ambiguous_admission_write_reuses_reservation_without_an_extra_charge() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let store = Arc::new(FakeStore::default());
+    let launcher = Arc::new(FakeLauncher::default());
+    let clock = Arc::new(AtomicU64::new(10_000));
+    let time = clock.clone();
+    let app = app(store.clone(), launcher.clone())
+        .with_clock(Arc::new(move || time.load(Ordering::SeqCst)))
+        .with_admission_policy(usd8_tee_job_api::AdmissionPolicy {
+            max_active_workers: 0,
+            max_starts_per_hour: 1,
+        })
+        .unwrap();
+    store.fail_budget_response.store(true, Ordering::SeqCst);
+    assert_eq!(
+        app.submit("first", BODY).await.unwrap_err(),
+        ServiceError::Unavailable
+    );
+    let ledger: serde_json::Value =
+        serde_json::from_slice(&store.objects.lock().unwrap()["control/admission/v1.json"])
+            .unwrap();
+    let reserved_id = ledger["reservations"][0]["jobId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    clock.store(10_061, Ordering::SeqCst);
+    let started = app.submit("retry", BODY).await.unwrap();
+    assert_eq!(started.job_id, reserved_id);
+    assert_eq!(launcher.calls.lock().unwrap().as_slice(), [reserved_id]);
+    let after: serde_json::Value =
+        serde_json::from_slice(&store.objects.lock().unwrap()["control/admission/v1.json"])
+            .unwrap();
+    assert_eq!(after, ledger);
+}
+
+#[tokio::test]
+async fn ambiguous_or_legacy_launch_cannot_get_a_new_window_before_expiry() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    for legacy in [false, true] {
+        let store = Arc::new(FakeStore::default());
+        let launcher = Arc::new(FakeLauncher::default());
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let time = clock.clone();
+        let app = app(store.clone(), launcher.clone())
+            .with_clock(Arc::new(move || time.load(Ordering::SeqCst)));
+        *launcher.fail.lock().unwrap() = true;
+        assert_eq!(
+            app.submit("first", BODY).await.unwrap_err(),
+            ServiceError::Unavailable
+        );
+        let original = launcher.calls.lock().unwrap()[0].clone();
+        if legacy {
+            for (key, bytes) in store.objects.lock().unwrap().iter_mut() {
+                if key.starts_with("control/work/") {
+                    let mut state: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                    state.as_object_mut().unwrap().remove("admissionDenied");
+                    *bytes = serde_json::to_vec(&state).unwrap();
+                }
+            }
+        }
+        *launcher.fail.lock().unwrap() = false;
+        clock.store(10_121, Ordering::SeqCst);
+        assert_eq!(
+            app.submit("late-retry", BODY).await.unwrap().job_id,
+            original
+        );
+        assert_eq!(launcher.calls.lock().unwrap().as_slice(), [original]);
+    }
 }
 
 #[tokio::test]

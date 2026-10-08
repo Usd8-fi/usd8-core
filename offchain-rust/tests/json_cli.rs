@@ -1,5 +1,7 @@
 use serde_json::Value;
+#[cfg(feature = "kernel-tools")]
 use std::io::Write;
+#[cfg(feature = "kernel-tools")]
 use std::process::{Command, Stdio};
 use usd8_settlement::compute_json;
 
@@ -54,9 +56,10 @@ fn invalid_decimal_string_is_rejected() {
     );
 }
 
+#[cfg(feature = "kernel-tools")]
 #[test]
 fn cli_computes_shared_fixture() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_usd8-settlement"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_usd8-kernel"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -75,6 +78,46 @@ fn cli_computes_shared_fixture() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let expected: Value =
+        serde_json::from_str(&compute_json(include_str!("../fixtures/small.json")).unwrap())
+            .unwrap();
+    assert_eq!(value, expected);
+    let timing: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(timing["iterations"], 1);
+    let from_file = Command::new(env!("CARGO_BIN_EXE_usd8-kernel"))
+        .args(["fixtures/small.json", "2", "1"])
+        .output()
+        .unwrap();
+    assert!(from_file.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&from_file.stdout).unwrap(),
+        expected
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&from_file.stderr).unwrap()["iterations"],
+        2
+    );
+    for (args, code, message) in [
+        (vec!["/definitely/missing/usd8-fixture.json"], 1, "FATAL:"),
+        (
+            vec!["fixtures/small.json", "0"],
+            2,
+            "iterations must be greater than zero",
+        ),
+        (
+            vec!["fixtures/small.json", "1", "0", "extra"],
+            2,
+            "too many kernel arguments",
+        ),
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_usd8-kernel"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(code));
+        assert!(String::from_utf8_lossy(&result.stderr).contains(message));
+        assert!(result.stdout.is_empty());
+    }
     assert_eq!(
         value["root"],
         "0x4963216704d898788f548ccdaab73ba16930af05657b51eea8e8c885dcac80c1"

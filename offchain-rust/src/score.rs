@@ -1,7 +1,7 @@
 use crate::Address;
 use crate::chain::{
     ChainError, block_by_number, chain_id, defi_insurance_at, earned_score_of, finalized_block,
-    score_config_at, spent_score_at,
+    score_config_and_spent_at,
 };
 use crate::config::{CHAIN_ID, LOG_RESULT_CAP, MAX_LOG_RANGE};
 use crate::rpc::{LogMetrics, Rpc};
@@ -72,7 +72,8 @@ pub async fn insurance_score_at<R: Rpc + ?Sized>(
     if defi_insurance.is_zero() {
         return Err(ScoreError::ZeroDefiInsurance);
     }
-    let config = score_config_at(rpc, registry, defi_insurance, finalized.number).await?;
+    let (config, spent) =
+        score_config_and_spent_at(rpc, registry, defi_insurance, account, finalized.number).await?;
     let cutoff = score_cutoff_block(finalized.number, config.params.holding_margin_blocks);
     let cutoff_anchor = block_by_number(rpc, cutoff).await?;
     let (gross, LogMetrics { requests, .. }) = earned_score_of(
@@ -84,7 +85,6 @@ pub async fn insurance_score_at<R: Rpc + ?Sized>(
         LOG_RESULT_CAP,
     )
     .await?;
-    let spent = spent_score_at(rpc, registry, account, finalized.number).await?;
     let available = available_score(&gross, &spent);
     let final_cutoff = block_by_number(rpc, cutoff).await?;
     if final_cutoff.hash != cutoff_anchor.hash {

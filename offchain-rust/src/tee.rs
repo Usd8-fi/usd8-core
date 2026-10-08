@@ -141,6 +141,7 @@ trait NsmClient {
 
 #[cfg(any(all(target_os = "linux", feature = "nitro"), test))]
 fn fresh_nitro_attestation_with<N: NsmClient>(
+    //nsm means nitro security module
     nsm: &mut N,
     user_data: &[u8],
 ) -> Result<FreshAttestation, TeeError> {

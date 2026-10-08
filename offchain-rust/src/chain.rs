@@ -1,10 +1,10 @@
 use crate::abi::{
-    IAggregatorV3, IDefiInsurance, IERC20, IERC1155, IRegistry, ISingleAssetCoverPool,
+    IAggregatorV3, IDefiInsurance, IERC20, IERC1155, IMulticall3, IRegistry, ISingleAssetCoverPool,
 };
 use crate::config::BootstrapConfig;
 use crate::rpc::{LogFilter, LogMetrics, Rpc, RpcError, RpcLog, get_logs_chunked};
 use crate::{Address, ClaimEvent, EventKind};
-use alloy_primitives::{Address as AlloyAddress, B256, U256};
+use alloy_primitives::{Address as AlloyAddress, B256, Bytes, U256, address};
 use alloy_sol_types::{SolCall, SolEvent};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -421,6 +421,106 @@ where
     })
 }
 
+const MULTICALL3: AlloyAddress = address!("ca11bde05977b3631167028862be2a173976ca11");
+
+pub fn read_call<C: SolCall>(target: Address, call: C) -> IMulticall3::Call3 {
+    IMulticall3::Call3 {
+        target: AlloyAddress::from(target.into_bytes()),
+        allowFailure: false,
+        callData: call.abi_encode().into(),
+    }
+}
+
+pub fn decode_read<C: SolCall>(data: &[u8]) -> Result<C::Return, crate::chain::ChainError> {
+    let value =
+        C::abi_decode_returns_validate(data).map_err(|error| crate::chain::ChainError::Abi {
+            function: C::SIGNATURE,
+            message: error.to_string(),
+        })?;
+    // Alloy validates types but permits trailing bytes; require the exact ABI
+    // encoding for both the aggregate envelope and each target's return value.
+    if C::abi_encode_returns(&value) != data {
+        return Err(crate::chain::ChainError::Abi {
+            function: C::SIGNATURE,
+            message: "non-canonical or trailing return data".to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+/// Read reviewed caller-independent protocol getters at one pinned block.
+/// Empty plans do no I/O; a single read stays direct (not a fallback). Larger
+/// plans are deterministic chunks of 64, with at most 32 KiB of ABI request data.
+/// Hex doubles this to 64 KiB JSON data, well below the 16 MiB HttpRpc response
+/// ceiling. Dynamic return sizes cannot be predicted: the unchanged transport
+/// byte cap and timeout remain authoritative; oversized/reverted calls abort,
+/// never retry with smaller chunks or another provider. Callers must exact-decode
+/// every returned item with decode_read before using any result.
+pub async fn aggregate_reads<R: Rpc + ?Sized>(
+    rpc: &R,
+    calls: Vec<IMulticall3::Call3>,
+    block: u64,
+) -> Result<Vec<Bytes>, ChainError> {
+    const MAX_CALLS: usize = 64;
+    const MAX_INPUT_BYTES: usize = 32 * 1024;
+    // Preflight the entire plan before I/O, including the singleton path.
+    if calls
+        .iter()
+        .any(|call| call.allowFailure || call.callData.len() < 4)
+    {
+        return Err(ChainError::InvalidCallResult(
+            "invalid required read plan".to_owned(),
+        ));
+    }
+    let mut plans = Vec::new();
+    for chunk in calls.chunks(MAX_CALLS) {
+        let call = IMulticall3::aggregate3Call {
+            calls: chunk.to_vec(),
+        };
+        let data = call.abi_encode();
+        if data.len() > MAX_INPUT_BYTES {
+            return Err(ChainError::InvalidCallResult(
+                "Multicall3 request byte cap exceeded".to_owned(),
+            ));
+        }
+        plans.push((call, data));
+    }
+    let mut output = Vec::with_capacity(calls.len());
+    for (call, encoded) in plans {
+        if call.calls.len() == 1 {
+            let input = &call.calls[0];
+            let data =
+                raw_call(rpc, from_alloy(input.target), &input.callData, Some(block)).await?;
+            if data.is_empty() {
+                return Err(ChainError::InvalidCallResult(
+                    "empty required read".to_owned(),
+                ));
+            }
+            output.push(data.into());
+            continue;
+        }
+        // aggregate3 is payable, but this is eth_call, never a transaction.
+        let data = raw_call(rpc, from_alloy(MULTICALL3), &encoded, Some(block)).await?;
+        let results = decode_read::<IMulticall3::aggregate3Call>(&data)?;
+        if results.len() != call.calls.len() {
+            return Err(ChainError::InvalidCallResult(
+                "Multicall3 result count mismatch".to_owned(),
+            ));
+        }
+        for (result, input) in results.into_iter().zip(&call.calls) {
+            if !result.success || result.returnData.is_empty() {
+                return Err(ChainError::InvalidCallResult(format!(
+                    "Multicall3 failed or empty subcall to {:#x} selector 0x{}",
+                    input.target,
+                    hex::encode(&input.callData[..4]),
+                )));
+            }
+            output.push(result.returnData);
+        }
+    }
+    Ok(output)
+}
+
 pub async fn defi_insurance_at<R: Rpc + ?Sized>(
     rpc: &R,
     registry: Address,
@@ -437,6 +537,66 @@ pub async fn defi_insurance_at<R: Rpc + ?Sized>(
     ))
 }
 
+/// Reciprocal bindings for a caller-supplied trusted protocol identity.
+pub async fn protocol_bindings_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    defi_insurance: Address,
+    block: u64,
+) -> Result<(Address, Address), ChainError> {
+    let reads = aggregate_reads(
+        rpc,
+        vec![
+            read_call(registry, IRegistry::defiInsuranceCall {}),
+            read_call(defi_insurance, IDefiInsurance::registryCall {}),
+        ],
+        block,
+    )
+    .await?;
+    Ok((
+        from_alloy(decode_read::<IRegistry::defiInsuranceCall>(&reads[0])?),
+        from_alloy(decode_read::<IDefiInsurance::registryCall>(&reads[1])?),
+    ))
+}
+
+/// Both getters are caller-independent incident/signer storage, not permission
+/// checks on msg.sender. Keep historical execution evidence separate from this
+/// current finalized signer lookup.
+pub async fn incident_pools_and_signer_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    defi_insurance: Address,
+    incident_id: &BigUint,
+    signer: Address,
+    block: u64,
+) -> Result<(Vec<Address>, bool), ChainError> {
+    let reads = aggregate_reads(
+        rpc,
+        vec![
+            read_call(
+                defi_insurance,
+                IDefiInsurance::incidentPoolsCall {
+                    incidentId: big_to_u256(incident_id, "incidentId")?,
+                },
+            ),
+            read_call(
+                defi_insurance,
+                IDefiInsurance::isTeeSignerCall {
+                    signer: to_alloy(signer),
+                },
+            ),
+        ],
+        block,
+    )
+    .await?;
+    Ok((
+        decode_read::<IDefiInsurance::incidentPoolsCall>(&reads[0])?
+            .into_iter()
+            .map(from_alloy)
+            .collect(),
+        decode_read::<IDefiInsurance::isTeeSignerCall>(&reads[1])?,
+    ))
+}
+
 pub async fn derive_bootstrap_config_at<R: Rpc + ?Sized>(
     rpc: &R,
     registry: Address,
@@ -449,60 +609,44 @@ pub async fn derive_bootstrap_config_at<R: Rpc + ?Sized>(
             "Registry defiInsurance changed at block {block_number}: expected {expected_defi_insurance}, got {defi_insurance}"
         )));
     }
-    let reverse_registry = from_alloy(
-        contract_call(
-            rpc,
-            defi_insurance,
-            &IDefiInsurance::registryCall {},
-            Some(block_number),
-        )
-        .await?,
-    );
+    let reads = aggregate_reads(
+        rpc,
+        vec![
+            read_call(defi_insurance, IDefiInsurance::registryCall {}),
+            read_call(registry, IRegistry::boosterConfigCall {}),
+            read_call(registry, IRegistry::coverPoolsCall {}),
+            read_call(registry, IRegistry::maxOracleStalenessCall {}),
+        ],
+        block_number,
+    )
+    .await?;
+    let reverse_registry = from_alloy(decode_read::<IDefiInsurance::registryCall>(&reads[0])?);
     if reverse_registry != registry {
         return Err(ChainError::InvalidConfiguration(format!(
             "DefiInsurance registry mismatch: expected {registry}, got {reverse_registry}"
         )));
     }
-    let booster = contract_call(
-        rpc,
-        registry,
-        &IRegistry::boosterConfigCall {},
-        Some(block_number),
-    )
-    .await?;
+    let booster = decode_read::<IRegistry::boosterConfigCall>(&reads[1])?;
     let booster_id = booster.tokenId;
     let booster_boost_bps = u64::from(booster.boostBps);
-    let assets = contract_call(
+    let assets = decode_read::<IRegistry::coverPoolsCall>(&reads[2])?.assets;
+    let max_oracle_staleness = decode_read::<IRegistry::maxOracleStalenessCall>(&reads[3])?;
+    let feed_reads = aggregate_reads(
         rpc,
-        registry,
-        &IRegistry::coverPoolsCall {},
-        Some(block_number),
-    )
-    .await?
-    .assets;
-    let mut feeds = BTreeMap::new();
-    for asset in assets {
-        let asset = from_alloy(asset);
-        let feed = from_alloy(
-            contract_call(
-                rpc,
-                registry,
-                &IRegistry::assetUsdFeedCall {
-                    asset: to_alloy(asset),
-                },
-                Some(block_number),
-            )
-            .await?,
-        );
-        feeds.insert(asset, feed);
-    }
-    let max_oracle_staleness = contract_call(
-        rpc,
-        registry,
-        &IRegistry::maxOracleStalenessCall {},
-        Some(block_number),
+        assets
+            .iter()
+            .map(|asset| read_call(registry, IRegistry::assetUsdFeedCall { asset: *asset }))
+            .collect(),
+        block_number,
     )
     .await?;
+    let mut feeds = BTreeMap::new();
+    for (asset, data) in assets.into_iter().zip(feed_reads) {
+        feeds.insert(
+            from_alloy(asset),
+            from_alloy(decode_read::<IRegistry::assetUsdFeedCall>(&data)?),
+        );
+    }
     BootstrapConfig::derived(
         registry,
         defi_insurance,
@@ -630,6 +774,42 @@ pub async fn spent_score_at<R: Rpc + ?Sized>(
     Ok(u256_to_big(value))
 }
 
+/// Registry scoreSpent is a storage mapping keyed by account, not msg.sender.
+pub async fn spent_scores_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    accounts: &BTreeSet<Address>,
+    block_number: u64,
+) -> Result<BTreeMap<Address, BigUint>, ChainError> {
+    let reads = aggregate_reads(
+        rpc,
+        accounts
+            .iter()
+            .map(|account| {
+                read_call(
+                    registry,
+                    IRegistry::scoreSpentCall {
+                        account: to_alloy(*account),
+                    },
+                )
+            })
+            .collect(),
+        block_number,
+    )
+    .await?;
+    accounts
+        .iter()
+        .copied()
+        .zip(reads)
+        .map(|(account, data)| {
+            Ok((
+                account,
+                u256_to_big(decode_read::<IRegistry::scoreSpentCall>(&data)?),
+            ))
+        })
+        .collect()
+}
+
 pub async fn incident_tee_pcr_hash_at<R: Rpc + ?Sized>(
     rpc: &R,
     defi_insurance: Address,
@@ -667,15 +847,25 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
     insured_token: Address,
     open_block: u64,
 ) -> Result<IncidentConfig, ChainError> {
-    let insured = contract_call(
+    let reads = aggregate_reads(
         rpc,
-        config.defi_insurance,
-        &IDefiInsurance::getInsuredTokenCall {
-            token: to_alloy(insured_token),
-        },
-        Some(open_block),
+        vec![
+            read_call(
+                config.defi_insurance,
+                IDefiInsurance::getInsuredTokenCall {
+                    token: to_alloy(insured_token),
+                },
+            ),
+            read_call(
+                config.defi_insurance,
+                IDefiInsurance::settlementParamsCall {},
+            ),
+            read_call(config.registry, IRegistry::getScoredTokensCall {}),
+        ],
+        open_block,
     )
     .await?;
+    let insured = decode_read::<IDefiInsurance::getInsuredTokenCall>(&reads[0])?;
     if insured.maxCoverageBps == 0 || insured.maxCoverageBps > 10_000 {
         return Err(ChainError::InvalidConfiguration(
             "maxCoverageBps must be in 1..=10000 at open block".to_owned(),
@@ -686,8 +876,14 @@ pub async fn incident_config_at<R: Rpc + ?Sized>(
             "underlyingPriceOracle is zero".to_owned(),
         ));
     }
-    let score_config =
-        score_config_at(rpc, config.registry, config.defi_insurance, open_block).await?;
+    let score_config = complete_score_config(
+        rpc,
+        config.registry,
+        open_block,
+        decode_read::<IDefiInsurance::settlementParamsCall>(&reads[1])?,
+        decode_read::<IRegistry::getScoredTokensCall>(&reads[2])?,
+    )
+    .await?;
 
     Ok(IncidentConfig {
         coverage_bps: BigUint::from(insured.maxCoverageBps),
@@ -705,44 +901,98 @@ pub async fn score_config_at<R: Rpc + ?Sized>(
     defi_insurance: Address,
     block_number: u64,
 ) -> Result<ScoreConfig, ChainError> {
-    let params = contract_call(
+    let reads = aggregate_reads(
         rpc,
-        defi_insurance,
-        &IDefiInsurance::settlementParamsCall {},
-        Some(block_number),
+        vec![
+            read_call(defi_insurance, IDefiInsurance::settlementParamsCall {}),
+            read_call(registry, IRegistry::getScoredTokensCall {}),
+        ],
+        block_number,
     )
     .await?;
+    complete_score_config(
+        rpc,
+        registry,
+        block_number,
+        decode_read::<IDefiInsurance::settlementParamsCall>(&reads[0])?,
+        decode_read::<IRegistry::getScoredTokensCall>(&reads[1])?,
+    )
+    .await
+}
+
+/// A score consumer needs both its configuration and spent score at the same
+/// finalized block. Only protocol storage getters are aggregated; arbitrary
+/// scored-token decimals/balances retain their original direct caller.
+pub async fn score_config_and_spent_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    defi_insurance: Address,
+    account: Address,
+    block_number: u64,
+) -> Result<(ScoreConfig, BigUint), ChainError> {
+    let reads = aggregate_reads(
+        rpc,
+        vec![
+            read_call(defi_insurance, IDefiInsurance::settlementParamsCall {}),
+            read_call(registry, IRegistry::getScoredTokensCall {}),
+            read_call(
+                registry,
+                IRegistry::scoreSpentCall {
+                    account: to_alloy(account),
+                },
+            ),
+        ],
+        block_number,
+    )
+    .await?;
+    let spent = u256_to_big(decode_read::<IRegistry::scoreSpentCall>(&reads[2])?);
+    let config = complete_score_config(
+        rpc,
+        registry,
+        block_number,
+        decode_read::<IDefiInsurance::settlementParamsCall>(&reads[0])?,
+        decode_read::<IRegistry::getScoredTokensCall>(&reads[1])?,
+    )
+    .await?;
+    Ok((config, spent))
+}
+
+async fn complete_score_config<R: Rpc + ?Sized>(
+    rpc: &R,
+    registry: Address,
+    block_number: u64,
+    params: IDefiInsurance::settlementParamsReturn,
+    token_addresses: Vec<AlloyAddress>,
+) -> Result<ScoreConfig, ChainError> {
     if params.sampleStepBlocks == 0 {
         return Err(ChainError::InvalidConfiguration(
             "sampleStepBlocks is zero".to_owned(),
         ));
     }
-
-    let token_addresses = contract_call(
+    let histories = aggregate_reads(
         rpc,
-        registry,
-        &IRegistry::getScoredTokensCall {},
-        Some(block_number),
+        token_addresses
+            .iter()
+            .map(|token| {
+                read_call(
+                    registry,
+                    IRegistry::getScoredRateHistoryCall { token: *token },
+                )
+            })
+            .collect(),
+        block_number,
     )
     .await?;
     let mut seen = HashSet::new();
     let mut scored_tokens = Vec::with_capacity(token_addresses.len());
-    for token in token_addresses {
+    for (token, data) in token_addresses.into_iter().zip(histories) {
         let token = from_alloy(token);
         if !seen.insert(token) {
             return Err(ChainError::InvalidConfiguration(format!(
                 "duplicate scored token {token}"
             )));
         }
-        let rates = contract_call(
-            rpc,
-            registry,
-            &IRegistry::getScoredRateHistoryCall {
-                token: to_alloy(token),
-            },
-            Some(block_number),
-        )
-        .await?;
+        let rates = decode_read::<IRegistry::getScoredRateHistoryCall>(&data)?;
         if rates.is_empty() {
             return Err(ChainError::InvalidConfiguration(format!(
                 "scored token {token} has no rate history"
@@ -781,6 +1031,39 @@ pub async fn score_config_at<R: Rpc + ?Sized>(
     })
 }
 
+pub struct PoolPolicy {
+    pub topology: PoolTopology,
+    pub max_payout_bps: BigUint,
+    pub booster: Option<IRegistry::boosterConfigReturn>,
+}
+
+pub async fn pool_policy_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    config: &BootstrapConfig,
+    block: u64,
+    include_booster: bool,
+) -> Result<PoolPolicy, ChainError> {
+    let mut calls = vec![
+        read_call(config.registry, IRegistry::coverPoolsCall {}),
+        read_call(config.registry, IRegistry::maxCoverPoolPayoutBpsCall {}),
+    ];
+    if include_booster {
+        calls.push(read_call(config.registry, IRegistry::boosterConfigCall {}));
+    }
+    let reads = aggregate_reads(rpc, calls, block).await?;
+    Ok(PoolPolicy {
+        topology: decode_pool_topology(decode_read::<IRegistry::coverPoolsCall>(&reads[0])?)?,
+        max_payout_bps: u256_to_big(decode_read::<IRegistry::maxCoverPoolPayoutBpsCall>(
+            &reads[1],
+        )?),
+        booster: if include_booster {
+            Some(decode_read::<IRegistry::boosterConfigCall>(&reads[2])?)
+        } else {
+            None
+        },
+    })
+}
+
 pub async fn pools_at<R: Rpc + ?Sized>(
     rpc: &R,
     config: &BootstrapConfig,
@@ -793,6 +1076,10 @@ pub async fn pools_at<R: Rpc + ?Sized>(
         Some(block_number),
     )
     .await?;
+    decode_pool_topology(result)
+}
+
+fn decode_pool_topology(result: IRegistry::coverPoolsReturn) -> Result<PoolTopology, ChainError> {
     if result.assets.len() != result.poolAddrs.len() {
         return Err(ChainError::InvalidPoolTopology(format!(
             "{} assets but {} pools",
@@ -820,6 +1107,46 @@ pub async fn pools_at<R: Rpc + ?Sized>(
     Ok(PoolTopology { assets, pool_addrs })
 }
 
+/// Direct conversion calls at distinct numeric block tags in one HTTP batch.
+/// Unlike Multicall3 this preserves the caller context of each recipe.
+pub async fn ratios_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    conversion_address: Address,
+    conversion_call_data: &[u8],
+    blocks: &[u64],
+) -> Result<Vec<BigUint>, ChainError> {
+    if conversion_address.is_zero() {
+        return Ok(vec![
+            BigUint::from(1_000_000_000_000_000_000u64);
+            blocks.len()
+        ]);
+    }
+    if blocks.is_empty() || blocks.len() > 256 || conversion_call_data.len() > 16 * 1024 {
+        return Err(crate::rpc::RpcError::InvalidBatch.into());
+    }
+    let data = format!("0x{}", hex::encode(conversion_call_data));
+    let params = blocks
+        .iter()
+        .map(|block| {
+            json!([{
+        "to": conversion_address.to_string(), "data": data
+    }, format!("0x{block:x}")])
+        })
+        .collect();
+    let results = rpc.batch_request("eth_call", params).await?;
+    if results.len() != blocks.len() {
+        return Err(crate::rpc::RpcError::InvalidResponse {
+            method: "eth_call".into(),
+            message: "conversion batch result count mismatch".into(),
+        }
+        .into());
+    }
+    results
+        .into_iter()
+        .map(|result| decode_ratio(conversion_address, &decode_call_result(result)?))
+        .collect()
+}
+
 pub async fn ratio_at<R: Rpc + ?Sized>(
     rpc: &R,
     conversion_address: Address,
@@ -836,13 +1163,17 @@ pub async fn ratio_at<R: Rpc + ?Sized>(
         Some(block_number),
     )
     .await?;
+    decode_ratio(conversion_address, &result)
+}
+
+fn decode_ratio(conversion_address: Address, result: &[u8]) -> Result<BigUint, ChainError> {
     if result.len() != 32 {
         return Err(ChainError::InvalidConversion {
             address: conversion_address,
             message: "returned malformed uint256 data".to_owned(),
         });
     }
-    let ratio = BigUint::from_bytes_be(&result);
+    let ratio = BigUint::from_bytes_be(result);
     if ratio == BigUint::from(0u8) {
         return Err(ChainError::InvalidConversion {
             address: conversion_address,
@@ -935,41 +1266,58 @@ pub async fn pool_state_at<R: Rpc + ?Sized>(
     pool: Address,
     block_number: u64,
 ) -> Result<PoolState, ChainError> {
-    let actual_asset = from_alloy(
-        contract_call(
-            rpc,
+    let mut states = pool_states_at(rpc, config, &[(asset, pool)], block_number).await?;
+    Ok(states.remove(0))
+}
+
+/// Pool accounting is local storage (SingleAssetCoverPool::totalAssets), and
+/// asset() is the inherited ERC4626 storage getter. External token metadata and
+/// configurable oracle feeds are deliberately NOT called through Multicall3.
+pub async fn pool_states_at<R: Rpc + ?Sized>(
+    rpc: &R,
+    config: &BootstrapConfig,
+    pools: &[(Address, Address)],
+    block_number: u64,
+) -> Result<Vec<PoolState>, ChainError> {
+    let reads = aggregate_reads(
+        rpc,
+        pools
+            .iter()
+            .flat_map(|(_, pool)| {
+                [
+                    read_call(*pool, ISingleAssetCoverPool::assetCall {}),
+                    read_call(*pool, ISingleAssetCoverPool::totalAssetsCall {}),
+                ]
+            })
+            .collect(),
+        block_number,
+    )
+    .await?;
+    let mut states = Vec::with_capacity(pools.len());
+    for ((asset, pool), pair) in pools.iter().copied().zip(reads.chunks_exact(2)) {
+        let actual_asset = from_alloy(decode_read::<ISingleAssetCoverPool::assetCall>(&pair[0])?);
+        if actual_asset != asset {
+            return Err(ChainError::PoolAssetMismatch {
+                pool,
+                actual: actual_asset,
+                expected: asset,
+            });
+        }
+        let balance = u256_to_big(decode_read::<ISingleAssetCoverPool::totalAssetsCall>(
+            &pair[1],
+        )?);
+        let feed = config.asset_feed(asset).map_err(|_| {
+            ChainError::InvalidPoolTopology(format!("missing USD feed for {asset}"))
+        })?;
+        states.push(PoolState {
+            asset,
             pool,
-            &ISingleAssetCoverPool::assetCall {},
-            Some(block_number),
-        )
-        .await?,
-    );
-    if actual_asset != asset {
-        return Err(ChainError::PoolAssetMismatch {
-            pool,
-            actual: actual_asset,
-            expected: asset,
+            balance,
+            asset_usd: price_usd_1e18(rpc, feed, block_number, config.max_oracle_staleness).await?,
+            asset_decimals: decimals_at(rpc, asset, block_number).await?,
         });
     }
-    let balance = u256_to_big(
-        contract_call(
-            rpc,
-            pool,
-            &ISingleAssetCoverPool::totalAssetsCall {},
-            Some(block_number),
-        )
-        .await?,
-    );
-    let feed = config
-        .asset_feed(asset)
-        .map_err(|_| ChainError::InvalidPoolTopology(format!("missing USD feed for {asset}")))?;
-    Ok(PoolState {
-        asset,
-        pool,
-        balance,
-        asset_usd: price_usd_1e18(rpc, feed, block_number, config.max_oracle_staleness).await?,
-        asset_decimals: decimals_at(rpc, asset, block_number).await?,
-    })
+    Ok(states)
 }
 
 fn topic_hash(value: B256) -> Value {

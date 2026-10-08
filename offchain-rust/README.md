@@ -1,659 +1,202 @@
-# USD8 Rust settlement runtime
+# USD8 off-chain Rust runtime
 
-Rust is the complete production settlement path. It performs finalized Ethereum
-reads, event replay, historical eligibility and score reconstruction, pool/oracle
-valuation, allocation, commitments, OpenZeppelin-compatible Merkle proofs, and
-EIP-712 digest construction. The package builds, tests, and runs independently
-with only the pinned Cargo dependency graph. The fixture kernel remains available
-for deterministic replay and public verification.
+This directory provides a local CLI and **three AWS Lambda executables** for
+insurance scores, opening/settlement job orchestration, and worker cleanup.
+They share Rust calculation code but have different entrypoints and trust
+boundaries. Settlement
+reconstructs finalized history, computes payouts, and builds Merkle commitments
+and EIP-712 digests; the cloud worker adds enclave-local signing.
 
-All settlement arithmetic uses `BigUint` intermediates and checks values before
-ABI encoding as `uint256`. JSON integers are canonical decimal strings.
+## Three Lambdas and the local CLI
 
-## Build and quality gate
+| Executable | Entrypoint | Role |
+| --- | --- | --- |
+| `usd8-score-lambda` | [score-api/src/bin/lambda.rs](score-api/src/bin/lambda.rs) | Public read-only display scores, backed by DynamoDB. |
+| `usd8-tee-job-lambda` | [job-api/src/bin/lambda.rs](job-api/src/bin/lambda.rs) | Opening/settlement prechecks, job admission, EC2 launch, polling and result retrieval. |
+| `usd8-tee-janitor` | [job-api/src/bin/janitor.rs](job-api/src/bin/janitor.rs) | Scheduled cleanup of expired tagged EC2 workers. |
+| `usd8-settlement` | [src/main.rs](src/main.rs) | Local historical score, price-drop and settlement computation; optional Nitro attestation. |
 
-```bash
-cd offchain-rust
-cargo fmt --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked
-cargo build --release --locked
-python3 job-api/deploy/audit-dependencies.py
-```
-
-The isolated four-graph audit helper permits only the operator-approved
-maintenance notices RUSTSEC-2021-0127 (`serde_cbor` through the official AWS NSM
-SDK), RUSTSEC-2024-0388 (`derivative`), and RUSTSEC-2024-0436 (`paste`). No RSA
-vulnerability or additional advisory is exempted. The RSA backend and Alloy
-macro dependency have been migrated rather than exempted; see
-[job-api/deploy/DEPENDENCY-AUDIT-EXCEPTIONS.md](job-api/deploy/DEPENDENCY-AUDIT-EXCEPTIONS.md)
-for configuration precedence, exact flags, and upstream remediation requirements.
-
-## Production bootstrap
-
-There is no settlement JSON configuration. Supply one fixed Registry proxy
-address through `--registry` or `USD8_REGISTRY`. At the incident `openBlock`, the
-runtime derives and validates both directions of the Registry/DefiInsurance
-binding, booster policy, pool topology, every pool-asset USD feed, and the global
-oracle-staleness limit. The default build is fixed to Ethereum mainnet; the
-`sepolia` feature fixes it to chain ID `11155111` for staging.
-
-`MAX_LOG_RANGE = 1000` and `LOG_RESULT_CAP = 1000` are compiled into the measured
-runtime because they describe approved RPC behavior rather than protocol state.
-The derived state and baked limits are committed in the artifact `configHash`.
-Missing feeds, zero policy, invalid booster policy, wrong chain, wiring
-mismatch, or missing historical bytecode fail closed. Version 5 applies only to
-incidents opened after these Registry selectors and values exist; rollout must
-have no active incident and configure every active pool feed before reopening.
-
-The Registry-only CLI intentionally resolves the currently registered
-DefiInsurance. Governance must not rotate that module until all incidents it
-owns are closed and their artifacts are archived; reproducing an older rotated
-module requires its archived artifact/runtime rather than bare incident ID,
-because incident IDs are module-local.
-
-## Compute and verify
-
-Use an archive-capable RPC with historical `eth_call`, `eth_getCode`,
-`eth_getLogs`, and `finalized` block support. The attested production release is
-pinned to an approved provider verified not to silently cap below the baked
-1,000-result threshold; otherwise completeness cannot be inferred from a short
-page:
-
-```bash
-export ETH_RPC_URL='https://trusted-rpc.example'
-export USD8_REGISTRY='0x…'
-
-target/release/usd8-settlement compute 7 \
-  --registry "$USD8_REGISTRY" \
-  --raw-score \
-  --output artifacts/incident-7.json
-
-target/release/usd8-settlement verify 7 \
-  --registry "$USD8_REGISTRY" \
-  --raw-score
-
-# Inside the Nitro Enclave; fails unless local PCR0-2 match the incident snapshot.
-target/release/usd8-settlement attested-compute 7 \
-  --registry "$USD8_REGISTRY" \
-  --bulk-score \
-  --output artifacts/incident-7-attested.json
-```
-
-`--rpc-url` overrides `ETH_RPC_URL`. `--output` uses a same-directory temporary
-file, `fsync`, atomic rename, directory `fsync`, byte-for-byte read-back, and
-JSON read-back. Its parent directory must already exist. Without `--output`, the
-artifact is written to stdout. Checkpoint, checkpoint-lock, and output paths are resolved before RPC work and
-rejected if writable paths alias.
-`compute` includes each proof; `verify` omits proofs and compares the reproduced
-root with the latest on-chain root. `attested-compute` additionally requests a fresh nonce-bound NSM attestation,
-binds the 32-byte EIP-712 settlement digest into the attestation `user_data`,
-parses locked SHA-384 PCR0/PCR1/PCR2, and
-requires this canonical commitment to equal DefiInsurance's incident-open snapshot:
+The score and job Lambdas use the HTTP runtime. The janitor consumes native
+scheduled Lambda events, not HTTP requests. Their opt-in Cargo features are
+`lambda` in [score-api/Cargo.toml](score-api/Cargo.toml), and `lambda` / `janitor`
+in [job-api/Cargo.toml](job-api/Cargo.toml), respectively.
 
 ```text
-keccak256("USD8_TEE_PCR0_2_V1" || PCR0 || PCR1 || PCR2)
+HTTP client -> API Gateway -> score Lambda -> DynamoDB display cache
+                          -> job Lambda   -> S3 requests/results
+                                          -> EC2 parent -> Nitro enclave
+Schedule ------------------> janitor Lambda -> terminate expired EC2 workers
+Local CLI ---------------------------------> historical Ethereum RPC
 ```
 
-It fails outside a Nitro Enclave or on any mismatch. Its artifact includes the
-raw COSE attestation document, `nitroAttestedDigest`, and measured commitment for
-independent AWS certificate-chain, signature, nonce, `user_data`, and PCR validation.
+[`usd8-tee-parent`](job-api/src/bin/parent.rs) and
+[`usd8-tee-enclave`](job-api/src/bin/enclave.rs) are **EC2/Nitro worker binaries,
+not additional Lambdas**. The parent starts the enclave and handles transport;
+the enclave calls the shared library directly, not the CLI subprocess.
 
-Optional flags are `--timeout-ms <1..=120000>`, `--no-drpc-key` (compute/verify
-only), `--checkpoint <path>`, `--checkpoint-key-env <name>`, `--bulk-score`, and
-`--raw-score`.
-`attested-compute` requires `DRPC_KEY`, which also restricts the URL to the exact
-approved dRPC HTTPS hosts.
-Raw, bulk, and checkpoint modes are pairwise exclusive. The default checkpoint key
-variable is `SCORE_CHECKPOINT_KEY`; `SCORE_CHECKPOINT_PATH` supplies a default
-path when neither score-mode flag is present.
+### Public score service
 
-Exit codes are stable:
+The score Lambda supports `GET /score/{chainId}/{account}` and a legacy
+`GET /score/{account}` route. API Gateway exposes the routes selected for each
+deployment. The service serves an allowlisted network's display snapshot.
+Ordinary requests use the final block before the current UTC day and reuse the
+DynamoDB snapshot for that day. `?refresh=1` may replace it with a finalized
+intraday snapshot after the five-minute successful-refresh cooldown. Replay
+leases and a shared work budget bound expensive refresh work.
 
-- `0`: compute succeeded, or verify matched;
-- `1`: verify mismatch or fatal chain/config/I/O/invariant failure;
-- `2`: malformed command-line usage.
+Display `grossEarnedScore` includes unmatured earnings; `maturedGrossEarnedScore`
+and `availableScore` distinguish what can be spent. This is **not the local CLI's
+score schema** and is never an authoritative settlement input. See the
+[score service README](score-api/README.md) for caching, fields and operations.
 
-The artifact includes schema/config versions, hash, and the full derived
-Registry/module/feed/staleness bootstrap preimage anchored at `openBlock`, plus
-`teePcrHash`, all four block anchors,
-RPC/log metrics, score-source provenance, claim-set and settlement-input
-commitments, ordered pools and payouts, root/on-chain root/match flag, EIP-712
-digest, canonical score input rows, payout rows, and optional proofs. Before any
-output, Rust independently recomputes the claim-set hash, input hash, Merkle
-root/proofs, per-pool row totals, and settlement digest. Settlement artifacts use
-schema version 2; incident-open artifacts remain version 1. Each payout leaf is
-`(incidentId, claimId, user, amounts, scoreSpent, boostedScore, eligibleAmount, eligibleBoosterAmount)`.
-Raw `scoreSpent` is recorded in the Registry; `boostedScore` affects only allocation.
+### Opening and settlement job service
 
-For boosters, settlement replays ERC-1155 balances over the insured token's same
-`[referenceBlock - minHoldingRequired, referenceBlock]` interval, using the policy
-and booster configuration at `openBlock`. `eligibleBoosterAmount` is the smaller
-of the escrowed quantity and the minimum historical balance. Missing or
-inconsistent history fails closed. Rows also report the original `boosterAmount`,
-which remains stored on-chain and bound by `claimSetHash`. Kernel JSON inputs require `boosterHeld`.
-The contract checks the proven quantity against escrow and recomputes the boost
-from that quantity. Accepting an eligible claim burns only eligible boosters and
-refunds the excess; declining, cancellation, recovery, or a bond-ineligible row
-returns all boosters. Zero eligible boosters do not invalidate a base claim.
+- `POST /jobs/open`: body `{"insuredToken":"0x..."}`.
+- `POST /jobs/settlement`: body `{"incidentId":"7","registry":"0x..."}`.
+- Both require an `Idempotency-Key` header. Accepted submissions return HTTP
+  `202` and a job ID; poll `GET /jobs/{jobId}` for completion, failure or expiry.
+- Published settlement artifacts are addressable through
+  `GET /settlements/{chainId}/{registry}/{defiInsurance}/{incidentId}/{root}`.
 
-Roll out the contract implementation, rebuilt/measured TEE release, API signer,
-and frontend together between incidents. This changes the Merkle leaf and
-`finalizeClaim` ABI, not claim storage. Existing roots cannot be finalized using
-the new leaf, so resolve/recover old claims before upgrading; do not mix releases
-or reuse cached version-1 settlement artifacts.
+The server fixes the network, Registry, RPC and worker configuration. Prechecks
+and durable admission run before new worker launches. Canonical settlement work
+reuses an active attempt or verified completion across caller retry keys;
+opening submissions share work for the selected token/reference block.
 
-## Ephemeral bulk score replay
+The [opening advisory cache](job-api/src/open_advisory_cache.rs) is fresh for
+60 seconds and retains a snapshot for up to 3,600 seconds. Stale results are
+**display-only** and cannot authorize a launch; even fresh qualifying results
+are only admission evidence, not an on-chain opening authorization. The enclave
+independently rebuilds and checks the opening artifact before signing.
 
-`--bulk-score` performs one fresh global `Transfer` replay per active scored
-token while retaining account state only for the deduplicated users of live
-claims. History is processed and dropped in bounded block-range slices, and each
-retained token/user balance is reconciled against historical `balanceOf` before
-settlement continues. The artifact records `ephemeral-bulk-rpc` provenance,
-block/hash, indexed token/transfer counts, and the deduplicated tracked-account
-count.
+Admission bounds worker starts; API Gateway throttles and Lambda concurrency
+are deployment settings, not protocol constants. The janitor is a scheduled
+backstop for workers that fail to terminate themselves. For exact release,
+IAM/KMS and deployment requirements, use the
+[release gates](job-api/deploy/RELEASE-GATES.md), not this overview as a runbook.
 
-Production `job-api` enclave settlement uses this mode. Every job starts from
-chain history inside enclave memory; it has no checkpoint path, HMAC key, lock,
-file, parent-provided state, or commit step. Raw mode remains the slower,
-independent per-user differential implementation. Checkpoint mode remains an
-operator optimization, but a checkpoint supplied by the untrusted parent crosses
-the enclave trust boundary even when accompanied by an HMAC key and is therefore
-not used by production enclave jobs.
+## Build the local CLI
 
-## Authenticated score checkpoint
-
-Raw mode replays score-token history for every requested user. Checkpoint mode
-streams each token's global `Transfer` history once and persists authenticated
-state:
+Run from `offchain-rust/` with Rust and a native compiler/linker installed.
+[Cargo.toml](Cargo.toml) declares Rust 1.92 minimum for the core package; the API
+packages require 1.94.1. These examples use the locally tested 1.94.1 toolchain.
+No Foundry, JavaScript runtime or AWS account is needed for ordinary local runs.
 
 ```bash
-export SCORE_CHECKPOINT_PATH="$PWD/state/mainnet-score.json"
-export SCORE_CHECKPOINT_KEY="$(openssl rand -base64 48)"
-
-target/release/usd8-settlement compute 7 \
-  --registry "$USD8_REGISTRY" \
-  --checkpoint "$SCORE_CHECKPOINT_PATH" \
-  --output artifacts/incident-7.json
+cargo +1.94.1 build --locked --release --bin usd8-settlement
+target/release/usd8-settlement --help
 ```
 
-The integrity key must contain at least 32 bytes and must remain outside the
-repository. Generate it once, store it in the deployment secret manager, and
-reuse it for every advance of that checkpoint. The checkpoint is HMAC-SHA256
-authenticated, written through a mode-0600 temporary file, atomically renamed,
-and protected by an exclusive `.lock` file. Checkpoint reads and writes have a
-hard 128 MiB limit; reads are capped before JSON parsing, and both temporary and
-final bytes are read back before commit returns. Secret key bytes are redacted
-from runtime debug formatting. The lock is held from checkpoint
-load through score endpoint reconciliation, latest-state read, final anchor
-recheck, and internal artifact verification. The advanced state is committed
-only after those checks succeed; computation or verification failure leaves the
-previous checkpoint unchanged. A filesystem error reported after atomic rename
-may leave the new authenticated checkpoint in place; inspect and authenticate
-that file before recovery rather than assuming the old state survived. It binds
-chain ID, token decimals, cursor block/hash, account
-integrals, and the append-only rate-history prefix. It rejects authentication
-failure, chain mismatch, rollback, reorg, retroactive rate edits, negative
-replay balance, or endpoint `balanceOf` mismatch.
+Choose the build target, Registry and RPC for the same Ethereum network. The
+CLI targets mainnet by default; `--features sepolia` selects the optional testnet
+build. Changing the RPC URL alone does not change the compiled chain.
 
-Recovery is fail-closed: never edit a checkpoint. Preserve a rejected file for
-forensics, choose a fresh path, and rebuild from chain history with the same
-integrity key or a deliberately rotated key. Remove a stale `.lock` only after
-confirming no runtime process owns the checkpoint. Keep raw mode available as
-an independent differential check.
-
-## RPC credential boundary
-
-`DRPC_KEY` is sent only as a sensitive `drpc-key` header to the exact trusted dRPC
-HTTPS hosts accepted by `HttpRpc`; redirects are disabled and the key is never
-placed in URLs or artifacts. For any other RPC, use `--no-drpc-key` so an
-accidentally inherited `DRPC_KEY` cannot be attached. Keys and checkpoint
-integrity material must be supplied through environment variables, never CLI
-arguments or committed files.
-
-Every HTTP response body is streamed through a hard 16 MiB cap before one JSON
-parse; oversized `Content-Length` and chunked bodies fail closed. Body
-timeout/reset errors are retried inside the bounded request retry policy. Each
-initial log chunk has a five-minute deadline and hard logical-request,
-transport-attempt, and bisection budgets. Generic transport timeouts and bare
-HTTP 408 responses are never treated as range-limit signals; only explicit
-provider range/result-size errors or the local response cap can trigger
-bisection. Returned logs must match the exact requested range, address, and
-topics, declare `removed: false`, contain at most four topics, and have unique
-`(blockNumber, logIndex)` positions.
-
-## Trust and finality model
-
-The runtime fails closed unless it can:
-
-1. anchor the incident under the finalized head and locate the last block at or
-   before the claim-window deadline;
-2. prove provisional and finalized incident anchors agree;
-3. reconstruct registered/cancelled claims in chain order and match on-chain
-   claim-set hash plus unresolved count at the exact window boundary;
-4. reconcile ERC-20 replay endpoints with historical contract views;
-5. obtain complete logs through bounded ranges, explicit range/result-size
-   bisection, and silent-result-cap bisection, failing on an unsplittable single
-   block or any request/deadline budget exhaustion;
-6. validate oracle answers, timestamps, decimals, conversion returns, pool
-   topology, historical balances, and score-spent values at pinned blocks;
-7. read the latest settled root after expensive work, then re-read every
-   anchor hash as the final RPC operation before output.
-
-Tokens whose balances cannot be reconstructed from standard Transfer semantics
-(for example hidden rebases) fail endpoint reconciliation. The standalone
-runtime does not release keys or sign. The separate measured `job-api` enclave
-worker accepts only internally verified `attested-compute` or `attested-open`
-output, obtains the signer through attestation-bound KMS recipient decryption,
-and signs inside enclave RAM. Plain `compute` remains available for public replay.
-
-## On-demand TEE job API
-
-`job-api/` is a separate Rust package for the public control plane. It keeps AWS
-SDK and Lambda dependencies outside the measured `usd8-settlement` dependency
-graph:
+Set the deployment's **Registry proxy** and an archive-capable RPC, then set
+`USER_ADDRESS`, `INSURED_TOKEN` and `INCIDENT_ID` to the values you want to query:
 
 ```bash
-cd offchain-rust/job-api
-cargo test --locked
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo build --release --locked --features lambda --bin usd8-tee-job-lambda
+export USD8_REGISTRY='0xYOUR_REGISTRY_PROXY_ADDRESS'
+export ETH_RPC_URL='https://YOUR_ARCHIVE_RPC_ENDPOINT'
 ```
 
-Release inputs are mandatory and strictly validated. Build into a new directory;
-the build never mutates checked-in policy templates:
+The provider must support historical calls/code, complete logs and `finalized`
+blocks. Local runs need no signing key or operator credentials; the RPC provider
+may have its own access requirements. `--no-drpc-key` prevents an inherited dRPC
+key from being attached. Approved dRPC endpoints can instead use `DRPC_KEY` from
+the environment; never put secrets in command arguments or committed files.
+
+## Four common CLI operations
+
+### Historical insurance score for a wallet
 
 ```bash
-NETWORK=sepolia REGISTRY=0x... EXPECTED_SIGNER=0x... \
-  OUT_DIR=releases/build-<id> deploy/build-release.sh
+target/release/usd8-settlement compute_insurance_score "$USER_ADDRESS" \
+  --registry "$USD8_REGISTRY" --rpc-url "$ETH_RPC_URL" --no-drpc-key
 ```
 
-This compiles the Sepolia chain ID and dRPC network into the measured binaries.
-Releases are Sepolia-only; a caller cannot select the network.
+Pins a finalized reference block and replays history to the holding-maturation
+cutoff. In this CLI result, `grossEarnedScore` means **matured gross score at the
+cutoff**, not total earnings including unmatured score. `scoreSpent` is read at
+the reference block; `availableScore = max(grossEarnedScore - scoreSpent, 0)`.
+Amounts are exact decimal integer strings in 18-decimal score units. Reference
+and cutoff block hashes are returned and rechecked; replay errors are not zero
+balances. See [src/score.rs](src/score.rs).
 
-`job-api/rust-toolchain.toml` pins its independently tested Lambda toolchain.
-For deployment, produce a Linux Lambda artifact rather than uploading a macOS
-binary:
+### Price-drop and opening-eligibility precheck
 
 ```bash
-cargo lambda build --release --x86-64 --features lambda \
-  --bin usd8-tee-job-lambda
+target/release/usd8-settlement detect_price_drop "$INSURED_TOKEN" \
+  --registry "$USD8_REGISTRY" --rpc-url "$ETH_RPC_URL" --no-drpc-key
 ```
 
-The deployed flow is intentionally small:
+Runs the shared [opening precheck](src/incident_open.rs), returning the selected
+reference/observation blocks and baseline/distress conversion-ratio TWAPs.
+A missing qualifying drop, ineligible state or failed history read is an error.
+This advisory query does not start Nitro, sign, open an incident or guarantee
+that eligibility will still hold later.
 
-```text
-POST /jobs/settlement -> Rust Lambda -> S3 request -> one Nitro-enabled EC2
-POST /jobs/open       -> Rust Lambda -> S3 request -> one Nitro-enabled EC2
-GET /jobs/<jobId> <- Rust Lambda <- S3 terminal envelope <- enclave
-GET /settlements/<chainId>/<registry>/<module>/<incidentId>/<root>
-    <- Rust Lambda <- immutable root-addressed settlement artifact
-```
-
-There is no idle EC2. Lambda returns `202 Accepted` with a job ID; clients poll
-until the status is `completed`, `failed`, or `expired`. The same Lambda Function URL handles
-both routes:
-
-```http
-POST /jobs/settlement
-Idempotency-Key: client-generated-unique-value
-Content-Type: application/json
-
-{"incidentId":"7","registry":"0x1111111111111111111111111111111111111111"}
-```
-
-`POST /jobs` remains a compatibility alias for `POST /jobs/settlement`.
-Incident opening uses a separate typed route on the same Function URL:
-
-```http
-POST /jobs/open
-Idempotency-Key: client-generated-unique-value
-Content-Type: application/json
-
-{"insuredToken":"0x2222222222222222222222222222222222222222"}
-```
-
-The enclave reads `nextIncidentId`, Registry/DefiInsurance bindings, token
-approval, active-incident state, chain ID, signer authorization, and the current
-PCR commitment at one pinned head. It also reads `incidentTimingConfig` and
-`incidentOpenPriceConfig`, then searches fixed grid-aligned reference blocks from
-`latestBlock - maxReferenceBlockAge` through `finalizedBlock - twapBlocks`.
-Historical conversion ratios are fetched once per unique grid point, with a hard
-256-point bound. For every candidate it compares the unrounded sums from the
-pre-reference and post-reference windows. Qualifying candidates are grouped into
-contiguous drop episodes; the first candidate in the latest qualifying episode
-is selected. The enclave signs only when the decline is strictly greater than
-`minimumDropBps`; no insured-token/USD oracle enters incident-open eligibility.
-The EIP-712 authorization binds an on-chain hash of the Registry address, price
-config, conversion address, and conversion calldata, so governance changes or a
-conversion recipe change invalidate stale open artifacts. The artifact records the
-selected reference and observation blocks, both sums and displayed TWAPs,
-sampling parameters, threshold, and eligibility hash.
-
-After verifying the attestation and ECDSA signature, the first claimant submits
-`fileClaim(artifact.insuredToken, amount, scoreToSpend, boosterAmount,
-artifact.referenceBlock, signature)`. The contract validates the TEE authorization,
-opens the incident, and escrows that claim atomically. The reference block is copied
-mechanically from the signed artifact rather than selected by the claimant. Later
-claimants call the same function with `referenceBlock = 0` and an empty signature.
-
-This claimant-facing restriction does not remove DefiInsurance's explicitly trusted
-`onlyAdminOrTimelock` emergency fallback, which may still choose a reference block
-without a TEE signature. That governance capability is outside the permissionless
-job API trust boundary and must remain an intentional protocol trust assumption.
-
-```json
-{"accepted":true,"jobId":"<64 lowercase hex characters>"}
-```
-
-```http
-GET /jobs/<jobId>
-```
-
-```json
-{"jobId":"<jobId>","status":"completed","apiVerified":false,"payload":{}}
-```
-
-Before accepting a completed settlement, Lambda independently recomputes its EIP-712
-digest and Merkle commitments, recovers its signer, and checks canonical chain/Registry/module,
-incident PCR, and signer authorization. Historical accepted roots use authenticated on-chain
-acceptance evidence when the original signer has retired. Transient verification failures fail
-closed without consuming a new canonical attempt. Only authenticated results may enter the
-shared settlement index. A later claimant does not need the
-original relayer's private job ID. The claimant reads the standing root from the contract and
-requests:
-
-```http
-GET /settlements/<chainId>/<registry>/<defiInsurance>/<incidentId>/<root>
-```
-
-The endpoint returns the same completed-job response shape as `GET /jobs/<jobId>`, including
-an integrity-bound download when the artifact is too large to return inline. If no canonical
-artifact exists yet, the client may start an exact-root replay; the measured runtime returns
-rows only when the recomputed root matches the standing root.
-
-Settlement accepts only `incidentId` and `registry`; incident opening accepts
-only `insuredToken`, with Registry injected from Lambda's fixed configuration.
-Unknown fields, numeric rather than canonical decimal-string IDs, leading zeroes, out-of-range integers, zero/malformed
-addresses, and any requested Registry other than the configured one are
-rejected before an AWS write. Users cannot supply an RPC URL, AMI,
-instance type, subnet, security group, IAM profile, user data, command, S3 key,
-or EIF path.
-
-### Idempotency and S3 layout
-
-Settlement work has a separate persistent canonical identity derived solely from the
-operation domain, configured chain/Registry/module, and incident. Caller retry keys do not
-change that identity. An atomic work record selects one active attempt or completed result;
-a genuine failed/expired attempt advances a fenced server-controlled generation. A durable
-rolling-hour launch budget also limits distinct jobs. `USD8_MAX_ACTIVE_WORKERS=0` selects
-cost-only admission without making availability depend on EC2 visibility. A positive value
-additionally enables the conservative active-reservation cap; that optional mode needs
-trusted termination reconciliation and may fail closed when evidence is unavailable.
-
-The 32-byte attempt job ID retains this wire-compatible request binding (for settlement,
-the server-controlled canonical work/generation supplies the retry discriminator):
-
-```text
-opaque = HMAC-SHA256(jobSecret,
-    "USD8_TEE_JOB_V3\\0" || idempotencyKey || "\\0" || canonicalRequest)[0:16]
-commitment = SHA256("USD8_TEE_REQUEST_V1\\0" || canonicalRequest)[0:16]
-jobId = hex(opaque || commitment)
-```
-
-The HMAC secret is a random deployment secret of at least 32 bytes, supplied to
-Lambda as base64. The opaque half keeps attempt job IDs unguessable; settlement callers
-reconnect through the persistent canonical record independently of their retry key. Before RPC or KMS access, the enclave
-recomputes the public commitment half from the canonical request, so an
-untrusted parent cannot substitute another request under the original job ID.
-S3 conditionally creates the request with
-`If-None-Match: *`; byte-different collisions fail closed. Every EC2 launch uses
-the same 64-character job ID as `RunInstances.ClientToken`, so retrying after a
-Lambda timeout cannot create another instance.
-
-```text
-requests/<jobId>.json    immutable request plus createdAt/expiresAt
-launch/<jobId>.json      immutable attempt capabilities
-terminal/<jobId>.json    immutable completed-or-failed envelope
-control/work/<canonicalWorkId>.json            fenced canonical attempt
-control/admission/v1.json                      aggregate admission ledger
-control/completions/<jobId>.json               permanent verified terminal bytes
-control/completion-requests/<jobId>.json        permanent trusted request identity
-settlements/v2/<chainId>/<registry>/<defiInsurance>/<incidentId>/<root>.json
-                          verified-only claimant-discoverable completed envelope
-settlements/v1/...      read-only legacy fallback, independently authenticated
-```
-
-The worker conditionally creates the single terminal key, so success and failure
-cannot race across separate objects. Lambda requires terminal schema version 1,
-matching job ID, a `completed` or `failed` discriminator, and an object payload.
-Stored-request schema version 3 records the fixed creation time and hard expiry.
-Version 3 removes caller-supplied `referenceBlock` from open requests and changes
-job-ID domain separation. Rollout must first stop intake and drain or expire every
-version-2 request, then deploy the API, parent, and enclave together; version-3
-components intentionally reject version-2 queued jobs and clients.
-If no terminal exists after that deadline, polling returns `expired`. A later settlement
-POST may atomically create one replacement generation under the same canonical work identity;
-changing a caller key does not create an additional attempt. Attempts retain immutable launch
-capabilities and a bounded launch horizon. Permanent verified completion data must outlive
-temporary request/terminal objects. Retention is launch 1 day, terminal 30 days, requests 31 days;
-canonical control and settlement objects have no automatic expiry.
-It caps reads at 16 MiB and never returns raw AWS errors. Terminals up to 5 MiB
-remain inline. Larger terminals return a five-minute presigned S3 `download`
-containing the URL, exact byte length, and SHA-256 of the complete immutable
-terminal object. Clients download that object, verify its byte hash, then verify
-the signature and attestation before use. Responses remain
-`apiVerified:false`: the independent signature-promotion gate does not replace the client's
-full attestation verification or the contract's final acceptance checks.
-
-### Lambda configuration
-
-Required environment variables:
-
-```text
-USD8_REGISTRY
-USD8_DEFI_INSURANCE
-USD8_PRECHECK_RPC_URL
-USD8_MAX_ACTIVE_WORKERS
-USD8_MAX_STARTS_PER_HOUR
-USD8_JOB_BUCKET
-USD8_JOB_HMAC_KEY_B64
-USD8_TEE_AMI_ID
-USD8_TEE_INSTANCE_TYPE
-USD8_TEE_INSTANCE_PROFILE
-USD8_TEE_SUBNET_ID
-USD8_TEE_SECURITY_GROUP_ID
-AWS_REGION
-```
-
-`USD8_TEE_MAX_AGE_SECONDS` is optional and defaults to `1800`; configure the
-same value on the API and janitor Lambdas. It must be between 300 and 86,400.
-
-Use a Function URL with `AWS_IAM` authorization for beta. Do **not** expose it
-with `NONE` authorization: an unauthenticated caller could otherwise create unbounded EC2
-cost. Permissionless production access needs an economic anti-abuse mechanism
-(on-chain authorization/bond/payment) or an API layer with enforceable quotas.
-Set Lambda reserved concurrency and EC2 service quotas as secondary blast-radius
-limits. Treat jobs/results as non-confidential shared beta data unless caller
-identity is added to the HMAC preimage and authorization checks; IAM invocation
-alone does not create per-tenant ownership.
-
-Enforce separate policies. Lambda needs only:
-
-- create-only writes for immutable requests, launch capabilities, and results;
-  conditional ETag updates for API-only `control/` work/admission records;
-  prefix-scoped reads/listing for those objects and verified `settlements/`;
-  exact per-job presigned worker terminal upload capabilities, not worker-role
-  access to shared results or control state;
-- complete `ec2:DescribeInstances` evidence for admission reconciliation;
-- `ec2:RunInstances` restricted to the approved AMI, subnet, security group,
-  instance profile and instance type;
-- `iam:PassRole` for only the TEE instance role;
-- tag-on-create permission requiring `Project=USD8-TEE`.
-
-The janitor uses a distinct execution role with only its own logs,
-`ec2:DescribeInstances`, and tag-conditioned `ec2:TerminateInstances`. It has no
-S3, launch, tagging, or pass-role permission. Finalization therefore requires
-both `LAMBDA_ROLE`/`LAMBDA_POLICY_NAME` and
-`JANITOR_ROLE`/`JANITOR_POLICY_NAME`; the live verifier rejects shared roles.
-
-The instance role may read only its request and immutable release artifacts and
-conditionally write only `terminal/`. Bucket policy must deny overwrites and
-deny Lambda writes to `terminal/`. These are deployment requirements; this Rust
-package cannot enforce an AWS account policy by itself.
-
-The launcher always requests one instance, enables Nitro Enclaves, assigns a
-public IP for KMS/archive-RPC egress, requires IMDSv2, sets metadata hop limit 1,
-disables instance tags in metadata, and configures instance-initiated shutdown
-to **terminate**. The reviewed AMI must
-have an encrypted root mapping with `DeleteOnTermination=true`; verify that
-mapping during release because the launcher does not override the AMI root
-device. The security group must have no inbound rules. The enclave itself can
-reach only the fixed parent vsock proxies for KMS and the build-pinned dRPC host
-(`lb.drpc.org` on mainnet or `lb.drpc.live` on Sepolia); it cannot
-use the parent network directly. A private subnet with S3/KMS endpoints and a
-controlled RPC egress proxy may replace the public IP later, but is not required
-for the minimal deployment.
-
-### Immutable AMI/EIF contract
-
-`USD8_TEE_AMI_ID` must identify a prebuilt encrypted AMI; Lambda does not build
-code at request time. The AMI contains the versioned EIF, its SHA-256 manifest,
-Nitro allocator configuration, parent runner, `nitro-cli`, and a disabled
-`usd8-tee-job.service`. User data contains only validated `jobId`, bucket and
-region values in `/run/usd8/job.env`, then starts that fixed service. It contains
-no shell command, URL, credentials or EIF path supplied by the caller.
-
-Fail the release before updating Lambda unless the exact AMI is private,
-available, encrypted, and delete-on-termination:
+### Local settlement replication
 
 ```bash
-AWS_REGION=eu-central-1 job-api/deploy/verify-ami.sh "$USD8_TEE_AMI_ID"
+target/release/usd8-settlement compute_settlement "$INCIDENT_ID" \
+  --registry "$USD8_REGISTRY" --rpc-url "$ETH_RPC_URL" --no-drpc-key \
+  --raw-score --output settlement.json
 ```
 
-For each release:
+After the claim window closes and required blocks finalize, reconstructs claims,
+eligibility, scores and payouts, returning the root, digest and per-claim proofs.
+It does not download or compare a separate TEE result. The shared engine still
+rejects a mismatch with a nonzero standing on-chain root and verifies its own
+artifact commitments before output. Success alone does not prove a root has
+been published. Use the matching source release, chain, Registry and module
+when reproducing an existing result; incident IDs are module-local.
 
-1. build `usd8-settlement` from `Cargo.lock` on the pinned Linux toolchain;
-2. build a non-debug EIF and record its SHA-256 plus PCR0/PCR1/PCR2;
-3. test the exact EIF on temporary Nitro hardware;
-4. bake the exact EIF and parent runner into an encrypted AMI;
-5. run `deploy/finalize-release.sh <build-dir> <final-dir>` with explicit AMI,
-   Lambda, KMS and IAM inputs; it binds all artifacts, policies and expected AWS
-   configuration into one read-only manifest;
-6. obtain independent approval of the finalized release baseline and its pinned
-   SHA-256; candidate self-hashing is not approval;
-7. execute the reviewed cutover only through the mandatory deployment entrypoint:
-   ```bash
-   python3 job-api/deploy/deploy-release.py "$FINAL_DIR/release-manifest.json" \
-     --security-baseline "$APPROVED_SECURITY_BASELINE" \
-     --baseline-sha256 "$APPROVED_BASELINE_SHA256" \
-     --rpc-url "$SEPOLIA_RPC_URL" -- \
-     /path/to/reviewed-cutover-program its reviewed arguments
-   ```
-   The cutover program applies the manifest-bound KMS, IAM, Lambda, on-chain PCR,
-   and job-bucket CORS changes. `deploy-release.py` then executes the required live
-   verifier with the same independently pinned baseline. Any inaccessible or
-   mismatched live state exits nonzero as deployed-but-unverified, never success.
-   See `job-api/deploy/RELEASE-GATES.md` for plan mode, rollback preparation, and
-   the complete baseline and authority requirements.
+`--raw-score` replays per claimant; `--bulk-score` performs fresh shared replay
+and is used by production enclave jobs. Neither uses a saved score checkpoint.
 
-Rebuild only when measured code or dependencies change. AMI snapshot and private
-S3 artifact storage remain while all compute is terminated.
-
-### Enclave and signing boundary
-
-The parent EC2 is untrusted orchestration. It may fetch the immutable request and
-EIF, start the enclave, proxy allowlisted network traffic, upload the returned
-envelope, and shut down. It must not receive plaintext signer material or decide
-what digest is signed.
-
-Inside the enclave, the production worker must:
-
-1. run `attested-compute` against the configured Registry and approved archive
-   provider;
-2. independently verify the complete artifact and PCR snapshot;
-3. ask KMS to decrypt the persisted secp256k1 signer ciphertext using a Nitro
-   attestation recipient;
-4. sign only the verified EIP-712 settlement digest;
-5. zeroize the private key and return artifact, signature, signer address and
-   attestation as one terminal envelope.
-
-KMS `Decrypt` must be granted only to the EC2 instance role **with**
-`kms:RecipientAttestation:ImageSha384` or PCR conditions for the reviewed EIF.
-The parent role must not have ordinary plaintext `kms:Decrypt`. The stable signer
-address is derived from the KMS-wrapped key and must match the Registry signer.
-
-The final KMS policy deliberately separates runtime and cloud administration.
-Only the attested instance role may decrypt; the ordinary release operator uses
-`deploy/operator-persistent-policy.json`, which cannot decrypt, rewrite the key
-policy, read signer ciphertext, or mutate runtime IAM. AWS account root/security
-administration remains trusted and can recover or rotate the KMS policy. Broad
-`deploy/operator-bootstrap-policy.json` access is temporary ceremony access and
-must be removed after each release before the release is considered final.
-
-The Rust `job-api` implements the Lambda/S3/EC2 control plane, one-shot parent,
-bounded vsock protocol, fixed KMS/RPC proxies, Nitro NSM recipient attestation,
-KMS decryption, enclave-local settlement verification and secp256k1 signing.
-`job-api/deploy/` contains the pinned EIF build, AMI service, measured KMS policy
-and least-privilege role policies. A release is accepted only after the exact
-EIF measurements, signer address and AMI are deployed and independently checked.
-
-### Termination and recovery
-
-The AMI service uploads one bounded redacted terminal envelope on success or
-failure and powers off through systemd success/failure actions.
-`instance-initiated-shutdown-behavior=terminate` removes the instance; the reviewed AMI root mapping must remove its
-volume as described above. Deploy the included `usd8-tee-janitor` Lambda on a schedule to terminate tagged
-instances older than the hard job deadline; self-termination alone cannot cover
-kernel panic, AWS control-plane failure or a wedged parent. S3 lifecycle rules should expire
-terminal envelopes after 30 days and requests after 31 days, so a later-created
-terminal cannot outlive the immutable request that identifies it.
-
-## Standalone package guarantee
-
-`offchain-rust` is self-contained:
-
-- production commands invoke only the Rust binary;
-- `Cargo.toml` has no path dependency outside this directory;
-- Rust tests and fixtures run from a standalone copy of this directory;
-- no JavaScript runtime, package manager, generated distribution, or sibling
-  implementation is required to build, test, compute, verify, or attest.
-
-The repository may run external differential checks elsewhere, but those checks
-consume the Rust binary as a black box and are not part of this package.
-
-## Fixture kernel
+### Attest inside an already-running Nitro enclave
 
 ```bash
-target/release/usd8-settlement kernel fixtures/small.json
-# Backward compatible:
-target/release/usd8-settlement fixtures/small.json
+target/release/usd8-settlement compute_settlement_tee "$INCIDENT_ID" \
+  --registry "$USD8_REGISTRY" --rpc-url "$ETH_RPC_URL" --bulk-score \
+  --output settlement-attested.json
 ```
 
-Fixture output contains decimal-string rows and pool payouts, `claimSetHash`,
-`settlementInputHash`, Merkle root, and all proofs keyed by claim ID.
-`fixtures/small.json` and `fixtures/matrix.json` are synthetic runnable inputs;
-the fixture-provenance table in `fixtures/README.md` labels every bundled input.
-`fixtures/golden-claim-results.json` is the fixed, manually derived economic
-oracle described in `fixtures/README.md`; it must not be regenerated from Rust.
+Requires a Linux build with `--features nitro`, a running Nitro enclave and
+`DRPC_KEY` for the approved dRPC endpoint. It computes and internally verifies
+the settlement, omits per-claim proofs, and requests fresh NSM attestation bound
+to the digest. Measured PCR0–2 must match the incident's stored commitment.
+It **does not launch a worker, release a signer key or make an ECDSA signature**.
+Those are separate cloud-worker responsibilities.
 
-## Real-history fixture
+The fifth public command, `pcr-hash <PCR0> <PCR1> <PCR2>`, computes the measurement
+commitment from three 48-byte PCR hex values. See `--help` for the public surface.
+JSON goes to stdout unless `--output` is supplied; its parent directory must
+exist. Exit codes are `0` for success, `1` for runtime failure and `2` for usage
+errors. Score and price-drop queries never persist score checkpoints.
 
-`fixtures/real-usdc-usdt-1000.json` is a frozen 1,000-claim workload derived from
-complete selected-account USDC/USDT transfer histories over Ethereum blocks
-`24886575..25539412`. Every selected account's reconstructed end balance was
-checked against archive `balanceOf` state. Claims and loss amounts are synthetic;
-the selected balance histories and score integrals are real-derived.
+## Security boundaries and checks
 
-To regenerate the dataset with the standalone Python collector:
+- Internal [artifact verification](src/artifact.rs) remains mandatory. Removing
+  an old public command does not remove commitment, proof or invariant checks.
+- RPC history completeness remains a trust assumption despite reconciliation
+  and finality checks. An independent archive provider strengthens replication.
+- The untrusted parent must never receive plaintext signer material. The measured
+  enclave obtains it through attestation-bound KMS decryption and signs in RAM.
+- Local replication, a download hash and `apiVerified:false` are not full remote
+  attestation verification. Consumers still need signature/authorized-signer,
+  AWS certificate-chain, freshness, PCR and digest-binding checks; contract
+  acceptance checks remain separate. Privileged contract emergency paths are
+  outside the permissionless job API's guarantees.
+
+Basic host tests (not a Linux/Nitro release or deployment proof):
 
 ```bash
-DRPC_KEY="..." python3 bench/collect_real_history.py \
-  --start-block 24886575 --end-block 25539412 \
-  --cohort-size 1000 --samples 91 --base-range 1000 --workers 3 \
-  --history-output real-usdc-usdt-history-2026-04-15_2026-07-15.json \
-  --fixture-output fixtures/real-usdc-usdt-1000.json
+cargo +1.94.1 test --locked
+cargo +1.94.1 test --locked --manifest-path job-api/Cargo.toml
+cargo +1.94.1 test --locked --manifest-path score-api/Cargo.toml
 ```
 
-The collector sends `DRPC_KEY` only to the exact `https://lb.drpc.org` or
-`https://lb.drpc.live` host on port 443 and refuses redirects.
+Optional `usd8-ffi` and `usd8-kernel` test tools are default-off behind
+`ffi-tools` and `kernel-tools` in [Cargo.toml](Cargo.toml); see
+[fixture provenance](fixtures/README.md). They are not production CLI modes.

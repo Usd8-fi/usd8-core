@@ -270,6 +270,28 @@ struct BudgetRpc<'a, R: ?Sized> {
 }
 #[async_trait::async_trait]
 impl<R: Rpc + ?Sized> Rpc for BudgetRpc<'_, R> {
+    async fn batch_request(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> std::result::Result<Vec<Value>, usd8_settlement::rpc::RpcError> {
+        use usd8_settlement::rpc::RpcError;
+        {
+            let mut budget = self.remaining.lock().expect("verification budget");
+            budget.0 = budget
+                .0
+                .checked_sub(params.len())
+                .ok_or(RpcError::LogBudgetExceeded("verification requests"))?;
+        }
+        let values = self.inner.batch_request(method, params).await?;
+        let mut budget = self.remaining.lock().expect("verification budget");
+        for value in &values {
+            bounded_evidence(value, &mut budget.1)
+                .map_err(|_| RpcError::LogBudgetExceeded("verification bytes/depth/nodes"))?;
+        }
+        Ok(values)
+    }
+
     fn metrics(&self) -> usd8_settlement::rpc::RpcMetrics {
         self.inner.metrics()
     }
@@ -302,30 +324,14 @@ fn abi_word(bytes: &[u8]) -> Vec<u8> {
 fn selector(signature: &str) -> Vec<u8> {
     Keccak256::digest(signature.as_bytes())[..4].to_vec()
 }
-async fn call<R: Rpc + ?Sized>(
-    rpc: &R,
-    to: Address,
-    signature: &str,
-    args: &[u8],
-    block: u64,
-) -> Result<Vec<u8>> {
-    let mut data = selector(signature);
-    data.extend_from_slice(args);
-    Ok(chain::raw_call(rpc, to, &data, Some(block)).await?)
-}
 async fn bindings<R: Rpc + ?Sized>(rpc: &R, policy: &PromotionPolicy, block: u64) -> Result<()> {
     for a in [policy.registry, policy.defi_insurance] {
         chain::assert_contract_code_at(rpc, &a.to_string(), "canonical contract", block).await?;
     }
-    require(
-        chain::defi_insurance_at(rpc, policy.registry, Some(block)).await? == policy.defi_insurance,
-        "Registry module",
-    )?;
-    require(
-        call(rpc, policy.defi_insurance, "registry()", &[], block).await?
-            == abi_word(policy.registry.as_slice()),
-        "module Registry",
-    )
+    let (module, registry) =
+        chain::protocol_bindings_at(rpc, policy.registry, policy.defi_insurance, block).await?;
+    require(module == policy.defi_insurance, "Registry module")?;
+    require(registry == policy.registry, "module Registry")
 }
 
 /// Match the actual successfully executed settlement call, not a contemporary
@@ -690,24 +696,15 @@ pub async fn verify_for_promotion<R: Rpc + ?Sized>(
             && inc.protocol_fee_share_bps == candidate.fee_bps.into(),
         "incident PCR/fee snapshot",
     )?;
-    let id_word = abi_word(&input.incident_id.to_bytes_be());
-    let mut expected_pools = abi_word(&[32]);
-    expected_pools.extend(abi_word(&input.pool_addrs.len().to_be_bytes()));
-    for pool in &input.pool_addrs {
-        expected_pools.extend(abi_word(pool.as_slice()));
-    }
-    require(
-        call(
-            rpc,
-            policy.defi_insurance,
-            "incidentPools(uint256)",
-            &id_word,
-            head.number,
-        )
-        .await?
-            == expected_pools,
-        "incident pool order",
-    )?;
+    let (pools, authorized) = chain::incident_pools_and_signer_at(
+        rpc,
+        policy.defi_insurance,
+        &input.incident_id,
+        candidate.signer,
+        head.number,
+    )
+    .await?;
+    require(pools == input.pool_addrs, "incident pool order")?;
     let deadline = chain::incident_claim_deadline_at(
         rpc,
         policy.defi_insurance,
@@ -731,20 +728,8 @@ pub async fn verify_for_promotion<R: Rpc + ?Sized>(
             && snapshot.tee_pcr_hash == input.tee_pcr_hash,
         "claim-window snapshot",
     )?;
-    let auth = call(
-        rpc,
-        policy.defi_insurance,
-        "isTeeSigner(address)",
-        &abi_word(candidate.signer.as_slice()),
-        head.number,
-    )
-    .await?;
-    require(
-        auth == abi_word(&[0]) || auth == abi_word(&[1]),
-        "signer ABI bool",
-    )?;
     let authorization = if inc.root == format!("0x{}", "00".repeat(32)) {
-        require(auth == abi_word(&[1]), "unauthorized signer")?;
+        require(authorized, "unauthorized signer")?;
         require(
             inc.resolved_at == 0
                 && inc.unresolved_claims == input.unresolved_claims
@@ -755,7 +740,7 @@ pub async fn verify_for_promotion<R: Rpc + ?Sized>(
         Authorization::CurrentSigner
     } else {
         require(inc.root == input.root, "standing root mismatch")?;
-        if auth == abi_word(&[1]) {
+        if authorized {
             // Recovery (including beta-corrected roots) is authenticated by the
             // current signer; it need not reuse the original signature bytes.
             Authorization::CurrentSigner
@@ -783,4 +768,59 @@ pub async fn verify_for_promotion<R: Rpc + ?Sized>(
         block: head,
         authorization,
     })
+}
+
+#[cfg(test)]
+mod batch_budget_tests {
+    use super::*;
+    use usd8_settlement::rpc::{RpcError, RpcMetrics};
+    struct BatchOnly(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl Rpc for BatchOnly {
+        async fn request(&self, _: &str, _: Value) -> std::result::Result<Value, RpcError> {
+            panic!("serial fallback")
+        }
+        async fn batch_request(
+            &self,
+            _: &str,
+            params: Vec<Value>,
+        ) -> std::result::Result<Vec<Value>, RpcError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(params)
+        }
+        fn metrics(&self) -> RpcMetrics {
+            RpcMetrics::default()
+        }
+    }
+    #[tokio::test]
+    async fn batch_budget_counts_methods_and_bytes_before_returning() {
+        let inner = BatchOnly(0.into());
+        let rpc = BudgetRpc {
+            inner: &inner,
+            remaining: std::sync::Mutex::new((3, 100)),
+        };
+        assert_eq!(
+            rpc.batch_request("eth_call", vec![Value::Null; 2])
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            rpc.batch_request("eth_call", vec![Value::Null; 2])
+                .await
+                .is_err()
+        );
+        assert_eq!(inner.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(rpc.remaining.lock().unwrap().0, 1);
+        let rpc = BudgetRpc {
+            inner: &inner,
+            remaining: std::sync::Mutex::new((3, 1)),
+        };
+        assert!(
+            rpc.batch_request("eth_call", vec![Value::Null; 2])
+                .await
+                .is_err()
+        );
+    }
 }

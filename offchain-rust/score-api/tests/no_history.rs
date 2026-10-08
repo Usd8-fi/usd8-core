@@ -1,3 +1,5 @@
+#[path = "../../tests/support/mod.rs"]
+mod support;
 use alloy_primitives::{Address as AlloyAddress, U256};
 use alloy_sol_types::SolCall;
 use async_trait::async_trait;
@@ -31,6 +33,7 @@ fn encoded<C: SolCall>(value: &C::Return) -> Value {
 
 struct EmptyHistoryRpc {
     log_requests: Arc<AtomicUsize>,
+    call_requests: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -54,44 +57,51 @@ impl Rpc for EmptyHistoryRpc {
                 Ok(json!([]))
             }
             "eth_call" => {
-                let call = &params[0];
-                let to = call["to"].as_str().unwrap();
-                let data = call["data"].as_str().unwrap();
-                let selector = &data[..10];
-                match (to, selector) {
-                    (REGISTRY, "0xa4119c10") => Ok(encoded::<IRegistry::defiInsuranceCall>(
-                        &alloy_address(DEFI),
-                    )),
-                    (DEFI, "0xcbeee318") => Ok(encoded::<IDefiInsurance::settlementParamsCall>(
-                        &IDefiInsurance::settlementParamsReturn {
-                            twapLookbackBlocks: 10,
-                            minHoldingRequired: 1,
-                            sampleStepBlocks: 1,
-                        },
-                    )),
-                    (REGISTRY, "0x3aaa0b0c") => {
-                        Ok(encoded::<IRegistry::getScoredTokensCall>(&vec![
-                            alloy_address(TOKEN),
-                            alloy_address(TOKEN_TWO),
-                        ]))
+                self.call_requests.fetch_add(1, Ordering::Relaxed);
+                support::dispatch(&params, |params| {
+                    let call = &params[0];
+                    let to = call["to"].as_str().unwrap();
+                    let data = call["data"].as_str().unwrap();
+                    let selector = &data[..10];
+                    match (to, selector) {
+                        (REGISTRY, "0xa4119c10") => Ok(encoded::<IRegistry::defiInsuranceCall>(
+                            &alloy_address(DEFI),
+                        )),
+                        (DEFI, "0xcbeee318") => {
+                            Ok(encoded::<IDefiInsurance::settlementParamsCall>(
+                                &IDefiInsurance::settlementParamsReturn {
+                                    twapLookbackBlocks: 10,
+                                    minHoldingRequired: 1,
+                                    sampleStepBlocks: 1,
+                                },
+                            ))
+                        }
+                        (REGISTRY, "0x3aaa0b0c") => {
+                            Ok(encoded::<IRegistry::getScoredTokensCall>(&vec![
+                                alloy_address(TOKEN),
+                                alloy_address(TOKEN_TWO),
+                            ]))
+                        }
+                        (REGISTRY, "0x99e54713") => {
+                            Ok(encoded::<IRegistry::getScoredRateHistoryCall>(&vec![
+                                IRegistry::RatePoint {
+                                    fromBlock: 1,
+                                    rate: 1_000_000_000_000_000_000,
+                                },
+                            ]))
+                        }
+                        (TOKEN | TOKEN_TWO, "0x313ce567") => {
+                            Ok(encoded::<IERC20::decimalsCall>(&18))
+                        }
+                        (TOKEN | TOKEN_TWO, "0x70a08231") => {
+                            Ok(encoded::<IERC20::balanceOfCall>(&U256::ZERO))
+                        }
+                        (REGISTRY, "0xf7e2a75c") => {
+                            Ok(encoded::<IRegistry::scoreSpentCall>(&U256::ZERO))
+                        }
+                        _ => panic!("unexpected eth_call to {to} selector {selector}"),
                     }
-                    (REGISTRY, "0x99e54713") => {
-                        Ok(encoded::<IRegistry::getScoredRateHistoryCall>(&vec![
-                            IRegistry::RatePoint {
-                                fromBlock: 1,
-                                rate: 1_000_000_000_000_000_000,
-                            },
-                        ]))
-                    }
-                    (TOKEN | TOKEN_TWO, "0x313ce567") => Ok(encoded::<IERC20::decimalsCall>(&18)),
-                    (TOKEN | TOKEN_TWO, "0x70a08231") => {
-                        Ok(encoded::<IERC20::balanceOfCall>(&U256::ZERO))
-                    }
-                    (REGISTRY, "0xf7e2a75c") => {
-                        Ok(encoded::<IRegistry::scoreSpentCall>(&U256::ZERO))
-                    }
-                    _ => panic!("unexpected eth_call to {to} selector {selector}"),
-                }
+                })
             }
             _ => panic!("unexpected RPC method {method}"),
         }
@@ -103,10 +113,54 @@ impl Rpc for EmptyHistoryRpc {
 }
 
 #[tokio::test]
+async fn incremental_score_aggregate_faults_return_no_checkpoint() {
+    for at in [0, 1] {
+        for fault in [
+            "revert",
+            "envelope",
+            "trailing-envelope",
+            "count",
+            "failed",
+            "empty",
+            "malformed",
+            "trailing-subcall",
+        ] {
+            let rpc = support::FaultRpc::new(
+                EmptyHistoryRpc {
+                    log_requests: Arc::default(),
+                    call_requests: Arc::default(),
+                },
+                fault,
+                at,
+            );
+            let result = compute_incremental_score_at(
+                &rpc,
+                &ScoreNetwork {
+                    chain_id: 1,
+                    name: "test".into(),
+                },
+                address(REGISTRY),
+                address(EMPTY_ACCOUNT),
+                BlockAnchor {
+                    number: 5001,
+                    timestamp: 60012,
+                    hash: format!("0x{:064x}", 5001),
+                },
+                None,
+            )
+            .await;
+            assert!(result.is_err(), "{at} {fault}");
+            assert!(rpc.poisoned.load(Ordering::SeqCst));
+        }
+    }
+}
+
+#[tokio::test]
 async fn cold_account_with_proven_empty_history_returns_zero_with_bounded_parallel_replay() {
     let requests = Arc::new(AtomicUsize::new(0));
     let rpc = EmptyHistoryRpc {
         log_requests: requests.clone(),
+        call_requests: Arc::default(),
     };
     let reference = BlockAnchor {
         number: 5_001,
@@ -138,6 +192,11 @@ async fn cold_account_with_proven_empty_history_returns_zero_with_bounded_parall
     assert_eq!(snapshot.available_score, "0");
     assert_eq!(snapshot.log_requests, "8");
     assert_eq!(requests.load(Ordering::Relaxed), 8);
+    println!(
+        "score-api eth_call count: {}",
+        rpc.call_requests.load(Ordering::Relaxed)
+    );
+    assert_eq!(rpc.call_requests.load(Ordering::Relaxed), 11);
     assert_eq!(checkpoint.tokens.len(), 2);
     assert_eq!(checkpoint.visible_tokens.len(), 2);
     assert_eq!(snapshot.token_scores[0].token, TOKEN);

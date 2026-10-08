@@ -5,6 +5,51 @@ use usd8_tee_job_api::{
     STORED_REQUEST_SCHEMA_VERSION, StoredRequest, WireError, read_frame_async, write_frame_async,
 };
 
+async fn check_response_boundary(max_bytes: usize) {
+    use tokio::io::AsyncWriteExt;
+    // JSON quotes consume two bytes. Exercise the actual transport at its limit.
+    let value = "x".repeat(max_bytes - 2);
+    let (mut left, mut right) = tokio::io::duplex(64 * 1024);
+    let writer = tokio::spawn(async move { write_frame_async(&mut left, &value, max_bytes).await });
+    let mut received = read_frame_async::<_, String>(&mut right, max_bytes)
+        .await
+        .unwrap();
+    assert_eq!(received.len(), max_bytes - 2);
+    assert!(received.bytes().all(|byte| byte == b'x'));
+    writer.await.unwrap().unwrap();
+
+    received.push('x');
+    assert_eq!(
+        write_frame_async(&mut tokio::io::sink(), &received, max_bytes)
+            .await
+            .unwrap_err(),
+        WireError::TooLarge
+    );
+    let (mut left, mut right) = tokio::io::duplex(4);
+    left.write_all(&((max_bytes + 1) as u32).to_be_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        read_frame_async::<_, String>(&mut right, max_bytes)
+            .await
+            .unwrap_err(),
+        WireError::TooLarge
+    );
+}
+
+#[tokio::test]
+async fn response_accepts_64_mib_and_rejects_one_byte_more() {
+    use usd8_tee_job_api::MAX_RESULT_BYTES;
+    assert_eq!(MAX_RESULT_BYTES, 64 * 1024 * 1024);
+    check_response_boundary(MAX_RESULT_BYTES).await;
+}
+
+#[tokio::test]
+#[ignore = "128 MiB capacity experiment; does not change the configured 64 MiB limit"]
+async fn candidate_response_accepts_128_mib_and_rejects_one_byte_more() {
+    check_response_boundary(128 * 1024 * 1024).await;
+}
+
 fn request() -> JobWireRequest {
     JobWireRequest {
         schema_version: JOB_WIRE_SCHEMA_VERSION,

@@ -4277,6 +4277,8 @@ name = "usd8-tee-job-api"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "alloy-primitives",
+ "alloy-sol-types",
  "async-trait",
  "aws-config",
  "aws-credential-types",

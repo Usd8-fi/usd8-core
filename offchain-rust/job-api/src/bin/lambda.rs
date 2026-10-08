@@ -1,5 +1,9 @@
 #[path = "../admission_reconciliation.rs"]
 mod admission_reconciliation;
+#[path = "../open_advisory_cache.rs"]
+mod open_advisory_cache;
+#[path = "../open_advisory_rpc.rs"]
+mod open_advisory_rpc;
 
 use async_trait::async_trait;
 use aws_sdk_ec2::types::{
@@ -20,17 +24,15 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use usd8_settlement::Address;
-use usd8_settlement::incident_open::{
-    IncidentOpenError, IncidentOpenPrecheck, precheck_incident_open,
-};
+use usd8_settlement::incident_open::IncidentOpenError;
 use usd8_settlement::rpc::HttpRpc;
 use usd8_tee_job_api::{
     App, AppConfig, CanonicalRequest, CreateOutcome, InstanceLauncher, JobPaths, JobStore,
-    LaunchTemplate, ServiceError, SettlementLocator, WorkerCapabilities, canonicalize_open_request,
+    LaunchTemplate, MAX_RESULT_BYTES, ServiceError, SettlementLocator, WorkerCapabilities,
+    canonicalize_open_request,
 };
 
 const MAX_REQUEST_BYTES: usize = 4096;
-const MAX_STORED_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const CAPABILITY_BOOT_MARGIN_SECONDS: u64 = 900;
 const MAX_S3_PRESIGN_TTL_SECONDS: u64 = 604_800;
 const SIGNER_OBJECT: &str = "secrets/signer.bin";
@@ -39,7 +41,7 @@ const PRECHECK_TIMEOUT_SECONDS: u64 = 24;
 
 fn create_conflict_read_limit(key: &str) -> usize {
     if key.starts_with("settlements/") || key.starts_with("control/completions/") {
-        MAX_STORED_RESULT_BYTES
+        MAX_RESULT_BYTES
     } else {
         MAX_REQUEST_BYTES
     }
@@ -49,10 +51,16 @@ struct OpenPrechecker {
     rpc: HttpRpc,
     registry: Address,
     configured_registry: String,
+    module: Address,
+    store: Arc<S3Store>,
 }
 
 impl OpenPrechecker {
-    async fn check(&self, body: &[u8]) -> Result<IncidentOpenPrecheck, OpenPrecheckError> {
+    async fn check(
+        &self,
+        body: &[u8],
+        deadline: tokio::time::Instant,
+    ) -> Result<(String, open_advisory_cache::Decision), OpenPrecheckError> {
         let request = canonicalize_open_request(body, &self.configured_registry)
             .map_err(|_| OpenPrecheckError::InvalidRequest)?;
         let CanonicalRequest::Open(request) = request else {
@@ -60,21 +68,41 @@ impl OpenPrechecker {
         };
         let insured_token = Address::from_str(&request.insured_token)
             .map_err(|_| OpenPrecheckError::InvalidRequest)?;
-        tokio::time::timeout(
-            Duration::from_secs(PRECHECK_TIMEOUT_SECONDS),
-            precheck_incident_open(&self.rpc, self.registry, insured_token),
-        )
-        .await
-        .map_err(|_| OpenPrecheckError::Unavailable)?
-        .map_err(OpenPrecheckError::Incident)
+        let source = open_advisory_rpc::Source {
+            rpc: &self.rpc,
+            registry: self.registry,
+            module: self.module,
+            token: insured_token,
+        };
+        let namespace = format!(
+            "{}:{}:{}:{}",
+            usd8_tee_job_api::configured_chain_id(),
+            self.registry,
+            self.module,
+            insured_token
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| OpenPrecheckError::Unavailable)?
+            .as_secs();
+        let decision =
+            open_advisory_cache::check(self.store.as_ref(), &source, &namespace, now, deadline)
+                .await
+                .map_err(|error| match error {
+                    open_advisory_cache::CheckError::Active => {
+                        OpenPrecheckError::Incident(IncidentOpenError::ActiveIncident)
+                    }
+                    open_advisory_cache::CheckError::Unapproved => {
+                        OpenPrecheckError::Incident(IncidentOpenError::UnapprovedToken)
+                    }
+                    open_advisory_cache::CheckError::Unavailable => OpenPrecheckError::Unavailable,
+                })?;
+        Ok((request.insured_token, decision))
     }
 }
 
-fn open_job_key(precheck: &IncidentOpenPrecheck) -> String {
-    format!(
-        "open:{}:{}",
-        precheck.insured_token, precheck.reference_block
-    )
+fn open_job_key(insured_token: &str, reference_block: u64) -> String {
+    format!("open:{insured_token}:{reference_block}")
 }
 
 #[derive(Debug)]
@@ -628,7 +656,16 @@ fn error_response(error: ServiceError) -> Result<Response<Body>, Error> {
         ServiceError::LaunchUnavailableDetail(_) => (503, "WORKER_LAUNCH_UNAVAILABLE"),
         ServiceError::InvalidRequest => (400, "INVALID_REQUEST"),
         ServiceError::NotFound => (404, "NOT_FOUND"),
-        ServiceError::AdmissionLimited => (429, "WORKER_BUDGET_EXHAUSTED"),
+        ServiceError::AdmissionLimited => {
+            return json_response(
+                429,
+                &serde_json::json!({
+                    "error": "WORKER_BUDGET_EXHAUSTED",
+                    "message": "Worker launch capacity is currently full. Please retry.",
+                    "retryable": true
+                }),
+            );
+        }
         ServiceError::SettlementNotEligible => (422, "SETTLEMENT_NOT_ELIGIBLE"),
         ServiceError::Unavailable => (503, "UNAVAILABLE"),
         ServiceError::RequestWriteUnavailable => (503, "REQUEST_WRITE_UNAVAILABLE"),
@@ -662,6 +699,19 @@ fn precheck_error_response(error: OpenPrecheckError) -> Result<Response<Body>, E
     json_response(status, &serde_json::json!({ "error": code }))
 }
 
+fn advisory_rejection(decision: &open_advisory_cache::Decision) -> Option<(u16, &'static str)> {
+    match (
+        decision.fresh,
+        decision.advisory.as_ref().map(|a| &a.result),
+    ) {
+        (true, Some(open_advisory_cache::Semantic::Qualifying { .. })) => None,
+        (true, Some(open_advisory_cache::Semantic::NoDrop)) => {
+            Some((422, "PRICE_DROP_NOT_DETECTED"))
+        }
+        _ => Some((503, "PRICE_PRECHECK_UNAVAILABLE")),
+    }
+}
+
 fn parse_settlement_route(path: &str) -> Result<SettlementLocator, ServiceError> {
     let mut segments = path
         .strip_prefix("/settlements/")
@@ -688,6 +738,30 @@ async fn handle(
     open_prechecker: Arc<OpenPrechecker>,
     request: Request,
 ) -> Result<Response<Body>, Error> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(28);
+    if request.method().as_str() == "POST" && request.uri().path() == "/jobs/open" {
+        // One invocation deadline includes cache, durable admission and submission.
+        // Cancellation never releases a possibly launched canonical reservation.
+        match open_advisory_cache::within_deadline(
+            deadline,
+            handle_inner(app, open_prechecker, request, deadline),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => precheck_error_response(OpenPrecheckError::Unavailable),
+        }
+    } else {
+        handle_inner(app, open_prechecker, request, deadline).await
+    }
+}
+
+async fn handle_inner(
+    app: Arc<App<S3Store, Ec2Launcher>>,
+    open_prechecker: Arc<OpenPrechecker>,
+    request: Request,
+    deadline: tokio::time::Instant,
+) -> Result<Response<Body>, Error> {
     let method = request.method().as_str();
     let path = request.uri().path();
     let outcome = if method == "POST" && matches!(path, "/jobs" | "/jobs/settlement" | "/jobs/open")
@@ -700,15 +774,71 @@ async fn handle(
         match key {
             Ok(key) if request.body().as_ref().len() <= MAX_REQUEST_BYTES => {
                 let submitted = if path == "/jobs/open" {
-                    let precheck = match open_prechecker.check(request.body().as_ref()).await {
+                    let (token, decision) = match open_prechecker
+                        .check(request.body().as_ref(), deadline - Duration::from_secs(4))
+                        .await
+                    {
                         Ok(precheck) => precheck,
                         Err(error) => {
                             eprintln!("incident-open precheck failed: {error:?}");
                             return precheck_error_response(error);
                         }
                     };
-                    app.submit_open(&open_job_key(&precheck), request.body().as_ref())
-                        .await
+                    let advisory = serde_json::json!({
+                        "schemaVersion": 1, "chainId": usd8_tee_job_api::configured_chain_id(),
+                        "registry": open_prechecker.registry.to_string(), "defiInsurance": open_prechecker.module.to_string(),
+                        "insuredToken": token, "stale": !decision.fresh, "displayOnly": true,
+                        "snapshot": decision.advisory,
+                    });
+                    if let Some((status, code)) = advisory_rejection(&decision) {
+                        return json_response(
+                            status,
+                            &serde_json::json!({ "error": code, "advisory": advisory, "retryAfterSeconds": 60 }),
+                        );
+                    }
+                    let Some(open_advisory_cache::Advisory {
+                        checked_at,
+                        result:
+                            open_advisory_cache::Semantic::Qualifying {
+                                reference_block, ..
+                            },
+                        ..
+                    }) = decision.advisory
+                    else {
+                        return precheck_error_response(OpenPrecheckError::Unavailable);
+                    };
+                    let submit_started = tokio::time::Instant::now();
+                    let fresh_until =
+                        std::time::UNIX_EPOCH + Duration::from_secs(checked_at.saturating_add(60));
+                    let Ok(remaining) = fresh_until.duration_since(std::time::SystemTime::now())
+                    else {
+                        return precheck_error_response(OpenPrecheckError::Unavailable);
+                    };
+                    let submit_deadline = deadline.min(submit_started + remaining);
+                    let submitted = open_advisory_cache::within_deadline(
+                        submit_deadline,
+                        app.submit_open(
+                            &open_job_key(&token, reference_block),
+                            request.body().as_ref(),
+                        ),
+                    )
+                    .await;
+                    return match submitted.unwrap_or(Err(ServiceError::Unavailable)) {
+                        Ok(value) => {
+                            let mut value = serde_json::to_value(value)?;
+                            value["advisory"] = advisory;
+                            json_response(202, &value)
+                        }
+                        Err(error) => {
+                            let mut response = error_response(error)?;
+                            if let Body::Text(body) = response.body() {
+                                let mut value: serde_json::Value = serde_json::from_str(body)?;
+                                value["advisory"] = advisory;
+                                *response.body_mut() = Body::Text(serde_json::to_string(&value)?);
+                            }
+                            Ok(response)
+                        }
+                    };
                 } else {
                     app.submit(key, request.body().as_ref()).await
                 };
@@ -771,6 +901,11 @@ async fn main() -> Result<(), Error> {
         .load()
         .await;
     let registry = required("USD8_REGISTRY")?;
+    let defi_insurance = required("USD8_DEFI_INSURANCE")?;
+    let store = Arc::new(S3Store {
+        client: aws_sdk_s3::Client::new(&sdk),
+        bucket: bucket.clone(),
+    });
     let open_prechecker = Arc::new(OpenPrechecker {
         rpc: HttpRpc::new_with_retry_delay(
             &required("USD8_PRECHECK_RPC_URL")?,
@@ -781,8 +916,9 @@ async fn main() -> Result<(), Error> {
         )?,
         registry: Address::from_str(&registry).map_err(|_| "USD8_REGISTRY is invalid")?,
         configured_registry: registry.clone(),
+        module: Address::from_str(&defi_insurance).map_err(|_| "USD8_DEFI_INSURANCE is invalid")?,
+        store: store.clone(),
     });
-    let defi_insurance = required("USD8_DEFI_INSURANCE")?;
     let admission_policy = usd8_tee_job_api::AdmissionPolicy {
         // Explicit 0 selects cost-only admission; positive values retain the
         // conservative, fenced EC2 reconciliation policy. Configuration remains required.
@@ -813,15 +949,12 @@ async fn main() -> Result<(), Error> {
                 registry,
                 defi_insurance: defi_insurance.clone(),
                 job_secret: secret,
-                max_result_bytes: MAX_STORED_RESULT_BYTES,
+                max_result_bytes: MAX_RESULT_BYTES,
                 max_inline_result_bytes: 5 * 1024 * 1024,
                 result_url_ttl_seconds: 300,
                 job_ttl_seconds,
             },
-            Arc::new(S3Store {
-                client: aws_sdk_s3::Client::new(&sdk),
-                bucket: bucket.clone(),
-            }),
+            store,
             Arc::new(Ec2Launcher {
                 client: aws_sdk_ec2::Client::from_conf(
                     aws_sdk_ec2::config::Builder::from(&sdk)
@@ -949,7 +1082,8 @@ mod tests {
     #[tokio::test]
     async fn s3_durable_completion_conflicts_read_large_exact_bytes() {
         use usd8_tee_job_api::{CreateOutcome, JobStore};
-        let body = "x".repeat(8192);
+        // Exercise a stored completion larger than the previous 16 MiB ceiling.
+        let body = "x".repeat(16 * 1024 * 1024 + 1);
         let (store, server, _) = local_s3_responses(vec![
             "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 .into(),
@@ -967,7 +1101,7 @@ mod tests {
         assert!(matches!(result, Ok(CreateOutcome::Exists(bytes)) if bytes == body.as_bytes()));
         assert_eq!(
             super::create_conflict_read_limit("control/completions/job.json"),
-            16 * 1024 * 1024
+            64 * 1024 * 1024
         );
     }
 
@@ -975,7 +1109,7 @@ mod tests {
     async fn s3_completion_conflict_limits_reject_oversized_results_and_requests() {
         use usd8_tee_job_api::JobStore;
         for (key, cap) in [
-            ("control/completions/job.json", 16 * 1024 * 1024),
+            ("control/completions/job.json", 64 * 1024 * 1024),
             ("control/completion-requests/job.json", 4096),
         ] {
             assert_eq!(super::create_conflict_read_limit(key), cap);
@@ -1103,6 +1237,14 @@ mod tests {
         let launcher = test_launcher(store, &endpoint);
         assert!(launcher.launch_before(&"a".repeat(64), 0).await.is_err());
         assert!(
+            super::open_advisory_cache::within_deadline(
+                tokio::time::Instant::now(),
+                launcher.launch_before(&"a".repeat(64), u64::MAX),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
             !server.is_finished(),
             "expired attempt must not touch S3 or EC2"
         );
@@ -1143,6 +1285,58 @@ mod tests {
             Err(ServiceError::InvalidStoredResult)
         ));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn opening_advisory_never_admits_stale_or_missing_results() {
+        use super::open_advisory_cache::{Advisory, Decision, Semantic};
+        for fresh in [false, true] {
+            let positive = Advisory {
+                checked_at: 1,
+                expires_at: 3601,
+                configuration: "c".into(),
+                result: Semantic::Qualifying {
+                    reference_block: 10,
+                    observation_block: 20,
+                },
+            };
+            let decision = Decision {
+                fresh,
+                advisory: Some(positive),
+            };
+            assert_eq!(
+                super::advisory_rejection(&decision),
+                if fresh {
+                    None
+                } else {
+                    Some((503, "PRICE_PRECHECK_UNAVAILABLE"))
+                }
+            );
+            let negative = Decision {
+                fresh,
+                advisory: Some(Advisory {
+                    checked_at: 1,
+                    expires_at: 3601,
+                    configuration: "c".into(),
+                    result: Semantic::NoDrop,
+                }),
+            };
+            assert_eq!(
+                super::advisory_rejection(&negative),
+                Some(if fresh {
+                    (422, "PRICE_DROP_NOT_DETECTED")
+                } else {
+                    (503, "PRICE_PRECHECK_UNAVAILABLE")
+                })
+            );
+        }
+        assert!(
+            super::advisory_rejection(&Decision {
+                fresh: true,
+                advisory: None
+            })
+            .is_some()
+        );
     }
 
     struct PreflightRpc {
@@ -1316,9 +1510,25 @@ mod tests {
     fn settlement_create_conflicts_can_read_the_complete_existing_artifact() {
         assert_eq!(
             create_conflict_read_limit("settlements/v1/11155111/registry/module/7/root.json"),
-            16 * 1024 * 1024
+            64 * 1024 * 1024
         );
         assert_eq!(create_conflict_read_limit("requests/job.json"), 4_096);
+    }
+
+    #[test]
+    fn capacity_denial_is_explicitly_retryable() {
+        let response = error_response(ServiceError::AdmissionLimited).unwrap();
+        assert_eq!(response.status(), 429);
+        let Body::Text(body) = response.body() else {
+            panic!("expected JSON body")
+        };
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["error"], "WORKER_BUDGET_EXHAUSTED");
+        assert_eq!(body["retryable"], true);
+        assert_eq!(
+            body["message"],
+            "Worker launch capacity is currently full. Please retry."
+        );
     }
 
     #[test]
@@ -1378,7 +1588,7 @@ mod tests {
             minimum_drop_bps: 2_000,
         };
         assert_eq!(
-            open_job_key(&precheck),
+            open_job_key(&precheck.insured_token, precheck.reference_block),
             "open:0x3333333333333333333333333333333333333333:12345678"
         );
     }

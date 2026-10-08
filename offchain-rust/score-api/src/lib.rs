@@ -11,8 +11,7 @@ use usd8_score_core::{
 use usd8_settlement::Address;
 use usd8_settlement::chain::{
     BlockAnchor, ChainError, ScoredToken, TokenTransfer, balance_of_at, block_by_number, chain_id,
-    defi_insurance_at, erc20_transfers_for_accounts, finalized_block, score_config_at,
-    spent_score_at,
+    defi_insurance_at, erc20_transfers_for_accounts, finalized_block, score_config_and_spent_at,
 };
 use usd8_settlement::config::LOG_RESULT_CAP;
 use usd8_settlement::rpc::{LogMetrics, Rpc};
@@ -624,7 +623,8 @@ pub async fn compute_incremental_score_at<R: Rpc + ?Sized>(
     if defi_insurance.is_zero() {
         return Err(IncrementalScoreError::ZeroDefiInsurance);
     }
-    let config = score_config_at(rpc, registry, defi_insurance, reference.number).await?;
+    let (config, spent) =
+        score_config_and_spent_at(rpc, registry, defi_insurance, account, reference.number).await?;
     let cutoff = score_cutoff_block(reference.number, config.params.holding_margin_blocks);
     let cutoff_anchor = block_by_number(rpc, cutoff).await?;
     let previous_matured_tokens = previous
@@ -658,7 +658,6 @@ pub async fn compute_incremental_score_at<R: Rpc + ?Sized>(
         )
         .await?;
     let metrics = merge_metrics(matured_metrics, visible_metrics);
-    let spent = spent_score_at(rpc, registry, account, reference.number).await?;
     let score = score_breakdown(&visible_numerator, &matured_numerator, &spent);
     let visible_token_numerators =
         token_numerators(&visible_tokens, &config.scored_tokens, reference.number)?;

@@ -27,9 +27,10 @@ import {MockERC1155} from "./mocks/MockERC1155.sol";
 ///
 /// Opt-in (keeps the default forge test green and FFI-free):
 ///   cargo build --release --locked --manifest-path offchain-rust/Cargo.toml
+///   cargo build --release --locked --manifest-path offchain-rust/Cargo.toml --features ffi-tools --bin usd8-ffi
 ///   RUN_INTEGRATION=1 forge test --offline --ffi --match-path test/SettlementIntegration.t.sol -vv
 contract SettlementIntegrationTest is Test {
-    string constant RUST_FFI = "offchain-rust/target/release/usd8-settlement";
+    string constant RUST_FFI = "offchain-rust/target/release/usd8-ffi";
 
     MockERC20 usdc; // pool stake asset (payout currency)
     MockERC20 lp; // insured token
@@ -477,13 +478,12 @@ contract SettlementIntegrationTest is Test {
     }
 
     function _ffi(string memory cmd, bytes memory payload, string memory arg) internal returns (bytes memory) {
-        uint256 n = bytes(arg).length == 0 ? 4 : 5;
+        uint256 n = bytes(arg).length == 0 ? 3 : 4;
         string[] memory c = new string[](n);
         c[0] = RUST_FFI;
-        c[1] = "ffi";
-        c[2] = cmd;
-        c[3] = vm.toString(payload);
-        if (n == 5) c[4] = arg;
+        c[1] = cmd;
+        c[2] = vm.toString(payload);
+        if (n == 4) c[3] = arg;
         return vm.ffi(c);
     }
 

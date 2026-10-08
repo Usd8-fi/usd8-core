@@ -2,6 +2,8 @@
 #[allow(dead_code)]
 #[path = "../src/settlement_verifier.rs"]
 mod settlement_verifier;
+#[path = "../../tests/support/mod.rs"]
+mod support;
 use serde_json::{Value, json};
 use settlement_verifier::*;
 use usd8_settlement::typed_data::{SettlementDigestInput, settlement_digest};
@@ -93,7 +95,7 @@ impl Rpc for MockRpc {
                 };
                 json!({"number":format!("0x{n:x}"),"timestamp":format!("0x{:x}",n*10),"hash":hash(n as u8)})
             }
-            "eth_call" => {
+            "eth_call" => support::dispatch(&params, |params| {
                 let data = params[0]["data"].as_str().unwrap();
                 let sel = &data[2..10];
                 let output = if sel == selector("defiInsurance()") {
@@ -127,8 +129,8 @@ impl Rpc for MockRpc {
                 } else {
                     panic!("unexpected call: {data}")
                 };
-                json!(format!("0x{output}"))
-            }
+                Ok(json!(format!("0x{output}")))
+            })?,
             _ => panic!("unexpected RPC {method}: {params}"),
         })
     }

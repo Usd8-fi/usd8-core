@@ -24,6 +24,11 @@ const REQUEST_COMMITMENT_DOMAIN: &[u8] = b"USD8_TEE_REQUEST_V1\0";
 pub const JOB_WIRE_SCHEMA_VERSION: u32 = 3;
 pub const STORED_REQUEST_SCHEMA_VERSION: u32 = 3;
 
+/// Shared by the enclave response, parent receiver and stored-result reader.
+pub const MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
+/// Leave room for the signature and terminal envelope added after attestation.
+pub const MAX_ARTIFACT_BYTES: usize = MAX_RESULT_BYTES - 64 * 1024;
+
 pub const MAX_STORED_REQUEST_BYTES: usize = 4_096;
 pub const MAX_CIPHERTEXT_BYTES: usize = 65_536;
 pub const MAX_CIPHERTEXT_B64_BYTES: usize = 4 * MAX_CIPHERTEXT_BYTES.div_ceil(3);
@@ -718,6 +723,10 @@ struct WorkAttempt {
     launch_retry_at: u64,
     launched: bool,
     completed: bool,
+    /// Proven capacity rejection before launch, never an ambiguous launch error.
+    /// Missing in legacy records: conservatively keep their immutable deadline.
+    #[serde(default)]
+    admission_denied: bool,
 }
 
 #[async_trait]
@@ -1200,6 +1209,7 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
                     .map_err(|_| ServiceError::InvalidStoredResult)?;
                 if state.stored.request != request
                     || !stored_request_is_live(&state.stored, state.stored.created_at)
+                    || (state.admission_denied && (state.launched || state.completed))
                 {
                     return Err(ServiceError::InvalidStoredResult);
                 }
@@ -1256,7 +1266,10 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
                         job_id,
                     });
                 }
-                if (terminal.is_some() && !invalid_completion) || now > state.stored.expires_at {
+                if state.admission_denied
+                    || (terminal.is_some() && !invalid_completion)
+                    || now > state.stored.expires_at
+                {
                     generation = state
                         .generation
                         .checked_add(1)
@@ -1297,6 +1310,7 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
                         launch_retry_at: now.saturating_add(60),
                         launched: false,
                         completed: false,
+                        admission_denied: false,
                     }
                 }
             };
@@ -1330,8 +1344,30 @@ impl<S: JobStore, L: InstanceLauncher> App<S, L> {
                 && owned.bytes == bytes
                 && (self.clock)() < state.stored.created_at.saturating_add(120)
             {
-                self.reserve_worker(&job_id, state.stored.created_at.saturating_add(120))
-                    .await?;
+                if let Err(error) = self
+                    .reserve_worker(&job_id, state.stored.created_at.saturating_add(120))
+                    .await
+                {
+                    if error == ServiceError::AdmissionLimited {
+                        // No reservation or launch was made. A retry may select a
+                        // new generation immediately, with fresh immutable times.
+                        // CAS prevents a delayed denial from overwriting a newer
+                        // owner that may already have reserved/launched this job.
+                        let mut denied = state.clone();
+                        denied.admission_denied = true;
+                        self.store
+                            .compare_exchange(
+                                &work_key,
+                                Some(&owned.revision),
+                                &serde_json::to_vec(&denied)
+                                    .map_err(|_| ServiceError::Unavailable)?,
+                            )
+                            .await?;
+                    }
+                    // Storage/launch uncertainty must never become permission
+                    // to rotate the token or extend an existing launch deadline.
+                    return Err(error);
+                }
                 let fresh = self
                     .store
                     .get_versioned(&work_key, MAX_STORED_REQUEST_BYTES)

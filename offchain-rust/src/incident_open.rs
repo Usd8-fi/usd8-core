@@ -1,15 +1,14 @@
 use crate::Address;
 use crate::abi::{IDefiInsurance, IRegistry};
 use crate::chain::{
-    block_by_number, chain_id, contract_call, defi_insurance_at, finalized_block, incident_at,
-    latest_block, ratio_at,
+    aggregate_reads, block_by_number, chain_id, decode_read, defi_insurance_at, finalized_block,
+    latest_block, ratios_at, read_call,
 };
 use crate::config::CHAIN_ID;
 use crate::rpc::Rpc;
 use crate::typed_data::{IncidentOpenDigestInput, incident_open_digest};
 use alloy_primitives::{Address as AlloyAddress, U256};
 use num_bigint::BigUint;
-use num_traits::Zero;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -90,10 +89,6 @@ fn local_address(value: AlloyAddress) -> Address {
     Address::from_bytes(value.into_array())
 }
 
-fn big(value: U256) -> BigUint {
-    BigUint::from_bytes_be(&value.to_be_bytes::<32>())
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IncidentOpenPrecheck {
@@ -127,6 +122,7 @@ struct DiscoveryPolicy {
     minimum_drop_bps: u16,
 }
 
+//we sample every 300 blocks, check its twap price upto before and after 300 blocks, then check if price drop met the minimum drop bps requirement.
 async fn discover_incident_open_twap<R: Rpc + ?Sized>(
     rpc: &R,
     conversion_address: Address,
@@ -136,12 +132,12 @@ async fn discover_incident_open_twap<R: Rpc + ?Sized>(
     let DiscoveryPolicy {
         latest_block,
         finalized_block,
-        max_age,
-        twap_blocks,
-        sample_step_blocks,
+        max_age,            //max look back age for incident, set at 43200 blocks as 6 days
+        twap_blocks, //the twap block window we use to calculate price drops, set at 7200 blocks as 24 hours window
+        sample_step_blocks, //the step size for sampling the twap, set at 300 blocks as 1 hour
         minimum_drop_bps,
     } = policy;
-    let earliest = latest_block.saturating_sub(max_age).max(twap_blocks).max(1);
+    let earliest = latest_block.saturating_sub(max_age).max(twap_blocks).max(1); //get the earliest allowed block from max age. max it with twap_blocks to ensure edge case of earliest block number less than twap.
     let Some(latest) = finalized_block.checked_sub(twap_blocks) else {
         return Err(IncidentOpenError::NoFinalizedCandidateWindow);
     };
@@ -154,9 +150,9 @@ async fn discover_incident_open_twap<R: Rpc + ?Sized>(
         return Err(IncidentOpenError::NoFinalizedCandidateWindow);
     }
 
-    let candidate_count = (last_candidate - first_candidate) / sample_step_blocks + 1;
-    let sample_count = twap_blocks / sample_step_blocks;
-    let point_count = candidate_count
+    let candidate_count = (last_candidate - first_candidate) / sample_step_blocks + 1; //candidate is how many blocks we are looking at. we dont look at every block due to sample step size.
+    let sample_count = twap_blocks / sample_step_blocks; // sample_count is how many samples we take for each candidate
+    let point_count = candidate_count //point count is total sample count we need for all candidates.
         .checked_add(sample_count.saturating_mul(2))
         .ok_or(IncidentOpenError::InvalidPriceConfig)?;
     if point_count > MAX_INCIDENT_OPEN_DISCOVERY_POINTS {
@@ -170,15 +166,18 @@ async fn discover_incident_open_twap<R: Rpc + ?Sized>(
     let last_point = last_candidate
         .checked_add(twap_blocks)
         .ok_or(IncidentOpenError::InvalidPriceConfig)?;
-    let mut ratios = Vec::with_capacity(point_count as usize);
+    let mut blocks = Vec::with_capacity(point_count as usize);
     let mut block = first_point;
     while block <= last_point {
-        ratios.push(ratio_at(rpc, conversion_address, conversion_call_data, block).await?);
+        blocks.push(block);
         let Some(next) = block.checked_add(sample_step_blocks) else {
+            //we take blocks with gap of sample_step_blocks.
             break;
         };
         block = next;
     }
+
+    let ratios = ratios_at(rpc, conversion_address, conversion_call_data, &blocks).await?; //ratios are just price against underlying, get prices for each block we are looking at.
 
     let sample_count_usize = sample_count as usize;
     let mut baseline_sum = ratios[..sample_count_usize]
@@ -239,40 +238,61 @@ pub async fn precheck_incident_open<R: Rpc + ?Sized>(
     }
     let at = Some(head.number);
     let defi_insurance = defi_insurance_at(rpc, registry, at).await?;
-    let reverse_registry = local_address(
-        contract_call(rpc, defi_insurance, &IDefiInsurance::registryCall {}, at).await?,
-    );
+    let reads = aggregate_reads(
+        rpc,
+        vec![
+            read_call(defi_insurance, IDefiInsurance::registryCall {}),
+            read_call(defi_insurance, IDefiInsurance::nextIncidentIdCall {}),
+            read_call(registry, IRegistry::incidentTimingConfigCall {}),
+            read_call(registry, IRegistry::incidentOpenPriceConfigCall {}),
+            read_call(
+                defi_insurance,
+                IDefiInsurance::getInsuredTokenCall {
+                    token: AlloyAddress::from(insured_token.into_bytes()),
+                },
+            ),
+        ],
+        head.number,
+    )
+    .await?;
+    let reverse_registry = local_address(decode_read::<IDefiInsurance::registryCall>(&reads[0])?);
     if reverse_registry != registry {
         return Err(IncidentOpenError::RegistryMismatch);
     }
 
-    let next_incident = contract_call(
-        rpc,
-        defi_insurance,
-        &IDefiInsurance::nextIncidentIdCall {},
-        at,
-    )
-    .await?;
+    let next_incident = decode_read::<IDefiInsurance::nextIncidentIdCall>(&reads[1])?;
     if next_incident == 0 {
         return Err(IncidentOpenError::ZeroIncidentId);
     }
     if next_incident > 1 {
         let previous_id = U256::from(next_incident - 1);
-        let previous = incident_at(rpc, defi_insurance, big(previous_id), at).await?;
-        let phase_window = contract_call(
+        let previous_reads = aggregate_reads(
             rpc,
-            defi_insurance,
-            &IDefiInsurance::incidentPhaseWindowCall {
-                incidentId: previous_id,
-            },
-            at,
+            vec![
+                read_call(
+                    defi_insurance,
+                    IDefiInsurance::incidentsCall {
+                        incidentId: previous_id,
+                    },
+                ),
+                read_call(
+                    defi_insurance,
+                    IDefiInsurance::incidentPhaseWindowCall {
+                        incidentId: previous_id,
+                    },
+                ),
+            ],
+            head.number,
         )
         .await?;
+        let previous = decode_read::<IDefiInsurance::incidentsCall>(&previous_reads[0])?;
+        let phase_window =
+            decode_read::<IDefiInsurance::incidentPhaseWindowCall>(&previous_reads[1])?;
         let head_timestamp = U256::from(head.timestamp);
-        let phase_deadline = U256::from(previous.phase_deadline);
+        let phase_deadline = U256::from(previous.phaseDeadline);
         let active = if head_timestamp <= phase_deadline {
             true
-        } else if previous.unresolved_claims.is_zero() {
+        } else if previous.unresolvedClaims.is_zero() {
             false
         } else {
             head_timestamp <= phase_deadline + U256::from(phase_window)
@@ -282,15 +302,9 @@ pub async fn precheck_incident_open<R: Rpc + ?Sized>(
         }
     }
 
-    let timing = contract_call(rpc, registry, &IRegistry::incidentTimingConfigCall {}, at).await?;
+    let timing = decode_read::<IRegistry::incidentTimingConfigCall>(&reads[2])?;
     let max_age = timing.maxReferenceBlockAge;
-    let price_config = contract_call(
-        rpc,
-        registry,
-        &IRegistry::incidentOpenPriceConfigCall {},
-        at,
-    )
-    .await?;
+    let price_config = decode_read::<IRegistry::incidentOpenPriceConfigCall>(&reads[3])?;
     if price_config.twapBlocks == 0
         || price_config.sampleStepBlocks == 0
         || price_config.sampleStepBlocks > price_config.twapBlocks
@@ -303,15 +317,7 @@ pub async fn precheck_incident_open<R: Rpc + ?Sized>(
     {
         return Err(IncidentOpenError::InvalidPriceConfig);
     }
-    let token = contract_call(
-        rpc,
-        defi_insurance,
-        &IDefiInsurance::getInsuredTokenCall {
-            token: AlloyAddress::from(insured_token.into_bytes()),
-        },
-        at,
-    )
-    .await?;
+    let token = decode_read::<IDefiInsurance::getInsuredTokenCall>(&reads[4])?;
     if token.maxCoverageBps == 0 {
         return Err(IncidentOpenError::UnapprovedToken);
     }
@@ -382,101 +388,107 @@ pub async fn build_incident_open<R: Rpc + ?Sized>(
     }
     let at = Some(head.number);
     let defi_insurance = defi_insurance_at(rpc, registry, at).await?;
-    let reverse_registry = local_address(
-        contract_call(rpc, defi_insurance, &IDefiInsurance::registryCall {}, at).await?,
-    );
+    let reads = aggregate_reads(
+        rpc,
+        vec![
+            read_call(defi_insurance, IDefiInsurance::registryCall {}),
+            read_call(defi_insurance, IDefiInsurance::nextIncidentIdCall {}),
+            read_call(registry, IRegistry::incidentTimingConfigCall {}),
+            read_call(registry, IRegistry::incidentOpenPriceConfigCall {}),
+            read_call(
+                defi_insurance,
+                IDefiInsurance::getInsuredTokenCall {
+                    token: AlloyAddress::from(insured_token.into_bytes()),
+                },
+            ),
+            read_call(
+                defi_insurance,
+                IDefiInsurance::incidentOpenEligibilityHashCall {
+                    insuredToken: AlloyAddress::from(insured_token.into_bytes()),
+                },
+            ),
+            read_call(
+                defi_insurance,
+                IDefiInsurance::isTeeSignerCall {
+                    signer: AlloyAddress::from(expected_signer.into_bytes()),
+                },
+            ),
+            read_call(registry, IRegistry::teePcrHashCall {}),
+        ],
+        head.number,
+    )
+    .await?;
+    let reverse_registry = local_address(decode_read::<IDefiInsurance::registryCall>(&reads[0])?);
     if reverse_registry != registry {
         return Err(IncidentOpenError::RegistryMismatch);
     }
 
-    let next_incident = contract_call(
-        rpc,
-        defi_insurance,
-        &IDefiInsurance::nextIncidentIdCall {},
-        at,
-    )
-    .await?;
+    let next_incident = decode_read::<IDefiInsurance::nextIncidentIdCall>(&reads[1])?;
     if next_incident == 0 {
         return Err(IncidentOpenError::ZeroIncidentId);
     }
-    let timing = contract_call(rpc, registry, &IRegistry::incidentTimingConfigCall {}, at).await?;
+    let timing = decode_read::<IRegistry::incidentTimingConfigCall>(&reads[2])?;
     let max_age = timing.maxReferenceBlockAge;
-    let price_config = contract_call(
-        rpc,
-        registry,
-        &IRegistry::incidentOpenPriceConfigCall {},
-        at,
-    )
-    .await?;
-    if price_config.twapBlocks == 0
+    let price_config = decode_read::<IRegistry::incidentOpenPriceConfigCall>(&reads[3])?;
+    if price_config.twapBlocks == 0 //we get twapBlocks and sampleStepBlocks from the contract and verify their values.
         || price_config.sampleStepBlocks == 0
         || price_config.sampleStepBlocks > price_config.twapBlocks
         || price_config.twapBlocks % price_config.sampleStepBlocks != 0
         || price_config.twapBlocks / price_config.sampleStepBlocks < 2
         || price_config.twapBlocks / price_config.sampleStepBlocks > MAX_INCIDENT_OPEN_SAMPLES
         || price_config.minimumDropBps == 0
-        || price_config.minimumDropBps >= 10_000
+        || price_config.minimumDropBps >= 10_000 //mindrop cant be >= 100%
         || price_config.twapBlocks >= max_age
     {
         return Err(IncidentOpenError::InvalidPriceConfig);
     }
 
-    let token = contract_call(
-        rpc,
-        defi_insurance,
-        &IDefiInsurance::getInsuredTokenCall {
-            token: AlloyAddress::from(insured_token.into_bytes()),
-        },
-        at,
-    )
-    .await?;
+    let token = decode_read::<IDefiInsurance::getInsuredTokenCall>(&reads[4])?;
     if token.maxCoverageBps == 0 {
         return Err(IncidentOpenError::UnapprovedToken);
     }
-    let eligibility_hash = contract_call(
-        rpc,
-        defi_insurance,
-        &IDefiInsurance::incidentOpenEligibilityHashCall {
-            insuredToken: AlloyAddress::from(insured_token.into_bytes()),
-        },
-        at,
-    )
-    .await?;
+    //this is the hash of the current defiInsurance storage state.
+    let eligibility_hash =
+        decode_read::<IDefiInsurance::incidentOpenEligibilityHashCall>(&reads[5])?;
     let eligibility_hash = format!("{eligibility_hash:#x}");
-    let signer_authorized = contract_call(
-        rpc,
-        defi_insurance,
-        &IDefiInsurance::isTeeSignerCall {
-            signer: AlloyAddress::from(expected_signer.into_bytes()),
-        },
-        at,
-    )
-    .await?;
+    let signer_authorized = decode_read::<IDefiInsurance::isTeeSignerCall>(&reads[6])?;
     if !signer_authorized {
         return Err(IncidentOpenError::UnauthorizedSigner);
     }
-    let tee_pcr_hash = contract_call(rpc, registry, &IRegistry::teePcrHashCall {}, at).await?;
+    let tee_pcr_hash = decode_read::<IRegistry::teePcrHashCall>(&reads[7])?;
     if tee_pcr_hash.is_zero() {
         return Err(IncidentOpenError::ZeroPcrCommitment);
     }
 
     if next_incident > 1 {
         let previous_id = U256::from(next_incident - 1);
-        let previous = incident_at(rpc, defi_insurance, big(previous_id), at).await?;
-        let phase_window = contract_call(
+        let previous_reads = aggregate_reads(
             rpc,
-            defi_insurance,
-            &IDefiInsurance::incidentPhaseWindowCall {
-                incidentId: previous_id,
-            },
-            at,
+            vec![
+                read_call(
+                    defi_insurance,
+                    IDefiInsurance::incidentsCall {
+                        incidentId: previous_id,
+                    },
+                ),
+                read_call(
+                    defi_insurance,
+                    IDefiInsurance::incidentPhaseWindowCall {
+                        incidentId: previous_id,
+                    },
+                ),
+            ],
+            head.number,
         )
         .await?;
+        let previous = decode_read::<IDefiInsurance::incidentsCall>(&previous_reads[0])?;
+        let phase_window =
+            decode_read::<IDefiInsurance::incidentPhaseWindowCall>(&previous_reads[1])?;
         let head_timestamp = U256::from(head.timestamp);
-        let phase_deadline = U256::from(previous.phase_deadline);
+        let phase_deadline = U256::from(previous.phaseDeadline);
         let active = if head_timestamp <= phase_deadline {
             true
-        } else if previous.unresolved_claims.is_zero() {
+        } else if previous.unresolvedClaims.is_zero() {
             false
         } else {
             head_timestamp <= phase_deadline + U256::from(phase_window)

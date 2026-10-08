@@ -57,6 +57,161 @@ fn response(status: &str, body: &str, extra_headers: &str) -> String {
     )
 }
 
+#[tokio::test]
+async fn http_batch_orders_up_to_256_results_and_retries_the_whole_envelope() {
+    for (count, retry) in [(169, false), (169, true), (256, false), (256, true)] {
+        let results: Vec<_> = (1..=count)
+            .rev()
+            .map(|id| json!({"jsonrpc":"2.0","id":id,"result":format!("0x{id:x}")}))
+            .collect();
+        let mut responses = Vec::new();
+        if retry {
+            responses.push(response("503 Service Unavailable", "", ""));
+        }
+        responses.push(response("200 OK", &json!(results).to_string(), ""));
+        let (url, requests) = mock_http(responses).await;
+        let rpc = HttpRpc::new_with_retry_delay(&url, None, 1000, 1, 0).unwrap();
+        let params: Vec<_> = (1..=count).map(|id| json!([{"to":"0x1111111111111111111111111111111111111111","data":"0x12345678"},format!("0x{id:x}")])).collect();
+        let actual = rpc.batch_request("eth_call", params.clone()).await.unwrap();
+        assert_eq!(
+            actual,
+            (1..=count)
+                .map(|id| json!(format!("0x{id:x}")))
+                .collect::<Vec<_>>()
+        );
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), if retry { 2 } else { 1 });
+        let bodies: Vec<Value> = captured
+            .iter()
+            .map(|r| serde_json::from_str(r.split_once("\r\n\r\n").unwrap().1).unwrap())
+            .collect();
+        for body in &bodies {
+            assert_eq!(
+                body.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| m["params"].clone())
+                    .collect::<Vec<_>>(),
+                params
+            );
+        }
+        if retry {
+            assert_eq!(bodies[0], bodies[1]);
+        }
+        assert_eq!(rpc.metrics().logical_requests, count);
+        assert_eq!(rpc.metrics().transport_attempts, captured.len() as u64);
+        assert_eq!(rpc.metrics().transport_retries, u64::from(retry));
+    }
+}
+
+#[tokio::test]
+async fn http_batch_limits_and_response_failures_are_terminal() {
+    let rpc = HttpRpc::new_with_retry_delay("http://127.0.0.1:1", None, 1000, 0, 0).unwrap();
+    for params in [
+        vec![],
+        vec![json!([]); 257],
+        vec![json!(["x".repeat(1024 * 1024)])],
+    ] {
+        assert!(matches!(
+            rpc.batch_request("eth_call", params).await,
+            Err(RpcError::InvalidBatch)
+        ));
+    }
+    assert_eq!(rpc.metrics(), RpcMetrics::default());
+    for wire in [
+        response("200 OK", &" ".repeat(201), ""),
+        format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            201,
+            " ".repeat(201)
+        ),
+        response("200 OK", "not-json", ""),
+        response("302 Found", "", "Location: http://127.0.0.1:9/secret\r\n"),
+    ] {
+        let (url, requests) = mock_http(vec![wire]).await;
+        let rpc =
+            HttpRpc::new_with_retry_delay_and_response_limit(&url, None, 1000, 2, 0, 200).unwrap();
+        assert!(
+            rpc.batch_request("eth_call", vec![json!([]); 2])
+                .await
+                .is_err()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(rpc.metrics().logical_requests, 2);
+        assert_eq!(rpc.metrics().transport_attempts, 1);
+    }
+}
+
+#[tokio::test]
+async fn http_batch_timeout_retries_are_bounded_and_redacted() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!(
+        "http://{}/secret-key?token=secret-token",
+        listener.local_addr().unwrap()
+    );
+    let server = tokio::spawn(async move {
+        let mut streams = Vec::new();
+        for _ in 0..2 {
+            streams.push(listener.accept().await.unwrap().0);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        streams.len()
+    });
+    let rpc = HttpRpc::new_with_retry_delay(&endpoint, None, 30, 1, 0).unwrap();
+    let error = rpc
+        .batch_request("eth_call", vec![json!([]); 2])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("timed out"));
+    assert!(!error.to_string().contains("secret"));
+    assert_eq!(rpc.metrics().logical_requests, 2);
+    assert_eq!(rpc.metrics().transport_attempts, 2);
+    assert_eq!(rpc.metrics().transport_retries, 1);
+    assert_eq!(server.await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn conversion_batch_identity_is_rpc_free_and_unsupported_is_explicit() {
+    struct NoBatch;
+    #[async_trait]
+    impl Rpc for NoBatch {
+        async fn request(&self, _: &str, _: Value) -> Result<Value, RpcError> {
+            panic!("serial fallback");
+        }
+        fn metrics(&self) -> RpcMetrics {
+            RpcMetrics::default()
+        }
+    }
+    use usd8_settlement::{Address, chain::ratios_at};
+    let blocks = [1, 2, 3];
+    let ratios = ratios_at(&NoBatch, Address::from_bytes([0; 20]), &[], &blocks)
+        .await
+        .unwrap();
+    assert_eq!(ratios.len(), 3);
+    assert!(
+        ratios
+            .iter()
+            .all(|r| r.to_string() == "1000000000000000000")
+    );
+    assert!(
+        ratios_at(&NoBatch, Address::from_bytes([1; 20]), &[], &blocks)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not support")
+    );
+    assert!(
+        ratios_at(
+            &NoBatch,
+            Address::from_bytes([1; 20]),
+            &vec![0; 16 * 1024 + 1],
+            &blocks
+        )
+        .await
+        .is_err()
+    );
+}
+
 #[test]
 fn drpc_key_is_restricted_to_exact_trusted_https_endpoint() {
     assert!(validate_rpc_endpoint("https://lb.drpc.org/ogrpc?network=ethereum", true).is_ok());

@@ -1,21 +1,35 @@
+/*
+This is the CLI entry point for the USD8 Settlement Engine.
+It provides commands for computing, verifying, and attesting settlement artifacts,
+as well as interacting with the underlying FFI and kernel components.
+
+There are 2 main entrypoints of using USD8 Settlement Engine:
+
+1. via this CLI command, anyone can run it locally and verify the results.
+2. front end use the engine via a cloud function to
+    1. compute users' insurance scores
+    2. initialize and managing settlement, including spin off a TEE to compute the settlement results
+
+*/
+
 use num_bigint::BigUint;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::hint::black_box;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
 use usd8_settlement::Address;
 use usd8_settlement::artifact::{verify_run, write_atomic_json};
-use usd8_settlement::engine::{ScoreMode, build_settlement, settlement_config_from_registry};
-use usd8_settlement::incident_open::build_incident_open;
+use usd8_settlement::config::BootstrapConfig;
+use usd8_settlement::engine::{
+    ScoreMode, SettlementRun, build_settlement, settlement_config_from_registry,
+};
+use usd8_settlement::incident_open::precheck_incident_open;
 use usd8_settlement::rpc::HttpRpc;
-use usd8_settlement::{allocate, parse_json, serialize_output};
 
-const USAGE: &str = "usage:\n  usd8-settlement compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-compute <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement attested-open <insuredToken> --registry <address> --rpc-url <url> --expected-signer <address> [--output <file>]\n  usd8-settlement verify  <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement pcr-hash <PCR0> <PCR1> <PCR2>\n  usd8-settlement ffi <root|proof|digest|claimset> <abiHexPayload> [claimId]\n  usd8-settlement kernel [fixture.json] [iterations] [warmup]\n\nEnvironment fallbacks: USD8_REGISTRY, ETH_RPC_URL, DRPC_KEY, USD8_EXPECTED_SIGNER, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
+const USAGE: &str = "usage:\n  usd8-settlement compute_settlement <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement compute_settlement_tee <incidentId> --registry <address> --rpc-url <url> [--raw-score|--bulk-score|--checkpoint <file>] [--output <file>]\n  usd8-settlement detect_price_drop <insuredToken> --registry <address> --rpc-url <url> [--no-drpc-key|--drpc-key-env <name>] [--timeout-ms <ms>] [--output <file>]\n  usd8-settlement compute_insurance_score <userAddress> --registry <address> --rpc-url <url> [--no-drpc-key|--drpc-key-env <name>] [--timeout-ms <ms>] [--output <file>]\n  usd8-settlement pcr-hash <PCR0> <PCR1> <PCR2>\n\nEnvironment fallbacks: USD8_REGISTRY, ETH_RPC_URL, DRPC_KEY, SCORE_CHECKPOINT_PATH, SCORE_CHECKPOINT_KEY.";
 
 #[derive(Debug)]
 enum CliError {
@@ -23,76 +37,17 @@ enum CliError {
     Fatal(String),
 }
 
+/// Classify invalid command-line input as a usage error.
 fn usage(error: impl Into<String>) -> CliError {
     CliError::Usage(error.into())
 }
 
+/// Classify runtime failures without changing their diagnostic text.
 fn fatal(error: impl Into<String>) -> CliError {
     CliError::Fatal(error.into())
 }
 
-fn parse_count(value: Option<&String>, default: usize, label: &str) -> Result<usize, String> {
-    let parsed = match value {
-        Some(value) => value
-            .parse::<usize>()
-            .map_err(|_| format!("invalid {label}: {value}"))?,
-        None => default,
-    };
-    if parsed == 0 && label == "iterations" {
-        return Err("iterations must be greater than zero".to_owned());
-    }
-    Ok(parsed)
-}
-
-fn read_input(path: Option<&String>) -> Result<String, String> {
-    match path {
-        Some(path) => {
-            fs::read_to_string(path).map_err(|error| format!("failed to read input: {error}"))
-        }
-        None => {
-            let mut input = String::new();
-            io::stdin()
-                .read_to_string(&mut input)
-                .map_err(|error| format!("failed to read stdin: {error}"))?;
-            Ok(input)
-        }
-    }
-}
-
-fn run_kernel(args: &[String]) -> Result<i32, CliError> {
-    if args.len() > 3 {
-        return Err(usage("too many kernel arguments"));
-    }
-    let iterations = parse_count(args.get(1), 1, "iterations").map_err(usage)?;
-    let warmup = parse_count(args.get(2), 0, "warmup").map_err(usage)?;
-    let input = read_input(args.first()).map_err(fatal)?;
-    let parsed = parse_json(&input).map_err(|error| fatal(error.to_string()))?;
-    for _ in 0..warmup {
-        black_box(allocate(&parsed).map_err(|error| fatal(error.to_string()))?);
-    }
-    let started = Instant::now();
-    let mut output = None;
-    for _ in 0..iterations {
-        output = Some(black_box(
-            allocate(&parsed).map_err(|error| fatal(error.to_string()))?,
-        ));
-    }
-    let elapsed_ns = started.elapsed().as_nanos();
-    let output = output.ok_or_else(|| fatal("kernel produced no output"))?;
-    let output = serialize_output(output).map_err(|error| fatal(error.to_string()))?;
-    println!("{output}");
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "engine": "rust",
-            "iterations": iterations,
-            "elapsedNs": elapsed_ns.to_string(),
-            "averageNs": (elapsed_ns / iterations as u128).to_string(),
-        })
-    );
-    Ok(0)
-}
-
+/// Parse a canonical decimal incident ID within the uint256 range.
 fn parse_incident(value: &str) -> Result<BigUint, String> {
     if value.is_empty()
         || (value.len() > 1 && value.starts_with('0'))
@@ -117,12 +72,12 @@ struct ProductionArgs {
     timeout_ms: Option<u64>,
     drpc_key_env: Option<String>,
     checkpoint_key_env: Option<String>,
-    expected_signer: Option<String>,
     no_drpc_key: bool,
     raw_score: bool,
     bulk_score: bool,
 }
 
+/// Reject repeated value-bearing options while recording their values.
 fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), String> {
     if slot.replace(value).is_some() {
         return Err(format!("duplicate option: {name}"));
@@ -130,6 +85,7 @@ fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Consume the required value following a command-line option.
 fn option_value(args: &[String], index: &mut usize, name: &str) -> Result<String, String> {
     *index += 1;
     args.get(*index)
@@ -137,6 +93,7 @@ fn option_value(args: &[String], index: &mut usize, name: &str) -> Result<String
         .ok_or_else(|| format!("{name} requires a value"))
 }
 
+/// Parse shared options and enforce mutually exclusive score modes.
 fn parse_production_args(args: &[String]) -> Result<ProductionArgs, String> {
     let mut parsed = ProductionArgs::default();
     let mut index = 0usize;
@@ -177,10 +134,6 @@ fn parse_production_args(args: &[String]) -> Result<ProductionArgs, String> {
                     "--checkpoint-key-env",
                 )?;
             }
-            "--expected-signer" => {
-                let value = option_value(args, &mut index, "--expected-signer")?;
-                set_once(&mut parsed.expected_signer, value, "--expected-signer")?;
-            }
             "--no-drpc-key" => parsed.no_drpc_key = true,
             "--raw-score" => parsed.raw_score = true,
             "--bulk-score" => parsed.bulk_score = true,
@@ -199,12 +152,14 @@ fn parse_production_args(args: &[String]) -> Result<ProductionArgs, String> {
     Ok(parsed)
 }
 
+/// Read a nonempty environment path without requiring Unicode.
 fn environment_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
 
+/// Normalize an absolute path and reject traversal beyond its root.
 fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
     let absolute = if path.is_absolute() {
         path.to_owned()
@@ -230,6 +185,7 @@ fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
+/// Resolve existing path ancestors while preserving missing suffixes.
 fn resolve_allow_missing(path: &Path) -> Result<PathBuf, String> {
     let mut ancestor = lexical_absolute(path)?;
     let mut suffix = Vec::<OsString>::new();
@@ -260,6 +216,7 @@ fn resolve_allow_missing(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Resolve a destination parent without following its final filename.
 fn write_path_identity(path: &Path) -> Result<PathBuf, String> {
     let absolute = lexical_absolute(path)?;
     let file_name = absolute
@@ -272,6 +229,7 @@ fn write_path_identity(path: &Path) -> Result<PathBuf, String> {
     Ok(resolve_allow_missing(parent)?.join(file_name))
 }
 
+/// Collect write and existing-target identities for alias checks.
 fn path_identities(path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut identities = vec![write_path_identity(path)?];
     match fs::canonicalize(path) {
@@ -288,16 +246,19 @@ fn path_identities(path: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(identities)
 }
 
+/// Derive the checkpoint lock filename without lossy path conversion.
 fn lock_path(path: &Path) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".lock");
     PathBuf::from(value)
 }
 
+/// Check whether two sets of resolved path identities overlap.
 fn aliases(left: &[PathBuf], right: &[PathBuf]) -> bool {
     left.iter().any(|left| right.contains(left))
 }
 
+/// Reject output aliases of the checkpoint or its lock before RPC work.
 fn validate_production_paths(
     checkpoint: Option<&Path>,
     output: Option<&Path>,
@@ -327,6 +288,7 @@ fn validate_production_paths(
     Ok(())
 }
 
+/// Require a nonempty Unicode environment value for protected state.
 fn required_environment(name: &str) -> Result<String, String> {
     env::var(name)
         .ok()
@@ -334,10 +296,7 @@ fn required_environment(name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required environment variable: {name}"))
 }
 
-fn verification_exit_code(root_matches: bool) -> i32 {
-    if root_matches { 0 } else { 1 }
-}
-
+/// Validate three 48-byte PCR values and print their shared commitment.
 fn run_pcr_hash(args: &[String]) -> Result<i32, CliError> {
     if args.len() != 3 {
         return Err(usage("pcr-hash requires PCR0 PCR1 PCR2"));
@@ -353,18 +312,26 @@ fn run_pcr_hash(args: &[String]) -> Result<i32, CliError> {
     }
     println!(
         "{}",
-        usd8_settlement::tee::pcr0_2_hash(&pcrs[0], &pcrs[1], &pcrs[2])
+        usd8_settlement::tee::pcr0_2_hash(&pcrs[0], &pcrs[1], &pcrs[2]) //pcr0_2_hash this is a keccak256 hash fn
             .map_err(|error| fatal(error.to_string()))?
     );
     Ok(0)
 }
 
-async fn run_attested_open(args: &[String]) -> Result<i32, CliError> {
-    let token_text = args.first().ok_or_else(|| usage("missing insuredToken"))?;
-    let insured_token = Address::from_str(token_text)
-        .map_err(|_| usage(format!("invalid insuredToken: {token_text}")))?;
-    if insured_token.is_zero() {
-        return Err(usage("insuredToken is zero"));
+//runs a local query to detect price drop or compute score, without touching TEE or checkpointing
+/// Validate read-only query options and construct the credential-safe RPC client.
+fn prepare_local_query(
+    args: &[String],
+    label: &str,
+    command: &str,
+) -> Result<(HttpRpc, Address, Address, Option<PathBuf>), CliError> {
+    let address_text = args
+        .first()
+        .ok_or_else(|| usage(format!("missing {label}")))?;
+    let address = Address::from_str(address_text)
+        .map_err(|_| usage(format!("invalid {label}: {address_text}")))?;
+    if address.is_zero() {
+        return Err(usage(format!("{label} is zero")));
     }
     let options = parse_production_args(&args[1..]).map_err(usage)?;
     if options.checkpoint.is_some()
@@ -372,9 +339,9 @@ async fn run_attested_open(args: &[String]) -> Result<i32, CliError> {
         || options.raw_score
         || options.bulk_score
     {
-        return Err(usage(
-            "checkpoint and score options are invalid for attested-open",
-        ));
+        return Err(usage(format!(
+            "checkpoint and score options are invalid for {command}"
+        )));
     }
     validate_production_paths(None, options.output.as_deref()).map_err(usage)?;
     let registry_text = options
@@ -389,19 +356,6 @@ async fn run_attested_open(args: &[String]) -> Result<i32, CliError> {
         .map_err(|_| usage(format!("invalid Registry address: {registry_text}")))?;
     if registry.is_zero() {
         return Err(usage("Registry address is zero"));
-    }
-    let signer_text = options
-        .expected_signer
-        .or_else(|| {
-            env::var("USD8_EXPECTED_SIGNER")
-                .ok()
-                .filter(|value| !value.is_empty())
-        })
-        .ok_or_else(|| usage("missing --expected-signer or USD8_EXPECTED_SIGNER"))?;
-    let expected_signer = Address::from_str(&signer_text)
-        .map_err(|_| usage(format!("invalid expected signer: {signer_text}")))?;
-    if expected_signer.is_zero() {
-        return Err(usage("expected signer is zero"));
     }
     let rpc_url = options
         .rpc_url
@@ -421,73 +375,68 @@ async fn run_attested_open(args: &[String]) -> Result<i32, CliError> {
             .ok()
             .filter(|value| !value.is_empty())
     };
-    let Some(drpc_key) = drpc_key else {
-        return Err(fatal(
-            "attested-open requires DRPC_KEY for the approved dRPC endpoint",
-        ));
-    };
     let rpc = HttpRpc::new(
         &rpc_url,
-        Some(&drpc_key),
+        drpc_key.as_deref(),
         options.timeout_ms.unwrap_or(30_000),
     )
     .map_err(|error| fatal(error.to_string()))?;
-    let authorization = build_incident_open(&rpc, registry, insured_token, expected_signer)
+    Ok((rpc, registry, address, options.output))
+}
+
+/// Replay the finalized insurance score and publish its existing JSON schema.
+async fn compute_insurance_score(args: &[String]) -> Result<i32, CliError> {
+    let (rpc, registry, user, output) =
+        prepare_local_query(args, "userAddress", "compute_insurance_score")?;
+    let snapshot = usd8_settlement::score::insurance_score_at(&rpc, registry, user)
         .await
         .map_err(|error| fatal(error.to_string()))?;
-    let digest_bytes = hex::decode(
-        authorization
-            .digest()
-            .strip_prefix("0x")
-            .ok_or_else(|| fatal("open digest is missing 0x prefix"))?,
-    )
-    .map_err(|error| fatal(format!("invalid open digest: {error}")))?;
-    let attestation = usd8_settlement::tee::fresh_nitro_attestation(&digest_bytes)
-        .map_err(|error| fatal(error.to_string()))?;
-    if !attestation
-        .pcr_hash
-        .eq_ignore_ascii_case(&authorization.tee_pcr_hash)
-    {
-        return Err(fatal(format!(
-            "local Nitro PCR hash {} does not match Registry commitment {}",
-            attestation.pcr_hash, authorization.tee_pcr_hash
-        )));
-    }
-    let mut artifact = serde_json::to_value(&authorization)
-        .map_err(|error| fatal(format!("open artifact JSON failed: {error}")))?;
-    let object = artifact
-        .as_object_mut()
-        .ok_or_else(|| fatal("open artifact is not a JSON object"))?;
-    object.insert(
-        "nitroAttestationDocument".to_owned(),
-        serde_json::json!(format!("0x{}", hex::encode(attestation.document))),
-    );
-    object.insert(
-        "measuredTeePcrHash".to_owned(),
-        serde_json::json!(attestation.pcr_hash),
-    );
-    object.insert(
-        "nitroAttestedDigest".to_owned(),
-        serde_json::json!(authorization.digest()),
-    );
-    if let Some(path) = options.output {
-        write_atomic_json(&path, &artifact).map_err(|error| fatal(error.to_string()))?;
-    } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&artifact).map_err(|error| fatal(error.to_string()))?
-        );
-    }
+    let artifact = serde_json::to_value(snapshot).map_err(|error| fatal(error.to_string()))?;
+    output_json(&artifact, output.as_deref())?;
     Ok(0)
 }
 
-async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
+/// Publish the shared read-only price-drop precheck without opening or attesting.
+async fn detect_price_drop(args: &[String]) -> Result<i32, CliError> {
+    let (rpc, registry, insured_token, output) =
+        prepare_local_query(args, "insuredToken", "detect_price_drop")?;
+    // Historical CLI notes retained verbatim; detection below does not open or attest.
+    //verify and open an incident.
+    //build a nitro TEE with attestation.
+    let precheck = precheck_incident_open(&rpc, registry, insured_token)
+        .await
+        .map_err(|error| fatal(error.to_string()))?;
+    let artifact = serde_json::to_value(precheck).map_err(|error| fatal(error.to_string()))?;
+    output_json(&artifact, output.as_deref())?;
+    Ok(0)
+}
+
+/// Write JSON atomically to a file or pretty-print it to stdout.
+fn output_json(artifact: &serde_json::Value, output: Option<&Path>) -> Result<(), CliError> {
+    if let Some(path) = output {
+        write_atomic_json(path, artifact).map_err(|error| fatal(error.to_string()))?;
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(artifact).map_err(|error| fatal(error.to_string()))?
+        );
+    }
+    Ok(())
+}
+
+// This function handles the main production modes: compute, attested-compute
+// compute_local -  reads on-chain inputs and computes the settlement result. Used for local computes not via TEE.
+// compute_tee — performs the same computation, then asks the existing Nitro Security Module for an attestation
+//                    binding the result’s digest. It checks the enclave measurements against the incident’s stored PCR hash.
+//                    This is the cononical way to compute settlement results in a TEE.
+/// Validate paths and credentials, build settlement, and verify it before output.
+async fn prepare_settlement(
+    args: &[String],
+    require_drpc_key: bool,
+) -> Result<(SettlementRun, BootstrapConfig, Option<PathBuf>), CliError> {
     let incident_text = args.first().ok_or_else(|| usage("missing incidentId"))?;
     let incident_id = parse_incident(incident_text).map_err(usage)?;
     let options = parse_production_args(&args[1..]).map_err(usage)?;
-    if options.expected_signer.is_some() {
-        return Err(usage("--expected-signer is valid only for attested-open"));
-    }
     let registry_text = options
         .registry
         .or_else(|| {
@@ -529,9 +478,9 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
             .ok()
             .filter(|value| !value.is_empty())
     };
-    if mode == "attested-compute" && drpc_key.is_none() {
+    if require_drpc_key && drpc_key.is_none() {
         return Err(fatal(
-            "attested-compute requires DRPC_KEY for the approved dRPC endpoint",
+            "compute_settlement_tee requires DRPC_KEY for the approved dRPC endpoint",
         ));
     }
     let rpc = Arc::new(
@@ -566,116 +515,110 @@ async fn run_production(mode: &str, args: &[String]) -> Result<i32, CliError> {
         .await
         .map_err(|error| fatal(error.to_string()))?;
     verify_run(&run, &config).map_err(|error| fatal(error.to_string()))?;
-    let mut artifact = run.artifact(&config, mode == "compute");
-    if mode == "attested-compute" {
-        let digest_bytes = hex::decode(
-            run.digest
-                .strip_prefix("0x")
-                .ok_or_else(|| fatal("settlement digest is missing 0x prefix"))?,
-        )
-        .map_err(|error| fatal(format!("invalid settlement digest: {error}")))?;
-        if digest_bytes.len() != 32 {
-            return Err(fatal(format!(
-                "settlement digest must be 32 bytes, got {}",
-                digest_bytes.len()
-            )));
-        }
-        let attestation = usd8_settlement::tee::fresh_nitro_attestation(&digest_bytes)
-            .map_err(|error| fatal(error.to_string()))?;
-        if !attestation.pcr_hash.eq_ignore_ascii_case(&run.tee_pcr_hash) {
-            return Err(fatal(format!(
-                "local Nitro PCR hash {} does not match incident snapshot {}",
-                attestation.pcr_hash, run.tee_pcr_hash
-            )));
-        }
-        let object = artifact
-            .as_object_mut()
-            .ok_or_else(|| fatal("settlement artifact is not a JSON object"))?;
-        object.insert(
-            "nitroAttestationDocument".to_owned(),
-            serde_json::json!(format!("0x{}", hex::encode(attestation.document))),
-        );
-        object.insert(
-            "measuredTeePcrHash".to_owned(),
-            serde_json::json!(attestation.pcr_hash),
-        );
-        object.insert(
-            "nitroAttestedDigest".to_owned(),
-            serde_json::json!(run.digest),
-        );
-    }
-    if let Some(path) = output_path {
-        write_atomic_json(&path, &artifact).map_err(|error| fatal(error.to_string()))?;
-        eprintln!("wrote verified artifact: {}", path.display());
-    } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&artifact).map_err(|error| fatal(error.to_string()))?
-        );
-    }
-    if mode == "verify" {
-        eprintln!("computed root: {}", run.output.root);
-        eprintln!("on-chain root: {}", run.latest_incident.root);
-        if !run.root_matches() {
-            eprintln!("MISMATCH — submitted root does not reproduce from finalized chain history.");
-            return Ok(verification_exit_code(false));
-        }
-        eprintln!("MATCH — submitted root reproduces exactly from finalized chain history.");
-        return Ok(verification_exit_code(true));
-    }
+    Ok((run, config, output_path))
+}
+
+/// Publish a verified settlement with per-claim proofs and no attestation.
+async fn compute_settlement(args: &[String]) -> Result<i32, CliError> {
+    let (run, config, output_path) = prepare_settlement(args, false).await?;
+    let artifact = run.artifact(&config, true);
+    output_settlement(&artifact, output_path.as_deref())?;
     Ok(0)
 }
 
+/// Bind a verified settlement to fresh Nitro evidence and matching incident PCRs.
+async fn compute_settlement_tee(args: &[String]) -> Result<i32, CliError> {
+    let (run, config, output_path) = prepare_settlement(args, true).await?;
+    let mut artifact = run.artifact(&config, false);
+    let digest_bytes = hex::decode(
+        run.digest
+            .strip_prefix("0x")
+            .ok_or_else(|| fatal("settlement digest is missing 0x prefix"))?,
+    )
+    .map_err(|error| fatal(format!("invalid settlement digest: {error}")))?;
+    if digest_bytes.len() != 32 {
+        return Err(fatal(format!(
+            "settlement digest must be 32 bytes, got {}",
+            digest_bytes.len()
+        )));
+    }
+    let attestation = usd8_settlement::tee::fresh_nitro_attestation(&digest_bytes)
+        .map_err(|error| fatal(error.to_string()))?;
+    if !attestation.pcr_hash.eq_ignore_ascii_case(&run.tee_pcr_hash) {
+        return Err(fatal(format!(
+            "local Nitro PCR hash {} does not match incident snapshot {}",
+            attestation.pcr_hash, run.tee_pcr_hash
+        )));
+    }
+    let object = artifact
+        .as_object_mut()
+        .ok_or_else(|| fatal("settlement artifact is not a JSON object"))?;
+    object.insert(
+        "nitroAttestationDocument".to_owned(),
+        serde_json::json!(format!("0x{}", hex::encode(attestation.document))),
+    );
+    object.insert(
+        "measuredTeePcrHash".to_owned(),
+        serde_json::json!(attestation.pcr_hash),
+    );
+    object.insert(
+        "nitroAttestedDigest".to_owned(),
+        serde_json::json!(run.digest),
+    );
+    output_settlement(&artifact, output_path.as_deref())?;
+    Ok(0)
+}
+
+/// Publish settlement JSON and report a successfully written artifact path.
+fn output_settlement(artifact: &serde_json::Value, output: Option<&Path>) -> Result<(), CliError> {
+    output_json(artifact, output)?;
+    if let Some(path) = output {
+        eprintln!("wrote verified artifact: {}", path.display());
+    }
+    Ok(())
+}
+
+/// Dispatch supported public commands and reject unknown or missing commands.
 async fn run() -> Result<i32, CliError> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("pcr-hash") => {
+            // hash given 3 PCR values to produce a root hash for attestation verification
             args.remove(0);
             run_pcr_hash(&args)
         }
-        Some("attested-open") => {
+        Some("detect_price_drop") => {
             args.remove(0);
-            run_attested_open(&args).await
+            detect_price_drop(&args).await
         }
-        Some("compute") | Some("attested-compute") | Some("verify") => {
-            let mode = args.remove(0);
-            run_production(&mode, &args).await
-        }
-        Some("ffi") => {
+        Some("compute_insurance_score") => {
             args.remove(0);
-            let command = args.first().ok_or_else(|| usage("missing FFI command"))?;
-            let expected = match command.as_str() {
-                "root" | "digest" | "claimset" => 2,
-                "proof" => 3,
-                value => return Err(usage(format!("unknown FFI command: {value}"))),
-            };
-            if args.len() != expected {
-                return Err(usage(format!(
-                    "FFI {command} expects {} argument(s) after the command",
-                    expected - 1
-                )));
-            }
-            let payload = &args[1];
-            let output =
-                usd8_settlement::ffi::run(command, payload, args.get(2).map(String::as_str))
-                    .map_err(|error| fatal(error.to_string()))?;
-            print!("{output}");
-            Ok(0)
+            compute_insurance_score(&args).await
         }
-        Some("kernel") => {
+        Some("compute_settlement") => {
+            //compute settlement results either locally or via TEE
             args.remove(0);
-            run_kernel(&args)
+            compute_settlement(&args).await
+        }
+        Some("compute_settlement_tee") => {
+            args.remove(0);
+            compute_settlement_tee(&args).await
         }
         Some("--help" | "-h" | "help") => {
             println!("{USAGE}");
             Ok(0)
         }
-        Some(_) => run_kernel(&args),
-        None => run_kernel(&args),
+        Some(
+            command @ ("compute" | "attested-compute" | "verify" | "ffi" | "attested-open"
+            | "compute_score" | "compute_local" | "compute_tee"),
+        ) => Err(usage(format!("unknown command: {command}"))),
+        Some(command) => Err(usage(format!("unknown command: {command}"))),
+        None => Err(usage("missing command")),
     }
 }
 
 #[tokio::main(flavor = "multi_thread")]
+/// Run the CLI and map usage versus runtime failures to stable exit codes.
 async fn main() {
     match run().await {
         Ok(0) => {}
@@ -696,7 +639,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_production_paths, verification_exit_code};
+    use super::validate_production_paths;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -704,12 +647,7 @@ mod tests {
     static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
-    fn verification_exit_codes_are_stable() {
-        assert_eq!(verification_exit_code(true), 0);
-        assert_eq!(verification_exit_code(false), 1);
-    }
-
-    #[test]
+    /// Check that checkpoint and lock aliases cannot be used as output paths.
     fn production_state_paths_must_not_collide() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

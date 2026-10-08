@@ -1,5 +1,6 @@
 [package]
 name = "usd8-settlement"
+default-run = "usd8-settlement"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
@@ -14,6 +15,18 @@ path = "src/lib.rs"
 default = []
 nitro = ["dep:aws-nitro-enclaves-nsm-api"]
 sepolia = []
+ffi-tools = []
+kernel-tools = []
+
+[[bin]]
+name = "usd8-ffi"
+path = "src/bin/ffi.rs"
+required-features = ["ffi-tools"]
+
+[[bin]]
+name = "usd8-kernel"
+path = "src/bin/kernel.rs"
+required-features = ["kernel-tools"]
 
 [[bin]]
 name = "usd8-settlement"
