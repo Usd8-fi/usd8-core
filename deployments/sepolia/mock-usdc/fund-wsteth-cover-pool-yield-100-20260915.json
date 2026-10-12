@@ -1,0 +1,81 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: mint 100 reserve-backed USD8 and stream it to the wstETH Cover Pool over its configured 7-day reward duration",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "preState": {
+    "pool": "0x55cb69271da9937d0Cb3c548409FD3f77586dF79",
+    "totalAssets": "12594161558207510841",
+    "rewardReserve": "24203498626682326324975",
+    "rewardRate": "41335978835978835",
+    "periodFinish": "1789196736",
+    "rewardsDuration": "604800",
+    "senderMockUsdcBalance": "9921899000000",
+    "treasuryMockUsdcBalance": "67059000000",
+    "usd8TotalSupply": "67059000000000000000000",
+    "senderUsd8Balance": "0",
+    "temporaryAllowances": "0"
+  },
+  "expectedPostState": {
+    "totalAssets": "12594161558207510841",
+    "rewardReserve": "24303498626682326324975",
+    "rewardRate": "165343915343915",
+    "temporaryAllowances": "0",
+    "senderUsd8Balance": "0",
+    "treasuryReserveDelta": "100000000",
+    "usd8SupplyDelta": "100000000000000000000"
+  },
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.approve Treasury 100 mUSDC",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000002a722ed12982623dff64dc0adba40e734a5f59c30000000000000000000000000000000000000000000000000000000005f5e100",
+        "nonce": "0x38b",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "Treasury.mintUSD8 100 USD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x8d0972280000000000000000000000000000000000000000000000000000000005f5e100",
+        "nonce": "0x38c",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "USD8.approve wstETH Cover Pool 100 USD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x095ea7b300000000000000000000000055cb69271da9937d0cb3c548409fd3f77586df790000000000000000000000000000000000000000000000056bc75e2d63100000",
+        "nonce": "0x38d",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "wstETH Cover Pool.receiveProfitDistribution 100 USD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x55cb69271da9937d0Cb3c548409FD3f77586dF79",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x94419e750000000000000000000000000000000000000000000000056bc75e2d63100000",
+        "nonce": "0x38e",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

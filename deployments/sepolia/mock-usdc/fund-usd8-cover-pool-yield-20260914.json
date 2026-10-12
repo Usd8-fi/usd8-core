@@ -1,0 +1,76 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: mint 10 reserve-backed USD8 and stream it to the USD8 Cover Pool over its configured 7-day reward duration",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "preState": {
+    "pool": "0x6388c3826902F7D7812E632D0B63ea44D9C1e5Cf",
+    "totalAssets": "501000000000000000000",
+    "rewardReserve": "0",
+    "rewardRate": "0",
+    "periodFinish": "0",
+    "rewardsDuration": "604800"
+  },
+  "expectedPostState": {
+    "totalAssets": "501000000000000000000",
+    "rewardReserve": "10000000000000000000",
+    "rewardRate": "16534391534391",
+    "temporaryAllowances": "0",
+    "senderUsd8Balance": "0",
+    "treasuryReserveDelta": "10000000",
+    "usd8SupplyDelta": "10000000000000000000"
+  },
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "MockUSDC.approve Treasury 10 mUSDC",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x31cD4d9299aC2d55bb8590C9557edd3ff08cF35c",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000002a722ed12982623dff64dc0adba40e734a5f59c30000000000000000000000000000000000000000000000000000000000989680",
+        "nonce": "0x386",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "Treasury.mintUSD8 10 USD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x2a722eD12982623DFF64Dc0AdBA40e734A5f59C3",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x8d0972280000000000000000000000000000000000000000000000000000000000989680",
+        "nonce": "0x387",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "USD8.approve USD8 Cover Pool 10 USD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xa5B32853235619B5e9AF364A40c0c6386Dbd6055",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x095ea7b30000000000000000000000006388c3826902f7d7812e632d0b63ea44d9c1e5cf0000000000000000000000000000000000000000000000008ac7230489e80000",
+        "nonce": "0x388",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "USD8 Cover Pool.receiveProfitDistribution 10 USD8",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x6388c3826902F7D7812E632D0B63ea44D9C1e5Cf",
+        "gas": "0x7a120",
+        "value": "0x0",
+        "input": "0x94419e750000000000000000000000000000000000000000000000008ac7230489e80000",
+        "nonce": "0x389",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

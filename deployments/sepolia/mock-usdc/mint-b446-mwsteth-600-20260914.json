@@ -1,0 +1,38 @@
+{
+  "transactions": [
+    {
+      "hash": null,
+      "transactionType": "CALL",
+      "contractName": "SepoliaDependencies.MockERC20",
+      "contractAddress": "0xdfaf9C1CE55f18AB7850EDd84F2175ce734985fa",
+      "function": "mint(address,uint256)",
+      "functionAbi": "function mint(address to, uint256 amount)",
+      "arguments": [
+        "0xB446b0c85cc4ef5f5Ebf495C4FDD38eCc5284176",
+        "600000000000000000000"
+      ],
+      "transaction": {
+        "from": "0x724e8951d39e14cebcb5fb02638f49a637c97838",
+        "to": "0xdfaf9c1ce55f18ab7850edd84f2175ce734985fa",
+        "gas": "0xa2b9",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000b446b0c85cc4ef5f5ebf495c4fdd38ecc528417600000000000000000000000000000000000000000000002086ac351052600000",
+        "nonce": "0x38a",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    }
+  ],
+  "receipts": [],
+  "libraries": [],
+  "pending": [],
+  "returns": {},
+  "timestamp": 1789416203000,
+  "chain": 11155111,
+  "commit": "working-tree",
+  "purpose": "TESTNET ONLY: mint 600 Sepolia Mock wstETH to the current frontend test wallet",
+  "recipient": "0xB446b0c85cc4ef5f5Ebf495C4FDD38eCc5284176",
+  "amount": "600000000000000000000",
+  "createdAt": "2026-09-14T20:03:23Z"
+}

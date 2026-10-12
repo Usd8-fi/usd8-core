@@ -1,0 +1,56 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: refresh the complete live oracle set required for a new msLOSS claim lifecycle with wstETH and USD8 Cover Pools",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "preState": {
+    "wstEthUsd": { "roundId": "14", "answer": "400000000000" },
+    "msLossUnderlyingUsd": { "roundId": "8", "answer": "200000000000" },
+    "usdcUsd": { "roundId": "11", "answer": "100000000" }
+  },
+  "expectedPostState": {
+    "wstEthUsd": { "roundId": "15", "answer": "400000000000" },
+    "msLossUnderlyingUsd": { "roundId": "9", "answer": "200000000000" },
+    "usdcUsd": { "roundId": "12", "answer": "100000000" }
+  },
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer wstETH/USD $4000",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x00E79aFB10A84D153803F00e73900803179D594e",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000005d21dba000",
+        "nonce": "0x391",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer msLOSS underlying/USD $2000",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xDa725125d8ff0588496382427ab65Bc8f8D639Eb",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000002e90edd000",
+        "nonce": "0x392",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer USDC/USD $1",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x9989a6bB00C1737A9A0175408053a04A6f3eD74b",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000000005f5e100",
+        "nonce": "0x393",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

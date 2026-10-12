@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "42c1a6b0abfeee48f8bb9b6bf69b47fb454d9c039536891a5ee052b6be739489",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 918,
+      "label": "DefiInsurance.adminCorrectSettlement canonical dispute test",
+      "transactionHash": "0x029a2e81f63f5d9081c53c9b7dcf90e862788fc0ec38b5c64d2d9109233250cf",
+      "status": "confirmed",
+      "blockNumber": 11710211,
+      "contractAddress": null
+    }
+  ]
+}

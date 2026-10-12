@@ -1305,9 +1305,9 @@ contract SingleAssetCoverPoolTest is Test {
     }
 
     function test_DepositCapEnforcedSoftAndUncappable() public {
-        // Uncapped by default.
-        assertEq(pool.maxDeposit(alice), type(uint256).max);
-        assertEq(pool.maxMint(alice), type(uint256).max);
+        // Uncapped by default: bounded only by the virtual-share headroom.
+        assertEq(pool.maxMint(alice), type(uint256).max - VS);
+        assertEq(pool.maxDeposit(alice), (type(uint256).max - VS) / VS);
 
         vm.prank(admin);
         pool.setDepositCap(100e6);
@@ -1832,7 +1832,7 @@ contract SingleAssetCoverPoolTest is Test {
     ///      defiInsurance — else Registry.payoutIncidentActive() wouldn't freeze the pools.
     function test_OpenRevertsIfNotRegisteredDefiInsurance() public {
         vm.prank(admin);
-        registry.setDefiInsurance(address(0)); // de-register (also the emergency brake)
+        registry.clearDefiInsurance(address(defi), 0); // de-register (also the emergency brake)
         vm.prank(admin);
         vm.expectRevert(DefiInsurance.DefiInsuranceNotRegistered.selector);
         defi.openClaimIncident(IERC20(address(lp1)), uint64(block.number - 1));
@@ -2578,7 +2578,7 @@ contract SingleAssetCoverPoolTest is Test {
         assertEq(_incidentTeePcrHash(1), TEST_TEE_PCR_HASH);
 
         vm.startPrank(admin);
-        registry.setDefiInsurance(address(0));
+        registry.clearDefiInsurance(address(defi), 1);
         registry.setTeePcrHash(UPDATED_TEE_PCR_HASH);
         vm.stopPrank();
 
@@ -2597,6 +2597,64 @@ contract SingleAssetCoverPoolTest is Test {
         assertEq(lp1.balanceOf(bob), 50e18);
     }
 
+    /// @dev L-04: an emergency clear scheduled for incident 1 executes once incident 2
+    ///      is live. Bound to incident 1, it reverts; incident 2 stays registered.
+    function test_StaleClearCannotVoidLaterIncident() public {
+        uint256 cid1 = _registerClaim(bob, lp1, 50e18);
+        assertEq(defi.activeIncidentId(), 1);
+        vm.warp(block.timestamp + 5 days + 1);
+        bytes32 root = _leaf(1, cid1, bob, _amounts(0));
+        uint256[] memory pp = _pp();
+        defi.settleIncident(root, pp, _teeSign(1, root, pp));
+        vm.warp(block.timestamp + 7 days);
+        assertEq(defi.activeIncidentId(), 0);
+
+        _registerClaim(carol, lp2, 50e18);
+        assertEq(defi.activeIncidentId(), 2);
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Registry.IncidentChanged.selector, 1, 2));
+        registry.clearDefiInsurance(address(defi), 1);
+        assertEq(registry.defiInsurance(), address(defi), "module must stay registered");
+        assertTrue(registry.payoutIncidentActive(), "incident 2 still freezes the system");
+    }
+
+    /// @dev The brake bound to the live incident still works mid-incident.
+    function test_ClearBoundToLiveIncidentSucceeds() public {
+        _registerClaim(bob, lp1, 50e18);
+        vm.prank(admin);
+        registry.clearDefiInsurance(address(defi), 1);
+        assertEq(registry.defiInsurance(), address(0));
+        assertFalse(registry.payoutIncidentActive());
+    }
+
+    /// @dev Binding also covers the module address.
+    function test_ClearRejectsModuleMismatch() public {
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Registry.ModuleChanged.selector, address(0xDEAD), address(defi)));
+        registry.clearDefiInsurance(address(0xDEAD), 0);
+    }
+
+    /// @dev With no incident live there is nothing to protect; any bound id clears.
+    function test_ClearWithNoActiveIncidentIgnoresBoundId() public {
+        vm.prank(admin);
+        registry.clearDefiInsurance(address(defi), 42);
+        assertEq(registry.defiInsurance(), address(0));
+    }
+
+    /// @dev setDefiInsurance is set-only; zero goes through clearDefiInsurance.
+    function test_SetDefiInsuranceRejectsZero() public {
+        vm.prank(admin);
+        vm.expectRevert(Registry.ZeroAddress.selector);
+        registry.setDefiInsurance(address(0));
+    }
+
+    function test_ClearIsTimelockOnly() public {
+        vm.prank(bob);
+        vm.expectRevert();
+        registry.clearDefiInsurance(address(defi), 0);
+    }
+
     function test_DeregisteredModuleCannotAcceptClaimJoins() public {
         _registerClaim(bob, lp1, 50e18);
         _prepareClaimant(carol, lp1, 10e18);
@@ -2607,7 +2665,7 @@ contract SingleAssetCoverPoolTest is Test {
         (,,,,,, uint256 unresolvedBefore, bytes32 claimSetBefore,,) = defi.incidents(1);
 
         vm.prank(admin);
-        registry.setDefiInsurance(address(0));
+        registry.clearDefiInsurance(address(defi), 1);
 
         vm.expectRevert(DefiInsurance.DefiInsuranceNotRegistered.selector);
         vm.prank(carol);
@@ -2632,7 +2690,7 @@ contract SingleAssetCoverPoolTest is Test {
         defi.settleIncident(originalRoot, pp, _teeSign(1, originalRoot, pp));
 
         vm.prank(admin);
-        registry.setDefiInsurance(address(0));
+        registry.clearDefiInsurance(address(defi), 1);
 
         bytes32 correctedRoot = keccak256("stale-module-correction");
         vm.prank(admin);
@@ -2648,7 +2706,7 @@ contract SingleAssetCoverPoolTest is Test {
         _registerClaim(carol, lp1, 50e18);
 
         vm.prank(admin);
-        registry.setDefiInsurance(address(0));
+        registry.clearDefiInsurance(address(defi), 1);
 
         vm.prank(bob);
         defi.finalizeClaim(bobClaim, false, new uint256[](0), 0, 0, 0, 0, new bytes32[](0));
@@ -3971,10 +4029,10 @@ contract SingleAssetCoverPoolTest is Test {
         vm.expectRevert(bytes("dead"));
         registry.payoutIncidentActive();
 
-        // Clearing the module to zero is the emergency brake: setDefiInsurance(0)
-        // skips the payoutIncidentActive() guard, so the stuck module is fully neutralized.
+        // Clearing the module is the emergency brake: clearDefiInsurance tolerates a
+        // reverting activeIncidentId(), so the stuck module is fully neutralized.
         vm.prank(admin);
-        registry.setDefiInsurance(address(0));
+        registry.clearDefiInsurance(address(m), 1);
         assertFalse(registry.payoutIncidentActive());
         _stake(alice, 100e6); // pool usable again
     }

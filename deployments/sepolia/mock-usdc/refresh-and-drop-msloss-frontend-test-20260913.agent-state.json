@@ -1,0 +1,34 @@
+{
+  "artifactSha256": "999bf97d27b4534477e61a6f94ce246740861c483325aabb3abba49a981687bf",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 885,
+      "label": "SepoliaTestOracle.updateAnswer wstETH/USD $4000",
+      "transactionHash": "0x4476fd440132b6634499ff38b518f6a31724e041f8c35934f4feb891a4895bf2",
+      "status": "confirmed",
+      "blockNumber": 11695733,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 886,
+      "label": "SepoliaTestOracle.updateAnswer msLOSS underlying $2000",
+      "transactionHash": "0xd08f44f617d7555c322cceecf9b0fb051d3565ebe629b785ba4292b1c3743fbd",
+      "status": "confirmed",
+      "blockNumber": 11695735,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 887,
+      "label": "SepoliaLossVault.realizeLoss fresh 22% frontend-test drop",
+      "transactionHash": "0x114c610bd58333e957e1e5f29f7caf02ef9b05802f7d63f4ba2e44f9cc6ecaa0",
+      "status": "confirmed",
+      "blockNumber": 11695737,
+      "contractAddress": null
+    }
+  ]
+}

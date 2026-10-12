@@ -1,0 +1,23 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: restore msLOSS from the prior 0.78 ratio to exact 1.0 before a fresh bounded 22% frontend loss test",
+  "expectedPreAssets": "3393861534683544303797468",
+  "expectedSupply": "4351104531645569620253164",
+  "mintAssets": "957242996962025316455696",
+  "expectedPostAssets": "4351104531645569620253164",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossToken.mint restore msLOSS parity",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xb0afb6dcB6E6A8CCD8008D657fe1FaAd0D4B2CB5",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x40c10f19000000000000000000000000d5b2a08f474f77ef29211ccc59cd65e5fa6734dc00000000000000000000000000000000000000000000cab43f313e3386329510",
+        "nonce": "0x374",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

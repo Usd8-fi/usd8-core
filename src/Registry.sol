@@ -182,6 +182,8 @@ contract Registry is Initializable, UUPSUpgradeable {
     error InvalidMaxCoverPoolPayoutBps(uint256 bps);
     error UnauthorizedModule(address caller);
     error CandidateIncidentActive(address module, uint256 incidentId);
+    error ModuleChanged(address expected, address actual);
+    error IncidentChanged(uint256 expected, uint256 actual);
     error InvalidTeePcrHash();
     error NonIncreasingScoredRateBlock(IERC20 token, uint64 previousBlock, uint64 newBlock);
     error InvalidOracleStaleness();
@@ -292,6 +294,12 @@ contract Registry is Initializable, UUPSUpgradeable {
     }
 
     /// @notice Atomically update timing for future incidents.
+    /// @dev Admin warning: the Rust TEE limits reference-price discovery to 256
+    ///      points. Increasing maxReferenceBlockAge can exceed this limit even
+    ///      when each TWAP uses at most 256 samples. Validate the proposed timing
+    ///      together with incidentOpenPriceConfig against the deployed Rust
+    ///      runtime before activation; this contract does not enforce that cap,
+    ///      and an incompatible policy prevents TEE incident opening.
     function setIncidentTimingConfig(IncidentTimingConfig calldata config) external {
         _requireTimelock(msg.sender);
         _requireNotFrozen();
@@ -313,6 +321,13 @@ contract Registry is Initializable, UUPSUpgradeable {
     }
 
     /// @notice Atomically update the TEE incident-opening price policy.
+    /// @dev Admin warning: the Rust TEE requires twapBlocks / sampleStepBlocks
+    ///      <= 256 and separately caps reference-price discovery at 256 points
+    ///      across candidate reference blocks and their before/after TWAP windows.
+    ///      Validate both limits with incidentTimingConfig.maxReferenceBlockAge
+    ///      against the deployed Rust runtime before activation. This contract
+    ///      does not enforce these caps; accepted settings can still be rejected
+    ///      by Rust, preventing TEE incident opening. See offchain-rust/src/incident_open.rs.
     function setIncidentOpenPriceConfig(IncidentOpenPriceConfig calldata config) external {
         _requireTimelock(msg.sender);
         _requireNotFrozen();
@@ -484,20 +499,39 @@ contract Registry is Initializable, UUPSUpgradeable {
     }
 
     /// @notice Set the insurance payout module. Timelock only.
-    /// @dev A nonzero module must report no active incident and cannot replace an
-    ///      active module. Setting zero is an emergency escape that removes the
-    ///      module's system freeze and blocks further settlement, correction, payout,
-    ///      score writes, and finalization. Unresolved claimants retain recovery exits.
+    /// @dev The module must report no active incident and cannot replace an active
+    ///      module. Non-zero only; the emergency escape is {clearDefiInsurance}.
     function setDefiInsurance(address newModule) external {
         _requireTimelock(msg.sender);
-        // Clearing must work even if the current module's activeIncidentId() reverts.
-        if (newModule != address(0)) {
-            if (payoutIncidentActive()) revert Frozen();
-            uint256 candidateIncidentId = IDefiInsurance(newModule).activeIncidentId();
-            if (candidateIncidentId != 0) revert CandidateIncidentActive(newModule, candidateIncidentId);
-        }
+        if (newModule == address(0)) revert ZeroAddress();
+        if (payoutIncidentActive()) revert Frozen();
+        uint256 candidateIncidentId = IDefiInsurance(newModule).activeIncidentId();
+        if (candidateIncidentId != 0) revert CandidateIncidentActive(newModule, candidateIncidentId);
         emit DefiInsuranceSet(defiInsurance, newModule);
         defiInsurance = newModule;
+    }
+
+    /// @notice Emergency escape: unregister the insurance module. Timelock only.
+    ///         Lifts the module's system freeze and blocks its further settlement,
+    ///         correction, payout, score writes, and finalization; unresolved
+    ///         claimants retain recovery exits. The operation is bound to the module
+    ///         and incident it was scheduled for, so a stale timelock operation
+    ///         cannot void a later incident.
+    /// @dev Must work even if the current module's activeIncidentId() reverts.
+    /// @param expectedModule     Module the operation was scheduled against.
+    /// @param expectedIncidentId Incident the operation was scheduled against
+    ///                           (0 when none was active).
+    function clearDefiInsurance(address expectedModule, uint256 expectedIncidentId) external {
+        _requireTimelock(msg.sender);
+        address current = defiInsurance;
+        if (current != expectedModule) revert ModuleChanged(expectedModule, current);
+        if (current != address(0)) {
+            try IDefiInsurance(current).activeIncidentId() returns (uint256 activeId) {
+                if (activeId != 0 && activeId != expectedIncidentId) revert IncidentChanged(expectedIncidentId, activeId);
+            } catch {}
+        }
+        emit DefiInsuranceSet(current, address(0));
+        defiInsurance = address(0);
     }
 
     /// @notice Append a token scoring rate effective from the current block. Timelock only.

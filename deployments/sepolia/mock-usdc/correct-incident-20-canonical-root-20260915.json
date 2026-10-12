@@ -1,0 +1,30 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: exercise beta admin correction for incident 20 using the canonical standing-root Merkle artifact",
+  "createdAt": "2026-09-15T13:38:13Z",
+  "incidentId": "20",
+  "artifactRoute": "https://wmzdww7bxb.execute-api.eu-central-1.amazonaws.com/settlements/11155111/0xb34d92cd05005df36050370433819597a9bac693/0x4e346ccd0a46d51ebae6810d653791982968d502/20/0xf8ab15e59fb411e50772dc743e368d63ef0f7df0b4e2163cfa7041412f2f79aa",
+  "artifactSha256": "417e4d2db4ad4b4385b5759f7c349acb87a80b7eae2e82ab6d4d64e66ca08d2b",
+  "root": "0xf8ab15e59fb411e50772dc743e368d63ef0f7df0b4e2163cfa7041412f2f79aa",
+  "poolPayouts": [
+    "6297080779103755418",
+    "1244499999999999999996"
+  ],
+  "expectedPreDeadline": "1789482552",
+  "expectedPostcondition": "root and budgets remain canonical; IncidentCorrected is emitted; phaseDeadline resets to receipt timestamp plus 3600 seconds",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "DefiInsurance.adminCorrectSettlement canonical dispute test",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x4E346CcD0a46D51ebaE6810d653791982968d502",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0x85aebff9f8ab15e59fb411e50772dc743e368d63ef0f7df0b4e2163cfa7041412f2f79aa000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000005763b99af06b5c9a00000000000000000000000000000000000000000000004376e82c5b3da1fffc",
+        "nonce": "0x396",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

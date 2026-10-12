@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "361c335727e06fc528ff7c80c547ceaa83276e6e79113bff52aae7d4ee6fd856",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 906,
+      "label": "SepoliaDependencies.MockERC20",
+      "transactionHash": "0xf6abd72eb1d6dd78202c16f2cbb3a732a96dc08567a4fc3998fcb4f7559922e9",
+      "status": "confirmed",
+      "blockNumber": 11705102,
+      "contractAddress": null
+    }
+  ]
+}

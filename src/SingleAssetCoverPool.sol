@@ -136,6 +136,11 @@ contract SingleAssetCoverPool is
 
     uint64[] private _exitEpochQueue;
 
+    /// @notice Scaled reward units not yet credited to {rewardPerShareStored}:
+    ///         the remainder of the last checkpoint's per-share division, carried
+    ///         into the next one so hourly flooring never strands funded rewards.
+    uint256 public rewardResidual;
+
     // ─────────────────────────── Errors ──────────────────────────
 
     error ZeroAmount();
@@ -151,6 +156,7 @@ contract SingleAssetCoverPool is
     error PayoutExceedsPoolAssets(uint256 requested, uint256 available);
     error InvalidRecipient();
     error FeeOnTransferUnsupported();
+    error ShareSupplyHeadroomExceeded(uint256 requested, uint256 available);
     error RewardRateZero(uint256 total, uint256 duration);
     error WithdrawNotSupported();
     error RedeemNotSupported();
@@ -247,28 +253,46 @@ contract SingleAssetCoverPool is
     ///      doesn't support such tokens; governance lists only standard assets, and
     ///      this makes a slip fail loudly instead of silently corrupting accounting.
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+        uint256 headroom = _shareHeadroom();
+        if (shares > headroom) revert ShareSupplyHeadroomExceeded(shares, headroom);
         uint256 balBefore = IERC20(asset()).balanceOf(address(this));
         super._deposit(caller, receiver, assets, shares);
         if (IERC20(asset()).balanceOf(address(this)) - balBefore < assets) revert FeeOnTransferUnsupported();
         _accountedAssets += assets;
     }
 
+    /// @dev Shares that can still be minted before `totalSupply + 10**_decimalsOffset()`,
+    ///      the virtual-share sum used by every ERC-4626 conversion, could overflow.
+    ///      Repeated payouts shrink assets without burning shares, so supply can only
+    ///      ratchet up; this keeps conversions (and therefore exits) well-defined.
+    function _shareHeadroom() internal view returns (uint256) {
+        uint256 limit = type(uint256).max - 10 ** _decimalsOffset();
+        uint256 supply = totalSupply();
+        return limit > supply ? limit - supply : 0;
+    }
+
     /// @inheritdoc ERC4626Upgradeable
     function maxDeposit(address) public view override returns (uint256) {
         if (registry().paused(address(this)) || registry().payoutIncidentActive()) return 0;
+        uint256 headroom = _shareHeadroom();
+        if (headroom == 0) return 0;
         uint256 cap = depositCap;
-        if (cap == 0) return type(uint256).max;
         uint256 size = totalAssets();
-        return cap > size ? cap - size : 0;
+        uint256 byCap = cap == 0 ? type(uint256).max : (cap > size ? cap - size : 0);
+        // Translate share headroom into assets only when the product cannot overflow;
+        // otherwise the headroom is astronomically above any cap and does not bind.
+        if (headroom > type(uint256).max / (size + 1)) return byCap;
+        return Math.min(byCap, _convertToAssets(headroom, Math.Rounding.Floor));
     }
 
     /// @inheritdoc ERC4626Upgradeable
     function maxMint(address) public view override returns (uint256) {
         if (registry().paused(address(this)) || registry().payoutIncidentActive()) return 0;
+        uint256 headroom = _shareHeadroom();
         uint256 cap = depositCap;
-        if (cap == 0) return type(uint256).max;
+        if (cap == 0) return headroom;
         uint256 size = totalAssets();
-        return cap > size ? convertToShares(cap - size) : 0;
+        return cap > size ? Math.min(headroom, convertToShares(cap - size)) : 0;
     }
 
     // ─────────────────────────── Redeem (async) ───────────────────────────
@@ -542,7 +566,8 @@ contract SingleAssetCoverPool is
         if (earningShares == 0) return rewardPerShareStored;
         uint256 t = block.timestamp < periodFinish ? block.timestamp : periodFinish;
         if (t <= lastUpdateTime) return rewardPerShareStored;
-        return rewardPerShareStored + ((t - lastUpdateTime) * uint256(rewardRate) * REWARD_SCALE) / earningShares;
+        uint256 numerator = (t - lastUpdateTime) * uint256(rewardRate) * REWARD_SCALE + rewardResidual;
+        return rewardPerShareStored + numerator / earningShares;
     }
 
     /// @dev Checkpoint global rewards before earning shares change. With no earning
@@ -558,7 +583,9 @@ contract SingleAssetCoverPool is
         }
         uint256 t = block.timestamp < periodFinish ? block.timestamp : periodFinish;
         if (t > lastUpdateTime) {
-            rewardPerShareStored += ((t - lastUpdateTime) * uint256(rewardRate) * REWARD_SCALE) / earningShares;
+            uint256 numerator = (t - lastUpdateTime) * uint256(rewardRate) * REWARD_SCALE + rewardResidual;
+            rewardPerShareStored += numerator / earningShares;
+            rewardResidual = numerator % earningShares;
         }
         lastUpdateTime = uint64(t);
     }

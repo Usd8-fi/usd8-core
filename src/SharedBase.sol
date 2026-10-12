@@ -12,6 +12,7 @@ pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Registry} from "./Registry.sol";
 
 /// @title SharedBase
@@ -19,7 +20,7 @@ import {Registry} from "./Registry.sol";
 ///         access checks, pause checks, and asset sweep functions.
 /// @dev Current contracts configure Registry during construction or initialization
 ///      and expose no external setter. ERC-7201 storage avoids shifting child layouts.
-abstract contract SharedBase {
+abstract contract SharedBase is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     // ─────────────────────────── Storage (ERC-7201) ───────────────────────────
@@ -100,7 +101,7 @@ abstract contract SharedBase {
     ///         ETH may arrive by force-send or through payable UUPS upgrade
     ///         initialization. Reverts if there is none.
     /// @param to  Recipient (non-zero).
-    function sweepETH(address payable to) external {
+    function sweepETH(address payable to) external nonReentrant {
         _requireAdminOrTimelock();
         if (to == address(0)) revert ZeroAddress();
         if (to == address(this)) revert InvalidSweepRecipient(to);
@@ -113,9 +114,11 @@ abstract contract SharedBase {
 
     /// @notice Sweep the token balance that the managed contract does not protect.
     ///         Admin or timelock. Reverts when nothing is sweepable.
+    /// @dev Guarded so a token hook fired mid-operation (e.g. an ERC-1155 booster
+    ///      return) cannot sweep while a child's accounting is in flight.
     /// @param token  Token to sweep.
     /// @param to     Recipient (non-zero).
-    function sweepToken(IERC20 token, address to) external {
+    function sweepToken(IERC20 token, address to) external nonReentrant {
         _requireAdminOrTimelock();
         if (to == address(0)) revert ZeroAddress();
         if (to == address(this)) revert InvalidSweepRecipient(to);

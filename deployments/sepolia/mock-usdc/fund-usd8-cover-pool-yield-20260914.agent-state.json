@@ -1,0 +1,43 @@
+{
+  "artifactSha256": "83a22fc4bff0e830cb2ca5e2bfbf5e040728306efa4bf8ed819f35093ebede56",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 902,
+      "label": "MockUSDC.approve Treasury 10 mUSDC",
+      "transactionHash": "0xd1b326f3e302dce2c418c6d2014a72c4144bd1e6402bb8a8ad3d6bcc254fad36",
+      "status": "confirmed",
+      "blockNumber": 11704100,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 903,
+      "label": "Treasury.mintUSD8 10 USD8",
+      "transactionHash": "0x9f28af31d0f0e6327d169c03a4e2b0ae4b38986fdb54cf6619c2cdcaae093d3d",
+      "status": "confirmed",
+      "blockNumber": 11704101,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 904,
+      "label": "USD8.approve USD8 Cover Pool 10 USD8",
+      "transactionHash": "0x226e2eae9f83150680f533dedd79cbebe7c8fbbae91045f3578593c97f6f9a01",
+      "status": "confirmed",
+      "blockNumber": 11704102,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 905,
+      "label": "USD8 Cover Pool.receiveProfitDistribution 10 USD8",
+      "transactionHash": "0x14a7969d53b8aed522375130fc688a9f8a422a62802b2121c3bbe1faf8e89660",
+      "status": "confirmed",
+      "blockNumber": 11704103,
+      "contractAddress": null
+    }
+  ]
+}

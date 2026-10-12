@@ -150,7 +150,7 @@ contract RegistryTopologyHandler is Test {
     function toggleModule() external {
         vm.startPrank(currentTimelock);
         if (ghostModuleInstalled) {
-            registry.setDefiInsurance(address(0));
+            registry.clearDefiInsurance(address(module), module.activeIncidentId());
             ghostModuleInstalled = false;
         } else {
             module.setActive(0);

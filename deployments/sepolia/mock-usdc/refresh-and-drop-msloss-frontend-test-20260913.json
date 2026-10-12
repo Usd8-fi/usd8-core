@@ -1,0 +1,51 @@
+{
+  "chain": 11155111,
+  "purpose": "TESTNET ONLY: re-stamp the exact live settlement-oracle union and create a fresh 22% msLOSS impairment for frontend testing",
+  "baselineRestoreBlock": 11695723,
+  "stablePreWindowThroughBlock": 11695727,
+  "expectedPreRatioWad": "1000000000000000000",
+  "expectedPostRatioWad": "780000000000000000",
+  "expectedDeclineBps": 2200,
+  "lossAssets": "957242996962025316455696",
+  "transactions": [
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer wstETH/USD $4000",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0x00E79aFB10A84D153803F00e73900803179D594e",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000005d21dba000",
+        "nonce": "0x375",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaTestOracle.updateAnswer msLOSS underlying $2000",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xDa725125d8ff0588496382427ab65Bc8f8D639Eb",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xa87a20ce0000000000000000000000000000000000000000000000000000002e90edd000",
+        "nonce": "0x376",
+        "chainId": "0xaa36a7"
+      }
+    },
+    {
+      "transactionType": "CALL",
+      "contractName": "SepoliaLossVault.realizeLoss fresh 22% frontend-test drop",
+      "transaction": {
+        "from": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+        "to": "0xD5B2a08F474f77eF29211Ccc59cd65e5fA6734dc",
+        "gas": "0x30d40",
+        "value": "0x0",
+        "input": "0xd35d26ed000000000000000000000000000000000000000000000000000000000000dead00000000000000000000000000000000000000000000cab43f313e3386329510",
+        "nonce": "0x377",
+        "chainId": "0xaa36a7"
+      }
+    }
+  ]
+}

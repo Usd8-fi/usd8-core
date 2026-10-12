@@ -9,8 +9,8 @@ import sys
 def main() -> int:
     print(
         "incident-open preflight moved to offchain-rust: use the pinned "
-        "`usd8-settlement attested-open <insuredToken> --registry <address> "
-        "--rpc-url <url> --expected-signer <address>` path. The retired Python "
+        "`usd8-settlement detect_price_drop <insuredToken> --registry <address> "
+        "--rpc-url <url> --no-drpc-key` read-only precheck (not opening authorization). The retired Python "
         "USD-oracle/minClaimAmount model is intentionally disabled.",
         file=sys.stderr,
     )

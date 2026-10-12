@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "a373a7bbecaf0e5e20482caba2354052bd12f06680f34fd6e2455f6eaa46bbd7",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 884,
+      "label": "SepoliaLossToken.mint restore msLOSS parity",
+      "transactionHash": "0x25280f2214c170aad6b7f3764c02d1bb33db4c8b3e977cd2dfacaffced89afc5",
+      "status": "confirmed",
+      "blockNumber": 11695723,
+      "contractAddress": null
+    }
+  ]
+}

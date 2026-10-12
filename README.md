@@ -4,8 +4,17 @@ USD8 is a USDC-backed stablecoin with integrated DeFi insurance. This repository
 
 > **Status:** pre-mainnet. A public Sepolia staging deployment is available; mainnet deployment requires separate review and approval.
 
+## Run locally and verify a TEE settlement
+
+Start with the [local download, setup and verification guide](offchain-rust/README.md#start-here-run-locally-and-verify-a-tee-settlement).
+It explains how to build the Rust CLI, select Sepolia or mainnet, configure an
+archive RPC and Registry, recompute an incident, and compare a downloaded TEE
+result. Public computation verification runs on a normal computer without a
+wallet, AWS credentials or enclave hardware.
+
 **Contents**
 
+- [Run locally and verify a TEE settlement](#run-locally-and-verify-a-tee-settlement)
 - [1. Protocol overview](#1-protocol-overview)
 - [2. USD8, Treasury, and savings](#2-usd8-treasury-and-savings)
 - [3. Insurance score](#3-insurance-score)
@@ -222,8 +231,7 @@ test/                             Foundry tests
 ## 8.1 Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation)
-- Rust 1.92.0 for the settlement runtime
-- Rust 1.94.1 for the Lambda packages
+- Rust 1.94.1 (tested toolchain for local verification and the Lambda packages)
 
 ## 8.2 Install and build
 
@@ -234,7 +242,7 @@ forge install
 forge build
 
 cd offchain-rust
-cargo +1.92.0 build --release --locked
+cargo +1.94.1 build --release --locked
 ```
 
 ## 8.3 Test
@@ -248,10 +256,12 @@ FOUNDRY_PROFILE=deep forge test --summary
 
 # Rust settlement runtime
 cd offchain-rust
-cargo +1.92.0 test --locked
-cargo +1.92.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.94.1 test --locked
+cargo +1.94.1 clippy --locked --all-targets --all-features -- -D warnings
 
 # Solidity ↔ Rust integration
+# The test tool is excluded from default builds.
+cargo +1.94.1 build --release --locked --features ffi-tools --bin usd8-ffi
 cd ..
 RUN_INTEGRATION=1 forge test --offline --ffi \
   --match-path test/SettlementIntegration.t.sol -vv

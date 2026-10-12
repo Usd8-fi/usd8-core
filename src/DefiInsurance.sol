@@ -607,10 +607,12 @@ contract DefiInsurance is
         // from claim entries.
         inc.claimSetHash = keccak256(abi.encode(inc.claimSetHash, claimId));
         claimIdByIncidentAndUser[incidentId][msg.sender] = 0; // may re-file within the window with a different claim id
-        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
         _resolveBoosters(c, msg.sender, 0);
         _resolveClaimBond(c, msg.sender);
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
+        // Release escrow only after the refund has left, so a token hook fired
+        // above cannot observe an under-reserved balance.
+        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
 
         emit ClaimCancelled(claimId, msg.sender);
     }
@@ -638,8 +640,8 @@ contract DefiInsurance is
     function _resolveClaimBond(Claim storage c, address recipient) internal {
         uint256 amount = c.bondAmount;
         IERC20 token = IERC20(registry().usd8());
-        _escrowedClaimBonds -= amount;
         token.safeTransfer(recipient, amount);
+        _escrowedClaimBonds -= amount;
     }
 
     // ─────────────────────────── Settlement (TEE-signed root only) ───────────────────────────
@@ -849,10 +851,10 @@ contract DefiInsurance is
         if (inc.unresolvedClaims == 0 && inc.resolvedAt == 0) {
             inc.resolvedAt = uint64(block.timestamp);
         }
-        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
         _resolveBoosters(c, msg.sender, 0);
         _resolveClaimBond(c, msg.sender);
         inc.insuredToken.safeTransfer(msg.sender, c.insuredTokenAmount);
+        escrowedInsuredTokens[inc.insuredToken] -= c.insuredTokenAmount;
         emit ClaimDeclined(claimId, msg.sender, false);
     }
 

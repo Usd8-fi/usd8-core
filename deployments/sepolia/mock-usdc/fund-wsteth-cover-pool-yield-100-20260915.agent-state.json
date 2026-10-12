@@ -1,0 +1,43 @@
+{
+  "artifactSha256": "3999ac0eca8989adb257b7b59951ad586a5576d259e8938f20310de72d77498e",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 907,
+      "label": "MockUSDC.approve Treasury 100 mUSDC",
+      "transactionHash": "0xbafc144fd7afdabde4b1e55ecb4d73783d0d852ca8cfb661dff567b9c9303ea3",
+      "status": "confirmed",
+      "blockNumber": 11708225,
+      "contractAddress": null
+    },
+    {
+      "index": 1,
+      "nonce": 908,
+      "label": "Treasury.mintUSD8 100 USD8",
+      "transactionHash": "0x4e18e2a1dcc7a1235be76d83d7440d68ca84ccec08e8d67ec576a69b5cfd3bb8",
+      "status": "confirmed",
+      "blockNumber": 11708226,
+      "contractAddress": null
+    },
+    {
+      "index": 2,
+      "nonce": 909,
+      "label": "USD8.approve wstETH Cover Pool 100 USD8",
+      "transactionHash": "0xda7a14c6fe433fb7c6b66f2cea42b21d8d9420c6d23ca8ab5f345b35890c4d21",
+      "status": "confirmed",
+      "blockNumber": 11708227,
+      "contractAddress": null
+    },
+    {
+      "index": 3,
+      "nonce": 910,
+      "label": "wstETH Cover Pool.receiveProfitDistribution 100 USD8",
+      "transactionHash": "0x84e7af522c566457844a2783b05ae311702fb42f803a39fbb87ff886a54f7d9c",
+      "status": "confirmed",
+      "blockNumber": 11708228,
+      "contractAddress": null
+    }
+  ]
+}

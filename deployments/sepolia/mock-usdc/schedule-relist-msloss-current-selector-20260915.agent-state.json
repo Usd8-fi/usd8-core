@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "ace25fa3b216595d4775ee39096d93500012f3a9a9ebb1ef8e2fe69be61a148c",
+  "role": "funder",
+  "sender": "0x724e8951d39E14CEBcB5fB02638f49A637C97838",
+  "receipts": [
+    {
+      "index": 0,
+      "nonce": 911,
+      "label": "TimelockController.schedule editInsuredToken(msLOSS current selector)",
+      "transactionHash": "0xd853d51db63059341709371f96101a64d6429218e9020775fbdbfb37b86f53af",
+      "status": "confirmed",
+      "blockNumber": 11708417,
+      "contractAddress": null
+    }
+  ]
+}

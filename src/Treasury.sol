@@ -130,6 +130,7 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
 
     /// @notice Thrown by {addStrategy} when the strategy is already approved.
     error StrategyAlreadyApproved(IStrategy strategy);
+    error StrategyDeployReserveLoss(uint256 before, uint256 after_);
 
     /// @notice Thrown by {removeProfitReceiver} when the address isn't registered.
     error ProfitReceiverNotFound(address receiver);
@@ -370,13 +371,22 @@ contract Treasury is Initializable, UUPSUpgradeable, ReentrancyGuardTransient, S
     ///         Blocked while paused.
     /// @dev    Push pattern: USDC is safeTransfer'd to the strategy first,
     ///         then strategy.deploy(amount) is called as a notification.
+    ///         The aggregate reserve is re-valued afterwards and may not fall by
+    ///         more than {RESERVE_CHECK_TOLERANCE}, so a vault whose share price
+    ///         has been inflated (e.g. by a donation) cannot absorb a material
+    ///         part of the deployed USDC through its own rounding.
     function depositToStrategy(IStrategy s, uint256 amount) external nonReentrant {
         _requireAdminOrTimelock();
         _requireNotPaused();
         if (amount == 0) revert ZeroAmount();
         _findApprovedStrategy(s);
+        uint256 reserveBefore = getReserveBalance();
         USDC().safeTransfer(address(s), amount); // push USDC to strategies to avoid granting approvals.
         s.deploy(amount);
+        uint256 reserveAfter = getReserveBalance();
+        if (reserveAfter + RESERVE_CHECK_TOLERANCE < reserveBefore) {
+            revert StrategyDeployReserveLoss(reserveBefore, reserveAfter);
+        }
         emit DepositedToStrategy(s, amount);
     }
 
