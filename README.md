@@ -2,19 +2,9 @@
 
 USD8 is a USDC-backed stablecoin with integrated DeFi insurance. This repository contains the protocol contracts, deployment scripts, tests, and the Rust settlement runtime.
 
-> **Status:** pre-mainnet. A public Sepolia staging deployment is available; mainnet deployment requires separate review and approval.
+> [!TIP]
+> To locally run and verify USD8 results like insurance scores and TEE settlement, [go here](offchain-rust/README.md#start-here-run-locally-and-verify-a-tee-settlement).
 
-## Run locally and verify a TEE settlement
-
-Start with the [local download, setup and verification guide](offchain-rust/README.md#start-here-run-locally-and-verify-a-tee-settlement).
-It explains how to build the Rust CLI, select Sepolia or mainnet, configure an
-archive RPC and Registry, recompute an incident, and compare a downloaded TEE
-result. Public computation verification runs on a normal computer without a
-wallet, AWS credentials or enclave hardware.
-
-**Contents**
-
-- [Run locally and verify a TEE settlement](#run-locally-and-verify-a-tee-settlement)
 - [1. Protocol overview](#1-protocol-overview)
 - [2. USD8, Treasury, and savings](#2-usd8-treasury-and-savings)
 - [3. Insurance score](#3-insurance-score)
@@ -45,38 +35,25 @@ wallet, AWS credentials or enclave hardware.
                             Distribution
 ```
 
-| Component | Purpose |
+
+| Component | Description |
 |---|---|
-| [`Registry`](src/Registry.sol) | Shared roles, pause state, topology, scoring, feeds, and incident configuration. |
-| [`USD8`](src/USD8.sol) | ERC-20 stablecoin minted and burned only through Treasury. |
-| [`Treasury`](src/Treasury.sol) | Holds USDC reserves, mints/redeems USD8, manages approved strategies, and distributes reserve yield. |
-| Morpho Vault V2 (`sUSD8`) | Canonical USD8 savings share token backed by [`USD8SavingsAdapter`](src/adapters/USD8SavingsAdapter.sol). |
-| [`SingleAssetCoverPool`](src/SingleAssetCoverPool.sol) | ERC-4626 pool where LP capital earns USD8 rewards and absorbs insured losses. |
-| [`DefiInsurance`](src/DefiInsurance.sol) | Insured-token configuration, claims, incident settlement, and payouts. |
-| [`ERC4626Strategy`](src/strategies/ERC4626Strategy.sol) | Deploys Treasury USDC into an approved ERC-4626 USDC vault. |
+| **USD8** | Simple ERC-20 token. Only Treasury can mint/redeem. |
+| **Treasury** | Mints and redeems USD8 for users, receives USDC, deploys it into external yield strategies, and distributes yield across components. |
+| **Cover Pools** | High-yield ERC-4626 vaults, each holding a specific token such as wstETH. Anyone can deposit. Assets may be used to cover insurance claims. |
+| **DeFi Insurance** | Handles insurance claim logic and has access to funds in Cover Pools. |
 
 <br><br>
 
 # 2. USD8, Treasury, and savings
 
-## 2.1 Mint and redeem
+- Anyone can mint and redeem USD8 1:1 with USDC.
+- Treasury may allocate USDC reserves to strategies approved by the timelock.
+- Treasury counts idle USDC plus approved strategy assets as reserves. Surplus above its configured reserve buffer may be minted as USD8 revenue, which is routed to configured receivers such as Cover Pools or sUSD8.
+- Savings USD8 `sUSD8` is a Morpho Vault. Users deposit USD8 and receive sUSD8. Treasury distributes revenue to this vault. 
 
-- Anyone may mint USD8 by depositing USDC at 1:1 value.
-- In a healthy state, USD8 redeems for up to 1 USDC per USD8.
-- If reserves fall below supply, redemption becomes pro-rata for every holder. This avoids a first-come, full-value bank run.
-- Treasury may allocate reserves only to strategies approved by the timelock.
-
-## 2.2 Reserve yield
-
-Treasury counts idle USDC plus approved strategy assets as reserves. Surplus above its configured reserve buffer may be minted as USD8 revenue. A protocol fee is applied, and the remainder is routed to configured receivers such as cover pools or sUSD8.
-
-Strategy admission and swap routes are timelock-controlled. Position tokens cannot be sold through the generic swap entrypoint, and verified USDC output goes directly to Treasury.
-
-## 2.3 Morpho savings (`sUSD8`)
-
-`sUSD8` is an official Morpho Vault V2 share token, not a custom vault. Users deposit USD8 and receive sUSD8. Treasury revenue allocated to the vault is released through the savings adapter's configured rate limit.
-
-USD8 and sUSD8 are listed as insured assets in the deployment configuration, subject to their coverage caps and the normal claim process.
+> [!CAUTION]
+> If USD8 reserves ever fall below supply in an unlikely event, redemption becomes pro-rata for every holder. This avoids a first-come, full-value bank run.
 
 <br><br>
 
@@ -84,35 +61,37 @@ USD8 and sUSD8 are listed as insured assets in the deployment configuration, sub
 
 Insurance score measures block-weighted holdings of configured scored tokens.
 
-- Score is computed off-chain by the TEE from an append-only on-chain rate history, algo is open sourced, results publically verifiable.
-- Current accrual rates - 1 score per USD8 per day and 0.1 score per sUSD8 per day.
+- Score is computed off-chain from an append-only on-chain rate history, and the TEE recomputes it at settlement. The algorithm is open source and results are publicly verifiable.
 - Score is non-transferable and does not expire.
-- An incident will only count score accummulated up to 7 days before the incident block, preventing last min scoring attack
+- An incident only counts score accumulated up to 7 days before its reference block, preventing last-minute score farming.
 - Previously spent score is deducted when calculating a claimant's available score.
 - Score is consumed only when an eligible claimant accepts a finalized payout.
+
+> [!NOTE]
+> Currently only 2 tokens are accruing insurance scores - 1 score per USD8 per day and 0.1 score per sUSD8 per day. However more tokens might be added in the future.
 
 <br><br>
 
 # 4. Cover pools
-
-Each cover asset has a separate ERC-4626 pool. LPs retain exposure to the deposited asset, earn distributed USD8 rewards, and accept the risk that claims reduce pool principal.
+Cover Pools are high yield ERC-4626 vaults anyone can deposit in. Each Cover Pool contains a specific asset. LPs retain exposure to the deposited asset, earn distributed USD8 rewards, and accept the risk that claims reduce pool principal.
 
 ## 4.1 Deposit and rewards
 
-- Deposits are open while no incident freezes the pool.
-- USD8 rewards are separate from pool principal and may be claimed without withdrawing shares.
-- Each pool may have an asset-denominated soft deposit cap set by an admin or the timelock; zero means uncapped. Reward rates are not guaranteed.
-- Each incident may use at most the configured share of active pool assets; the default is 50%.
+- Deposits are open if no claims are active
+- Rewards are paid in USD8, separate from pool principal and thus not exposed to claims. Rewards may be claimed without withdrawing principal.
+- Each pool has a cap, no deposit is allowed if pool is full.
+- Each incident can use at most 50% of a pool's principal.
 
 ## 4.2 Exit flow
 
-1. `requestRedeem` escrows shares immediately. The request cannot be cancelled and stops earning USD8 rewards.
-2. Requests mature in three-day batches after a seven-day minimum cooldown, producing a 7–10 day wait under the default configuration.
-3. Before settlement, escrowed shares remain exposed to pool losses. If an incident opens first, settlement waits until the incident resolves.
-4. Once an exit epoch is settled, its shares are burned and the corresponding assets are reserved.
-5. The user calls `completeRedeem`; the reserved claim does not expire.
+1. **Request.** Call `requestRedeem`. Your shares are locked at once and stop earning rewards. You can't cancel, and you can only have one request open at a time.
+2. **Wait.** Exits are processed in batches every 3 days, after a minimum 7-day wait. In total that's 7–10 days.
+3. **Still at risk while waiting.** Until your exit is processed, your shares can still lose value if the pool pays a claim. If an incident starts after your wait is already over, your exit is processed first and isn't affected. If your wait isn't over yet, your exit is delayed until the incident ends.
+4. **Processed.** Your shares are burned and the assets you're owed are set aside for you.
+5. **Withdraw.** Call `completeRedeem` to receive your assets. There's no deadline, and you can withdraw even during an incident.
 
-Anyone may process matured epochs in bounded batches with `settleMaturedExitEpochs(maxEpochs)`.
+Anyone can trigger processing of finished batches with `settleMaturedExitEpochs(maxEpochs)`. This is paused during incidents.
+
 
 <br><br>
 
@@ -120,80 +99,200 @@ Anyone may process matured epochs in bounded batches with `settleMaturedExitEpoc
 
 ## 5.1 What is covered
 
-The timelock lists insured tokens and sets for each token:
+Governance (the timelock) chooses which tokens are insured. For each token it sets:
 
-- a maximum coverage percentage;
-- the immediate underlying conversion;
-- an underlying/USD oracle; and
-- settlement sampling parameters.
+- the maximum percentage of a loss that can be covered;
+- what the token is a wrapper of (its "underlying"), and how to convert between them;
+- a price feed for the underlying in USD.
 
-Coverage applies to loss in the insured token relative to its immediate underlying. A loss in the underlying itself is not a wrapper claim. For example, a wrapper-to-USDC loss may be covered, but a USDC/USD depeg is not treated as that wrapper's loss.
+Settlement price sampling (time windows and sampling interval) is set globally, not per token.
 
-Only one incident may be active at a time. Opening an incident snapshots its pools, pricing configuration, fee share, TEE identity, and phase duration. It also freezes new pool deposits and settlement of unreserved exits; new exit requests remain available but loss-exposed.
+> [!IMPORTANT]
+> Only the wrapper's own loss is covered. If a token drops in value against what it wraps, that's covered. If the underlying itself drops, it isn't. For example, if a USDC vault token loses value against USDC, that's covered. If USDC itself depegs from $1, that isn't a loss of the vault token.
+
+One incident at a time. When an incident opens, its settings are locked for its whole lifetime: which pools pay, pricing, protocol fee, TEE identity and phase lengths. While it's open:
+
+- no one can deposit into cover pools;
+- exits that weren't already processed are paused;
+- new exit requests are still allowed, but they share any losses.
 
 ## 5.2 Claim lifecycle
 
+An incident moves through four phases. Each lasts 3 days by default.
+
 ```text
    ┌─────────────────────┐
-   │       CLAIM         │  file or cancel claims
-   │    phaseWindow      │
+   │      1. CLAIM       │  users file claims, escrow insured tokens
    └──────────┬──────────┘
               ▼
    ┌─────────────────────┐
-   │       SETTLE        │  anyone relays a TEE-signed root
-   │    phaseWindow      │
+   │      2. SETTLE      │  anyone submits the TEE's signed result
    └──────────┬──────────┘
               ▼
    ┌─────────────────────┐
-   │      CORRECT        │  admin/timelock during beta
-   │    phaseWindow      │
+   │      3. CORRECT     │  admin can fix the result (beta only)
    └──────────┬──────────┘
               ▼
    ┌─────────────────────┐
-   │      FINALIZE       │  claimant accepts or declines
-   │    phaseWindow      │
+   │     4. FINALIZE     │  each claimant accepts or declines
    └─────────────────────┘
 ```
 
-The default `phaseWindow` is three days and is snapshotted per incident. Opening starts the claim window; settlement is allowed during the next window. Committing or correcting a nonzero root starts a fresh correction window, and each further correction resets it. Proof finalization opens after the resulting correction deadline, with payout acceptance available for one further window. Timelock timing changes do not alter an active incident.
+- Each new or corrected result restarts the 3-day correction window.
+- After that window closes, claimants can accept or decline their payout.
+
 
 ## 5.3 Filing a claim
 
-The first TEE-signed claim opens the incident; later users join it. Each user may have one live claim and escrows the insured token, configured USD8 bond, and any optional ERC-1155 boosters. During the claim phase, users may cancel and recover all escrow.
+The first claim opens the incident, and everyone else joins it. The TEE only signs off on opening once the token has dropped by more than a set threshold (20% by default). 
 
-The TEE opens only after finalized price samples exceed the configured drop threshold (20% by default). The trusted admin or timelock retains an emergency open route without a TEE signature.
+### When an incident can open
 
-## 5.4 Eligibility and valuation
+The TEE compares the token's price against its underlying in the **24 hours before** a candidate block with the **24 hours after** it:
 
-An eligible claim requires:
+```text
+  token price vs underlying
+        │
+   1.00 ┤ ●──●──●──●──●──●──●──●
+        │                       ╲
+   0.80 ┤ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─╲─ ─ ─ ─ ─ ─ ─ ─ ─ ─   80% of "before" average
+        │                         ╲
+   0.70 ┤                          ●──●──●──●──●──●──●──●
+        │
+        └─────────────────────────┬─────────────────────────▶ blocks
+          ◀──── 24h BEFORE ──────▶│◀────── 24h AFTER ──────▶
+             average = 1.00       │       average = 0.70
+                                  │
+                           reference block
 
-- a positive minimum insured-token balance throughout `max(1, referenceBlock - minHoldingRequired)` through `referenceBlock`; and
-- a nonzero requested raw-score spend, capped to score accrued through that same cutoff minus cumulative score spent as of `openBlock`.
+  0.70 < 0.80  →  more than a 20% drop  →  incident can open
+```
 
-The eligible amount is the lower of escrow and that minimum historical balance. Settlement values it using:
+How the check works:
 
-1. insured token to immediate underlying from the pre-reference TWAP ending at `referenceBlock`;
-2. immediate underlying to USD at `windowEnd`, the latest finalized block at or before the claim deadline; and
-3. cover-pool accounted balances and pool-asset/USD prices at that same `windowEnd`.
+1. **Candidate blocks.** Every 300 blocks (about hourly) within the last ~6 days (43,200 blocks) is a possible reference block.
+2. **Before average.** Read the price every 300 blocks over the 24 hours (7,200 blocks) before the candidate, and average it.
+3. **After average.** Do the same for the 24 hours after it. All of these blocks must already be finalized, so an incident can open no earlier than about 24 hours after the drop.
+4. **The drop test.** The candidate qualifies if the after average is **more than 20% below** the before average.
+5. **Which block is used.** If several candidates qualify, the TEE uses the first candidate of the most recent drop. That block becomes the incident's **reference block**, which the holding window, score cutoff and pre-drop price are all measured from.
 
-Worker execution time does not choose a valuation anchor.
+Averaging a full day on each side means a brief wick or a single manipulated block can't open an incident.
 
-## 5.5 Payout allocation
+The contract also requires that:
 
-The runtime derives a gross incident cap from window-end pool values and the snapshotted per-pool payout limit, then deducts the snapshotted protocol-fee share to obtain the claimant budget. Each claimant receives the lower of:
+- the token is currently listed for insurance;
+- no other incident is active;
+- the reference block is in the past and at most 43,200 blocks (~6 days) old.
 
-- the covered-loss cap from eligible value and the token's coverage percentage; and
-- a share of the claimant budget proportional to booster-adjusted score.
+To file, you lock up:
 
-Unused entitlement and rounding dust remain in the pools; neither is redistributed. Claimant amounts are split across pools by their window-end USD value. On acceptance, each amount is grossed up against pool capital: the claimant receives the stated net amount and the difference goes to the currently configured protocol-fee receiver.
+- the insured tokens you're claiming for;
+- 10 USD8 bond;
+- optionally, booster NFTs to increase your share of the payout.
 
-Boosters increase allocation weight under a permanent Registry configuration, but only raw score is spent. If an eligible claimant accepts, eligible insured-token escrow and boosters are consumed; excess escrow and the USD8 bond are returned. On a proof-backed decline, all insured-token escrow and boosters are returned; eligible claimants recover the bond, while ineligible claimants forfeit it to Treasury.
+You can have one claim at a time. During the claim phase, you can cancel and get everything back.
 
-After payout expiry, proof-backed decline remains available but payout acceptance does not. If no usable root exists, the incident is voided, or the module is inactive, claimants recover escrow, boosters, and bond through the no-settlement path once it opens.
+> [!IMPORTANT]
+> You will lose your bond if the incident is settled and the result shows your claim was ineligible, meaning:
+>
+> - you didn't hold the insured token **continuously** through the ~7-day window before the reference block (your lowest balance in that window was zero); or
+> - you had **no usable insurance score** at the cutoff (score earned by then, minus score already spent, was zero).
+>
+> Once your claim is shown to be ineligible, anyone can close it, and the bond goes to the Treasury. Accepting or declining doesn't change this.
+>
+> You **always get your bond back** if:
+>
+> - you cancel during the claim phase;
+> - you were eligible, whether you accept or decline, and even after the payout window closes; or
+> - the incident fails (no valid result, cancelled by governance, or the insurance module is switched off).
+>
+> Your insured tokens and boosters are always returned, except the eligible portion that's kept when you accept a payout. Only the bond is at risk.
 
-Settlement artifacts, Merkle leaves, pricing anchors, TEE attestation, RPC completeness rules, and reproduction commands are documented in [`offchain-rust/README.md`](offchain-rust/README.md).
+## 5.4 Who is eligible, and how losses are valued
 
-<br><br>
+To be eligible, you must have:
+
+- **held the insured token continuously** for about 7 days before the incident's reference block, the last block before the price drop;
+- **insurance score** earned by that same cutoff, minus any score you've already spent.
+
+Only the smaller of what you locked up and the lowest balance you held during those 7 days counts.
+
+Your loss is priced using:
+
+1. the token's price against its underlying **just before the drop**: its average value over the 7 days before the reference block;
+2. the underlying's USD price **at the end of the claim phase**; and
+3. the value of the cover pools at that same moment.
+
+> [!NOTE]
+> **How the pre-drop price is calculated**
+>
+> 1. Start about 7 days before the reference block (`twapLookbackBlocks`, 50,400 blocks by default).
+> 2. Every 300 blocks (about once an hour, `sampleStepBlocks`), read how much of the underlying one insured token is worth.
+> 3. Keep going up to and including the reference block, about 169 readings in total.
+> 4. Take the simple average of those readings.
+>
+> This average is the token's "normal" value, and losses are measured from it. Using a week of hourly readings stops a brief spike or a single manipulated block from inflating or shrinking claims.
+>
+> *Example:* a vault share is worth about 1.05 USDC all week, then collapses after the reference block. The average is about 1.05, so each share's loss is measured from 1.05.
+
+Prices come from these fixed points in time, not from when the settlement job happens to run.
+
+## 5.5 How payouts are calculated
+
+1. **Total budget.** Each pool can pay up to a set percentage of its value. The protocol fee is taken out of that, and the rest is the budget for claimants.
+2. **Your payout** is the smaller of:
+   - **your covered loss**: your eligible loss × the token's coverage percentage; and
+   - **your share of the budget**, in proportion to your score, with boosters adding weight.
+3. **Unused money stays in the pools.** If someone gets less than their share, the difference isn't handed out to others.
+4. **Which pools pay.** Your payout is split across pools by their value. When you accept, you get the full stated amount, and the protocol fee is paid on top of it from the pools.
+
+```text
+   ┌──────────────────────────────────────────┐
+   │  For each eligible claimant, pay the     │
+   │  SMALLER of:                             │
+   │   A. covered loss                        │
+   │      (eligible loss × coverage %)        │
+   │   B. score share of the claimant budget  │
+   │                                          │
+   └────────────────────┬─────────────────────┘
+                        ▼
+   ┌──────────────────────────────────────────┐
+   │  Split each payout across pools          │
+   │  by pool value                           │
+   └────────────────────┬─────────────────────┘
+                        ▼
+              ┌─────────────────┐
+              │     Outcome     │
+              └────────┬────────┘
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+   ┌────────────┐ ┌────────────┐ ┌────────────────┐
+   │   ACCEPT   │ │  DECLINE   │ │ INCIDENT FAILS │
+   ├────────────┤ ├────────────┤ ├────────────────┤
+   │ get payout │ │ get tokens │ │ everyone gets  │
+   │ fee paid   │ │ + boosters │ │ tokens,        │
+   │ on top     │ │ back       │ │ boosters and   │
+   │ bond back  │ │ bond back  │ │ bond back      │
+   │ score      │ │ if eligible│ │                │
+   │ spent      │ │ else to    │ │                │
+   │            │ │ Treasury   │ │                │
+   └────────────┘ └────────────┘ └────────────────┘
+```
+
+**If you accept:**
+- your eligible insured tokens and boosters are kept;
+- any extra tokens and your USD8 bond are returned; and
+- only your raw score is spent. Boosters add weight but aren't spent as score.
+
+**If you decline:**
+- all your insured tokens and boosters are returned; and
+- your bond is returned if you were eligible, or goes to the Treasury if you weren't.
+
+
+If you miss the payout window, you can no longer accept, but you can still decline and get your items back. If the incident fails, every claimant gets back their tokens, boosters and bond.
+
+Technical details, including settlement files, proofs, pricing, TEE attestation and how to reproduce a result, are in [`offchain-rust/README.md`](offchain-rust/README.md).
+<br/><br/>
 
 # 6. Timelock and trust
 
@@ -202,7 +301,7 @@ USD8 currently relies on its timelock and defined admin roles, which are trusted
 - The timelock controls upgrades, strategy approval, insured-token configuration, settlement parameters, TEE signers, and permanent beta termination.
 - Admins retain immediate operational powers including pauses, reserve operations, and profit routing. During beta, an admin or the timelock may also correct settlement roots.
 - Any authorized TEE signer can authorize an incident open or sign a settlement root. Results are independently reproducible from the open-source Rust runtime.
-- Pool, token, strategy, oracle, and profit-routing configuration must be reviewed operationally; the contracts do not attempt to defend against every trusted-role misconfiguration.
+
 
 ## 6.1 Beta mode
 
@@ -274,13 +373,13 @@ Deployment scripts select mainnet (`1`) or Sepolia (`11155111`) from `block.chai
 ```bash
 source .env
 
-# Set only after reviewing the configured launch strategy and vault.
-# The configured mainnet Aave vault must be re-reviewed or replaced before launch.
-export AAVE_STRATEGY_REVIEWED=true
+# Set ONLY after the configured mainnet Aave strategy and vault have been
+# re-reviewed (or replaced). Do not set this by default.
+# export AAVE_STRATEGY_REVIEWED=true
 
 # 1. Deploy the timelock
 forge script script/01_DeployTimelock.s.sol:DeployTimelockScript \
-  --rpc-url "$RPC_URL" --broadcast --verify \
+  --rpc-url "$RPC_URL" --broadcast --slow --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 
 # Copy the address printed by step 1
@@ -289,7 +388,7 @@ export TIMELOCK_ADDRESS=0x...
 # 2. Deploy the protocol using the verified timelock
 forge script script/02_DeployUSD8System.s.sol:DeployUSD8SystemScript \
   --sig "run(address)" "$TIMELOCK_ADDRESS" \
-  --rpc-url "$RPC_URL" --broadcast --verify \
+  --rpc-url "$RPC_URL" --broadcast --slow --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 ```
 
@@ -301,7 +400,7 @@ Step 2 deploys and wires the complete system, seeds the canonical sUSD8 vault wi
 
 Security contact: [rick@usd8.fi](mailto:rick@usd8.fi).
 
-Formal-verification scope and evidence are in [`formal-verification/`](formal-verification/).
+Formal-verification work is in [`formal-verification/`](formal-verification/); it is being updated for the current release.
 
 <br><br>
 
