@@ -118,29 +118,40 @@ One incident at a time. When an incident opens, its settings are locked for its 
 
 ## 5.2 Claim lifecycle
 
-An incident moves through four phases. Each lasts 3 days by default.
+An incident moves through four phases. Each phase window is 3 days by default. The days below are counted from the moment the incident opens (day 0).
 
 ```text
    ┌─────────────────────┐
-   │      1. CLAIM       │  users file claims, escrow insured tokens
+   │      1. CLAIM       │  day 0 → 3
+   │      (3 days)       │  users file claims, escrow insured tokens
    └──────────┬──────────┘
               ▼
    ┌─────────────────────┐
-   │      2. SETTLE      │  anyone submits the TEE's signed result
+   │      2. SETTLE      │  day 3 → 6
+   │   (up to 3 days)    │  anyone submits the TEE's signed result
    └──────────┬──────────┘
               ▼
    ┌─────────────────────┐
-   │      3. CORRECT     │  admin can fix the result (beta only)
+   │      3. CORRECT     │  3 days from when the result is submitted
+   │  (3 days, beta only)│  admin can fix the result
    └──────────┬──────────┘
               ▼
    ┌─────────────────────┐
-   │     4. FINALIZE     │  each claimant accepts or declines
+   │     4. FINALIZE     │  3 days to accept the payout
+   │      (3 days)       │  each claimant accepts or declines
    └─────────────────────┘
 ```
 
-- Each new or corrected result restarts the 3-day correction window.
-- After that window closes, claimants can accept or decline their payout.
+| | During beta | After beta (no correction phase) |
+|---|---|---|
+| Result submitted | between day 3 and day 6 | between day 3 and day 6 |
+| Payouts can be accepted | 3 days after the result, for 3 days | immediately after the result, for 3 days |
+| Latest end of the incident (no corrections) | **day 12** | **day 9** |
 
+- Each corrected result restarts the 3-day correction window, which pushes everything after it back.
+- Declining has no deadline, so you can decline and recover your items even after the accept window closes.
+- If no result is submitted by day 6, the incident fails and claimants can recover their tokens, boosters and bond.
+- Cover pools stay frozen while the incident is active. That ends as soon as every claim is resolved, or at the latest end above, whichever comes first.
 
 ## 5.3 Filing a claim
 
