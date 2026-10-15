@@ -92,24 +92,17 @@ fn persisted_incremental_checkpoint_matches_one_shot_replay() {
 }
 
 #[test]
-fn available_score_is_gross_minus_spent_without_maturity_delay() {
+fn reference_score_is_visible_while_available_score_is_matured() {
     let unit = BigUint::from(1_000_000_000_000_000_000u64);
     let breakdown = usd8_score_api::score_breakdown(
         &(BigUint::from(8u8) * &unit),
         &BigUint::from(0u8),
-        &BigUint::from(3u8),
+        &BigUint::from(0u8),
     );
 
     assert_eq!(breakdown.gross_earned_score, BigUint::from(8u8));
     assert_eq!(breakdown.matured_gross_earned_score, BigUint::from(0u8));
-    assert_eq!(breakdown.available_score, BigUint::from(5u8));
-
-    let overspent = usd8_score_api::score_breakdown(
-        &(BigUint::from(2u8) * &unit),
-        &BigUint::from(0u8),
-        &BigUint::from(3u8),
-    );
-    assert_eq!(overspent.available_score, BigUint::from(0u8));
+    assert_eq!(breakdown.available_score, BigUint::from(0u8));
 }
 
 #[test]

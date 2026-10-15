@@ -124,10 +124,8 @@ pub fn score_breakdown(
 ) -> ScoreBreakdown {
     let gross_earned_score = gross_score(reference_numerator.clone());
     let matured_gross_earned_score = gross_score(matured_numerator.clone());
-    // Usable score depends on each incident's reference block, so this public view does not
-    // apply the maturity delay: available = max(gross earned - spent, 0).
-    let available_score = if gross_earned_score > *spent {
-        &gross_earned_score - spent
+    let available_score = if matured_gross_earned_score > *spent {
+        &matured_gross_earned_score - spent
     } else {
         BigUint::zero()
     };
@@ -675,10 +673,9 @@ pub async fn compute_incremental_score_at<R: Rpc + ?Sized>(
                 .map_or_else(|| Ok(BigUint::zero()), checkpoint_balance)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let matured_rates = live_score_rates(&matured_tokens, &config.scored_tokens, cutoff)?;
     let gross_score_per_second = visible_rates.iter().sum::<BigUint>();
-    // `maturingScorePerSecond` is the live accrual rate of `availableScore`, which now follows
-    // the visible (undelayed) score.
-    let maturing_score_per_second = gross_score_per_second.clone();
+    let maturing_score_per_second = matured_rates.iter().sum::<BigUint>();
     let token_scores = config
         .scored_tokens
         .iter()
