@@ -23,7 +23,7 @@ USD8_SCORE_NETWORKS_JSON=[{"chainId":11155111,"name":"sepolia","registry":"0xe2a
 
 ## Score fields
 
-The public display score ordinarily uses a fixed UTC daily snapshot, separate from claim-score replay. On the first ordinary request in a UTC day, the Lambda selects the final block before `00:00:00 UTC` (timestamp at most `23:59:59 UTC` of the preceding day) and replays only from the account's saved checkpoint. It persists that response for the account and returns it unchanged for the rest of the day, subject to the retained [forced-refresh exception](#retained-forced-refresh-exception-orch-04); its HTTP cache expires at the next UTC epoch. The DynamoDB TTL remains a 180-day cleanup policy, not the freshness policy.
+The public display score ordinarily uses a fixed UTC daily snapshot, separate from claim-score replay. On the first ordinary request in a UTC day, the Lambda selects the final block before `00:00:00 UTC` (timestamp at most `23:59:59 UTC` of the preceding day) and replays only from the account's saved checkpoint. It persists that response for the account and returns it unchanged for the rest of the day, subject to the retained [forced-refresh exception](#retained-forced-refresh-exception-orch-04); its HTTP cache expires at the next UTC epoch. Account score rows are permanent: every lease and save `REMOVE`s `expiresAt`, so the table TTL only deletes short-lived work-budget rows.
 
 `grossEarnedScore` is the visible total accrued through that daily reference block.
 `maturedGrossEarnedScore` is accrued only through `scoreCutoffBlock` (`referenceBlock - minHoldingRequired`). `availableScore` is `max(maturedGrossEarnedScore - scoreSpent, 0)`, so recent score remains visible but cannot be spent before it matures. Claim/settlement code must independently replay the authoritative score and must not use this public snapshot.
@@ -43,6 +43,18 @@ its `grossEarnedScore`, and its `grossScorePerSecond`; token earned scores inclu
 negligible integer-rounding remainder so they sum exactly to the account-wide total. Spent and
 Available Score remain account-wide.
 
+## Stored score list
+
+`GET /scores` (single configured network) or `GET /scores/{chainId}` returns every saved
+account row for that chain and Registry, exactly as stored: `account`, `grossEarnedScore`,
+`availableScore`, `scoreSpent`, `referenceBlock`, `snapshotTimestamp` (the time the score is
+as of), and `lastRefreshAt`, sorted by total score. It never recalculates, calls RPC, takes a
+lease, or spends work budget; rows only reflect accounts that have looked up their score. It
+is a paginated DynamoDB `Scan` filtered by the `chainId#Registry#` key prefix, cached for
+five minutes. It requires `dynamodb:Scan` on the table (see `deploy/score-runtime-policy.json`)
+and API Gateway routes `GET /scores` and `GET /scores/{chainId}` with a matching Lambda
+invoke permission.
+
 ## Replay admission and deployment requirements (F-03)
 
 Public GET access is unchanged. A current-schema snapshot for the wall-clock UTC day is
@@ -61,16 +73,16 @@ captured at save construction (`leaseUntil > :now`), not DynamoDB's wall clock a
 A still-current in-flight write constructed before expiry may complete after expiry or
 application timeout, but cannot overwrite a newer generation/version. There is no
 lease-read then write TOCTOU and no second replay on a lost CAS; a rejected save's computed
-value is not returned as fresh. No DynamoDB transactions, deletes, scan, or separate lease
-table are needed.
+value is not returned as fresh. No DynamoDB transactions, deletes, or separate lease table
+are needed. The only scan is the read-only score list below.
 
 A failed, cancelled, or budget-denied attempt deliberately keeps its initial reservation
 unless an already in-flight save succeeds as described above.
 It becomes retryable at `attemptedAt + leaseSeconds + failureCooldownSeconds`, including
 when a Lambda dies before recording failure. Successful commit clears the reservation;
 the existing five-minute successful forced-refresh cooldown remains. Expiration checks
-are conditional expressions, **not DynamoDB TTL timing**. Account metadata uses the
-existing 180-day cleanup retention; do not manually delete active rows/reset generations.
+are conditional expressions, **not DynamoDB TTL timing**. Account rows have no TTL
+(they are kept permanently); do not manually delete active rows/reset generations.
 
 Concurrent refreshes return the latest compatible snapshot with `cacheStatus: updating`
 and zero cache lifetime, or `503 SCORE_UNAVAILABLE`, `Cache-Control: no-store`, and

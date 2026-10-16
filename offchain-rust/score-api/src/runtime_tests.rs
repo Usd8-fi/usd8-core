@@ -400,6 +400,63 @@ async fn lease_holder_commits_but_stale_generation_cannot() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires local DynamoDB emulator; no AWS"]
+async fn saved_score_rows_are_permanent_and_listed_per_deployment() {
+    let app = local_app().await;
+    let (network, account, checkpoint, snapshot) = fixture();
+    let key = checkpoint_key(1, network.registry, account);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // A legacy row written by the old code still carries a TTL.
+    app.dynamodb
+        .put_item()
+        .table_name(&app.table)
+        .item("pk", AttributeValue::S(key.clone()))
+        .item("expiresAt", AttributeValue::N((now + 60).to_string()))
+        .send()
+        .await
+        .unwrap();
+    // A row for another Registry must never appear in this deployment's list.
+    app.dynamodb
+        .put_item()
+        .table_name(&app.table)
+        .item("pk", AttributeValue::S(format!("1#0x{}#{account}", "ab".repeat(20))))
+        .item("payload", AttributeValue::S("{}".into()))
+        .send()
+        .await
+        .unwrap();
+    let lease = app.acquire(&key, 86400, None, now).await.unwrap().unwrap();
+    let ttl_after = |app: Arc<App>, key: String| async move {
+        app.dynamodb
+            .get_item()
+            .table_name(&app.table)
+            .key("pk", AttributeValue::S(key))
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap()
+            .item
+            .unwrap()
+            .contains_key("expiresAt")
+    };
+    assert!(!ttl_after(app.clone(), key.clone()).await, "acquire must clear the TTL");
+    assert!(
+        app.save(&network, account, &checkpoint, &snapshot, 86400, 1, None, None, &lease)
+            .await
+            .unwrap()
+    );
+    assert!(!ttl_after(app.clone(), key.clone()).await, "saved rows are permanent");
+
+    let listed = app.list_scores(&network).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].account, snapshot.account);
+    assert_eq!(listed[0].gross_earned_score, snapshot.gross_earned_score);
+    assert_eq!(listed[0].snapshot_timestamp, snapshot.snapshot_timestamp);
+}
+
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
 };

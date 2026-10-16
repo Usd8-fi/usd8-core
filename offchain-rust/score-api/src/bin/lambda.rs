@@ -18,7 +18,10 @@ use usd8_settlement::chain::{
 use usd8_settlement::rpc::{HttpRpc, RpcError};
 
 const MAX_CHECKPOINT_BYTES: usize = 128 * 1024;
-const CHECKPOINT_TTL_SECONDS: u64 = 180 * 24 * 60 * 60;
+// Account score rows are permanent: writes REMOVE any legacy `expiresAt`, so the
+// table TTL only ever deletes short-lived work-budget rows.
+const SCORE_LIST_CACHE_SECONDS: u64 = 300;
+const MAX_SCORE_LIST_PAGES: usize = 200;
 const DAILY_EPOCH_SECONDS: u64 = 24 * 60 * 60;
 const REFRESH_COOLDOWN_SECONDS: u64 = 5 * 60;
 const LEGACY_SEPOLIA_CHAIN_ID: u64 = 11_155_111;
@@ -272,6 +275,79 @@ fn score_request_from_path(path: &str) -> Option<Result<ScoreRequest, ()>> {
     })
 }
 
+/// `GET /scores` (single configured network) or `GET /scores/{chainId}`.
+enum ScoreListRequest {
+    Explicit { chain_id: u64 },
+    Legacy,
+}
+
+fn score_list_request_from_path(path: &str) -> Option<Result<ScoreListRequest, ()>> {
+    let rest = path.strip_prefix("/scores")?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return Some(Ok(ScoreListRequest::Legacy));
+    }
+    let chain = rest.strip_prefix('/')?;
+    if chain.contains('/') {
+        return None;
+    }
+    Some(match chain.parse::<u64>() {
+        Ok(chain_id) if chain_id != 0 => Ok(ScoreListRequest::Explicit { chain_id }),
+        _ => Err(()),
+    })
+}
+
+/// One stored account row, as last saved. Never recalculated by the list route.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ListedScore {
+    account: String,
+    gross_earned_score: String,
+    available_score: String,
+    score_spent: String,
+    reference_block: String,
+    snapshot_timestamp: String,
+    last_refresh_at: Option<u64>,
+}
+
+/// Decimal-string comparison for non-negative integers of any length.
+fn compare_decimal(left: &str, right: &str) -> std::cmp::Ordering {
+    let left = left.trim_start_matches('0');
+    let right = right.trim_start_matches('0');
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
+
+/// Highest total score first; ties by account for a stable order.
+fn sort_listed_scores(rows: &mut [ListedScore]) {
+    rows.sort_by(|a, b| {
+        compare_decimal(&b.gross_earned_score, &a.gross_earned_score)
+            .then_with(|| a.account.cmp(&b.account))
+    });
+}
+
+fn listed_score_from_item(
+    item: &std::collections::HashMap<String, AttributeValue>,
+) -> Option<ListedScore> {
+    let payload = item.get("payload")?.as_s().ok()?;
+    if payload.len() > MAX_CHECKPOINT_BYTES {
+        return None;
+    }
+    let (_, snapshot, _) = decode_checkpoint_payload(payload).ok()?;
+    let snapshot = snapshot?;
+    Some(ListedScore {
+        account: snapshot.account,
+        gross_earned_score: snapshot.gross_earned_score,
+        available_score: snapshot.available_score,
+        score_spent: snapshot.score_spent,
+        reference_block: snapshot.reference_block,
+        snapshot_timestamp: snapshot.snapshot_timestamp,
+        last_refresh_at: item
+            .get("lastRefreshAt")
+            .and_then(|value| value.as_n().ok())
+            .and_then(|value| value.parse().ok()),
+    })
+}
+
 fn checkpoint_key(chain_id: u64, registry: Address, account: Address) -> String {
     format!("{chain_id}#{registry}#{account}")
 }
@@ -335,12 +411,11 @@ impl App {
         };
         let mut request = self.dynamodb.update_item().table_name(&self.table)
             .key("pk", AttributeValue::S(key.to_owned()))
-            .update_expression("SET leaseUntil = :until, retryAfter = :retry, attemptedAt = :now, expiresAt = :ttl, snapshotGeneration = :epoch ADD generation :one")
+            .update_expression("SET leaseUntil = :until, retryAfter = :retry, attemptedAt = :now, snapshotGeneration = :epoch REMOVE expiresAt ADD generation :one")
             .condition_expression(format!("(attribute_not_exists(leaseUntil) OR leaseUntil <= :now) AND (attribute_not_exists(retryAfter) OR retryAfter <= :now) AND ({version_condition})"))
             .expression_attribute_names("#v", "version")
             .expression_attribute_values(":until", AttributeValue::N((now + self.work_policy.lease_seconds).to_string()))
             .expression_attribute_values(":retry", AttributeValue::N((now + self.work_policy.lease_seconds + self.work_policy.failure_cooldown_seconds).to_string()))
-            .expression_attribute_values(":ttl", AttributeValue::N((now + CHECKPOINT_TTL_SECONDS).to_string()))
             .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
             .expression_attribute_values(":epoch", AttributeValue::N(epoch.to_string()))
             .expression_attribute_values(":one", AttributeValue::N("1".into()))
@@ -368,6 +443,33 @@ impl App {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Every saved account row for this chain and Registry, exactly as stored.
+    /// Read-only: no RPC, no lease, no work budget.
+    async fn list_scores(&self, network: &RuntimeNetwork) -> Result<Vec<ListedScore>, Error> {
+        let prefix = format!("{}#{}#", network.score.chain_id, network.registry);
+        let mut rows = Vec::new();
+        let mut start_key = None;
+        for _ in 0..MAX_SCORE_LIST_PAGES {
+            let output = self
+                .dynamodb
+                .scan()
+                .table_name(&self.table)
+                .filter_expression("begins_with(pk, :prefix)")
+                .projection_expression("pk, payload, lastRefreshAt")
+                .expression_attribute_values(":prefix", AttributeValue::S(prefix.clone()))
+                .set_exclusive_start_key(start_key)
+                .send()
+                .await?;
+            rows.extend(output.items().iter().filter_map(listed_score_from_item));
+            start_key = output.last_evaluated_key;
+            if start_key.is_none() {
+                sort_listed_scores(&mut rows);
+                return Ok(rows);
+            }
+        }
+        Err("score list exceeds the page limit".into())
     }
 
     async fn load(
@@ -456,10 +558,11 @@ impl App {
         } else {
             "attribute_not_exists(#version)"
         };
-        let mut update = "SET payload = :payload, #version = :version, cursorBlock = :cursor, snapshotEpoch = :epoch, expiresAt = :ttl, leaseUntil = :zero, retryAfter = :zero".to_owned();
+        let mut update = "SET payload = :payload, #version = :version, cursorBlock = :cursor, snapshotEpoch = :epoch, leaseUntil = :zero, retryAfter = :zero".to_owned();
         if last_refresh_at.is_some() {
             update.push_str(", lastRefreshAt = :refresh");
         }
+        update.push_str(" REMOVE expiresAt");
         let mut request = self.dynamodb.update_item().table_name(&self.table)
             .key("pk", AttributeValue::S(checkpoint_key(network.score.chain_id, network.registry, account)))
             .update_expression(update)
@@ -469,7 +572,6 @@ impl App {
             .expression_attribute_values(":version", AttributeValue::N(next_version.to_string()))
             .expression_attribute_values(":cursor", AttributeValue::N(cursor_block.to_string()))
             .expression_attribute_values(":epoch", AttributeValue::N(snapshot_epoch.to_string()))
-            .expression_attribute_values(":ttl", AttributeValue::N((now + CHECKPOINT_TTL_SECONDS).to_string()))
             .expression_attribute_values(":zero", AttributeValue::N("0".into()))
             .expression_attribute_values(":generation", AttributeValue::N(lease.generation.to_string()))
             .expression_attribute_values(":now", AttributeValue::N(now.to_string()));
@@ -701,6 +803,40 @@ async fn handle(app: Arc<App>, request: Request) -> Result<Response<Body>, Error
             None,
         );
     }
+    if let Some(list_request) = score_list_request_from_path(request.uri().path()) {
+        let chain_id = match list_request {
+            Ok(ScoreListRequest::Explicit { chain_id }) => chain_id,
+            Ok(ScoreListRequest::Legacy) if app.networks.len() == 1 => {
+                *app.networks.keys().next().expect("single network is nonempty")
+            }
+            Ok(ScoreListRequest::Legacy) => {
+                return response(404, &serde_json::json!({ "error": "LEGACY_ROUTE_AMBIGUOUS" }), &app.allowed_origin, None);
+            }
+            Err(()) => {
+                return response(400, &serde_json::json!({ "error": "INVALID_REQUEST" }), &app.allowed_origin, None);
+            }
+        };
+        let Some(network) = app.networks.get(&chain_id) else {
+            return response(404, &serde_json::json!({ "error": "UNSUPPORTED_CHAIN" }), &app.allowed_origin, None);
+        };
+        return match app.list_scores(network).await {
+            Ok(accounts) => response(
+                200,
+                &serde_json::json!({
+                    "chainId": chain_id.to_string(),
+                    "registry": network.registry.to_string(),
+                    "count": accounts.len(),
+                    "accounts": accounts,
+                }),
+                &app.allowed_origin,
+                Some(SCORE_LIST_CACHE_SECONDS),
+            ),
+            Err(error) => {
+                eprintln!("score list failed for chain {chain_id}: {error}");
+                response(503, &serde_json::json!({ "error": "SCORE_LIST_UNAVAILABLE" }), &app.allowed_origin, None)
+            }
+        };
+    }
     let score_request = match score_request_from_path(request.uri().path()) {
         Some(Ok(request)) => request,
         Some(Err(())) => {
@@ -801,6 +937,37 @@ mod tests {
     use usd8_settlement::Address;
     use usd8_settlement::chain::ChainError;
     use usd8_settlement::rpc::RpcError;
+
+    #[test]
+    fn score_list_route_accepts_bare_and_explicit_chain_paths_only() {
+        assert!(matches!(super::score_list_request_from_path("/scores"), Some(Ok(super::ScoreListRequest::Legacy))));
+        assert!(matches!(super::score_list_request_from_path("/scores/"), Some(Ok(super::ScoreListRequest::Legacy))));
+        assert!(matches!(
+            super::score_list_request_from_path("/scores/11155111"),
+            Some(Ok(super::ScoreListRequest::Explicit { chain_id: 11_155_111 }))
+        ));
+        assert!(matches!(super::score_list_request_from_path("/scores/0"), Some(Err(()))));
+        assert!(matches!(super::score_list_request_from_path("/scores/abc"), Some(Err(()))));
+        assert!(super::score_list_request_from_path("/scores/1/extra").is_none());
+        assert!(super::score_list_request_from_path("/score/0x1").is_none());
+    }
+
+    #[test]
+    fn score_list_sorts_by_total_score_with_decimal_strings_of_any_length() {
+        let row = |account: &str, score: &str| super::ListedScore {
+            account: account.to_owned(),
+            gross_earned_score: score.to_owned(),
+            available_score: "0".to_owned(),
+            score_spent: "0".to_owned(),
+            reference_block: "1".to_owned(),
+            snapshot_timestamp: "1".to_owned(),
+            last_refresh_at: None,
+        };
+        let mut rows = vec![row("0xb", "9"), row("0xa", "100000000000000000000000000000000000000000"), row("0xc", "10"), row("0xd", "10")];
+        super::sort_listed_scores(&mut rows);
+        let order: Vec<_> = rows.iter().map(|r| r.account.as_str()).collect();
+        assert_eq!(order, ["0xa", "0xc", "0xd", "0xb"]);
+    }
 
     #[test]
     fn route_accepts_the_existing_legacy_api_gateway_shape_or_an_explicit_chain() {
