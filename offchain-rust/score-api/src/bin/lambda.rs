@@ -13,7 +13,8 @@ use usd8_score_api::{
 };
 use usd8_settlement::Address;
 use usd8_settlement::chain::{
-    ChainError, block_at_or_before_timestamp, block_by_number, finalized_block,
+    ChainError, assert_contract_code_at, block_at_or_before_timestamp, block_by_number,
+    finalized_block,
 };
 use usd8_settlement::rpc::{HttpRpc, RpcError};
 
@@ -358,6 +359,20 @@ fn legacy_chain_id(networks: &BTreeMap<u64, RuntimeNetwork>) -> Option<u64> {
         _ => networks
             .contains_key(&LEGACY_SEPOLIA_CHAIN_ID)
             .then_some(LEGACY_SEPOLIA_CHAIN_ID),
+    }
+}
+
+/// Whether the Registry had bytecode at `block`. Missing code is an answer, not an error;
+/// every other RPC failure still propagates.
+async fn registry_existed_at(
+    rpc: &HttpRpc,
+    registry: Address,
+    block: u64,
+) -> Result<bool, ChainError> {
+    match assert_contract_code_at(rpc, &registry.to_string(), "Registry", block).await {
+        Ok(()) => Ok(true),
+        Err(ChainError::MissingCode { .. }) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -746,7 +761,13 @@ async fn calculate_inner(
         let reference_number =
             block_at_or_before_timestamp(&network.rpc, epoch.saturating_sub(1), finalized.number)
                 .await?;
-        block_by_number(&network.rpc, reference_number).await?
+        if registry_existed_at(&network.rpc, network.registry, reference_number).await? {
+            block_by_number(&network.rpc, reference_number).await?
+        } else {
+            // Deployment day: the Registry did not exist when the previous UTC day ended, so
+            // there is no daily anchor yet. Score at the finalized block until one exists.
+            finalized.clone()
+        }
     };
     let previous = stored.as_ref().map(|value| value.checkpoint.clone());
     let computed = compute_incremental_score_at(
