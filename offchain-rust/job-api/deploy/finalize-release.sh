@@ -250,5 +250,5 @@ for path in root.rglob("*"):
 root.chmod(0o555)
 PY
 printf 'RELEASE_CANDIDATE_CREATED=%s\nRELEASE_ID=%s\n' "$OUT" "$RELEASE_ID"
-printf 'LIVE_VERIFICATION_REQUIRED=python3 %s/verify-release.py "%s/release-manifest.json" --live --rpc-url <direct-https-sepolia-rpc> --security-baseline <approved-json> --baseline-sha256 <externally-approved-sha256>\n' "$HERE" "$OUT"
+printf 'LIVE_VERIFICATION_REQUIRED=python3 %s/verify-release.py "%s/release-manifest.json" --live --rpc-url <direct-https-rpc-for-the-release-network> --security-baseline <approved-json> --baseline-sha256 <externally-approved-sha256>\n' "$HERE" "$OUT"
 printf 'DEPLOYMENT_ENTRYPOINT=python3 %s/deploy-release.py (see RELEASE-GATES.md; --plan is local-only)\n' "$HERE"

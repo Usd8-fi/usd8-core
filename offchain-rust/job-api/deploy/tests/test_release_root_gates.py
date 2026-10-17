@@ -44,6 +44,8 @@ class ReleaseRootGatesTest(unittest.TestCase):
             'cargo +1.94.1 fmt --check',
             'cargo +1.94.1 test --locked --all-targets --features nitro,sepolia',
             'cargo +1.94.1 clippy --locked --all-targets --features nitro,sepolia -- -D warnings',
+            'cargo +1.94.1 test --locked --all-targets --features nitro\n',
+            'cargo +1.94.1 clippy --locked --all-targets --features nitro -- -D warnings',
         ):
             self.assertIn(command, root)
         core = script.split('cd "$ROOT/score-core"', 1)[1].split('cd "$ROOT"', 1)[0]

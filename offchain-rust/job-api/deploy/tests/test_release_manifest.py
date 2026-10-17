@@ -400,13 +400,13 @@ class ReleaseManifestTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("dirty source", result.stderr)
 
-    def test_rejects_non_sepolia_release_manifest(self) -> None:
+    def test_rejects_unknown_or_mismatched_release_network(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             manifest_path = self.make_release(root)
             manifest = json.loads(manifest_path.read_text())
-            manifest["network"] = "ethereum"
-            manifest["chainId"] = 1
+            manifest["network"] = "mainnet"
+            manifest["chainId"] = 11155111
             manifest_path.write_text(json.dumps(manifest))
 
             result = self.run_verify(manifest_path)

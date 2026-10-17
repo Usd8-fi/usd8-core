@@ -20,15 +20,21 @@ class MeasuredRegistryTest(unittest.TestCase):
         self.assertIn('USD8_REGISTRY="$REGISTRY"', script)
         self.assertIn("--bin usd8-tee-enclave", script)
 
-    def test_release_build_is_sepolia_only(self) -> None:
+    def test_release_build_selects_exactly_one_network_at_compile_time(self) -> None:
         script = BUILD_RELEASE.read_text()
-        self.assertIn('NETWORK=${NETWORK:?set NETWORK to sepolia}', script)
-        self.assertIn('[[ "$NETWORK" == sepolia ]]', script)
-        self.assertIn(
-            "--features lambda,janitor,sepolia --bin usd8-tee-job-lambda",
-            script,
-        )
-        self.assertNotIn('NETWORK must be ethereum or sepolia', script)
+        self.assertIn('NETWORK=${NETWORK:?set NETWORK to mainnet or sepolia}', script)
+        self.assertIn("*) echo 'NETWORK must be mainnet or sepolia' >&2; exit 2 ;;", script)
+        mainnet = script.split("  mainnet)", 1)[1].split(";;", 1)[0]
+        sepolia = script.split("  sepolia)", 1)[1].split(";;", 1)[0]
+        self.assertIn("ROOT_FEATURES=()", mainnet)
+        self.assertIn("JOB_FEATURES=worker,parent\n", mainnet)
+        self.assertIn("LAMBDA_FEATURES=lambda,janitor\n", mainnet)
+        self.assertIn("CHAIN_ID=1\n", mainnet)
+        self.assertNotIn("sepolia", mainnet)
+        self.assertIn("JOB_FEATURES=worker,parent,sepolia", sepolia)
+        self.assertIn("LAMBDA_FEATURES=lambda,janitor,sepolia", sepolia)
+        self.assertIn("CHAIN_ID=11155111", sepolia)
+        self.assertIn('--features "$LAMBDA_FEATURES" --bin usd8-tee-job-lambda', script)
 
     def test_release_build_discards_unmanifested_measurements_sidecar(self) -> None:
         script = BUILD_RELEASE.read_text()

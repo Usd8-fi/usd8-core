@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, NoReturn, Optional
 
+RELEASE_NETWORKS = {("mainnet", 1), ("sepolia", 11155111)}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX96 = re.compile(r"^[0-9a-fA-F]{96}$")
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -872,8 +873,8 @@ def verify(
         fail("release must use pinned rustc 1.94.1")
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", str(toolchain.get("enclaveBaseImage", ""))):
         fail("enclave base image is not digest-pinned")
-    if manifest.get("network") != "sepolia" or manifest.get("chainId") != 11155111:
-        fail("release network must be Sepolia (chain ID 11155111)")
+    if (manifest.get("network"), manifest.get("chainId")) not in RELEASE_NETWORKS:
+        fail("release network must be mainnet (chain ID 1) or Sepolia (chain ID 11155111)")
     if not ADDRESS.fullmatch(str(manifest.get("registry", ""))) or int(manifest["registry"], 16) == 0:
         fail("registry is invalid")
     if not ADDRESS.fullmatch(str(manifest.get("signer", ""))) or int(manifest["signer"], 16) == 0:

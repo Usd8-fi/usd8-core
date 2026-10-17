@@ -6,7 +6,7 @@ set -euo pipefail
 }
 
 EXPECTED_SIGNER=${EXPECTED_SIGNER:?set EXPECTED_SIGNER}
-NETWORK=${NETWORK:?set NETWORK to sepolia}
+NETWORK=${NETWORK:?set NETWORK to mainnet or sepolia}
 REGISTRY=${REGISTRY:?set REGISTRY}
 OUT=${OUT_DIR:?set OUT_DIR to a new release-build directory}
 [[ "$EXPECTED_SIGNER" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
@@ -15,10 +15,22 @@ OUT=${OUT_DIR:?set OUT_DIR to a new release-build directory}
 [[ "$REGISTRY" =~ ^0x[0-9a-fA-F]{40}$ && "$REGISTRY" != 0x0000000000000000000000000000000000000000 ]] || {
   echo 'REGISTRY must be a nonzero 20-byte 0x hex address' >&2; exit 2;
 }
-[[ "$NETWORK" == sepolia ]] || { echo 'NETWORK must be sepolia' >&2; exit 2; }
-ROOT_FEATURES=(--features sepolia)
-JOB_FEATURES=worker,parent,sepolia
-CHAIN_ID=11155111
+# The network is a compile-time feature: one release serves exactly one chain.
+case "$NETWORK" in
+  mainnet)
+    ROOT_FEATURES=()
+    JOB_FEATURES=worker,parent
+    LAMBDA_FEATURES=lambda,janitor
+    CHAIN_ID=1
+    ;;
+  sepolia)
+    ROOT_FEATURES=(--features sepolia)
+    JOB_FEATURES=worker,parent,sepolia
+    LAMBDA_FEATURES=lambda,janitor,sepolia
+    CHAIN_ID=11155111
+    ;;
+  *) echo 'NETWORK must be mainnet or sepolia' >&2; exit 2 ;;
+esac
 WORKTREE_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 REPO_ROOT=$(git -C "$WORKTREE_ROOT" rev-parse --show-toplevel)
 export RUSTUP_TOOLCHAIN=1.94.1
@@ -72,12 +84,12 @@ BASE_IMAGE=$(sed -n 's/^FROM //p' "$ROOT/job-api/deploy/Dockerfile.enclave")
 
 cd "$ROOT"
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release --locked \
-  "${ROOT_FEATURES[@]}" --bin usd8-settlement
+  ${ROOT_FEATURES[@]+"${ROOT_FEATURES[@]}"} --bin usd8-settlement
 cd job-api
 USD8_REGISTRY="$REGISTRY" CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release --locked \
   --features "$JOB_FEATURES" --bin usd8-tee-enclave --bin usd8-tee-parent
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release --locked \
-  --features lambda,janitor,sepolia --bin usd8-tee-job-lambda --bin usd8-tee-janitor
+  --features "$LAMBDA_FEATURES" --bin usd8-tee-job-lambda --bin usd8-tee-janitor
 
 install -m 0555 target/release/usd8-tee-enclave "$CONTEXT/usd8-tee-enclave"
 install -m 0444 deploy/Dockerfile.enclave "$CONTEXT/Dockerfile"

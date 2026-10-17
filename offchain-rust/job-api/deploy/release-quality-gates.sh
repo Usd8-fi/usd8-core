@@ -11,6 +11,9 @@ cd "$ROOT"
 cargo +1.94.1 fmt --check
 cargo +1.94.1 test --locked --all-targets --features nitro,sepolia
 cargo +1.94.1 clippy --locked --all-targets --features nitro,sepolia -- -D warnings
+# Mainnet is the feature-less default build.
+cargo +1.94.1 test --locked --all-targets --features nitro
+cargo +1.94.1 clippy --locked --all-targets --features nitro -- -D warnings
 cd "$ROOT/job-api"
 cargo +1.94.1 fmt --check
 cargo +1.94.1 test --locked --all-targets --all-features
