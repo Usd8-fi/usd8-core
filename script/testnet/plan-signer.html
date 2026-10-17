@@ -1,0 +1,389 @@
+<!doctype html>
+<!--
+  USD8 plan signer — signs a build_trezor_plan.py plan through a browser wallet
+  (MetaMask / Rabby with the Trezor connected), one transaction at a time.
+
+  Wallet extensions do not inject into file:// pages, so serve it locally from usd8core/:
+    python3 -m http.server 8000
+  then open:
+    http://localhost:8000/script/testnet/plan-signer.html?plan=/deployments/sepolia/01-system-create3-plan.json
+
+  Safety checks: calldata SHA-256 per tx, wallet chain == plan chain, account == plan sender,
+  account nonce == next planned nonce, no pending tx, stop on
+  revert or rejection, code check at every CREATE3 address. Resumes from the on-chain nonce.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USD8 Plan Signer</title>
+<style>
+  :root {
+    --bg: #f6f6f3; --panel: #ffffff; --ink: #1b1d1f; --muted: #6b7075; --line: #e2e2dc;
+    --accent: #1f5eff; --ok: #12805c; --warn: #b26b00; --bad: #c2312b; --code: #f0f0eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111315; --panel: #181b1e; --ink: #e8e9ea; --muted: #9298a0; --line: #2a2e33;
+      --accent: #6f95ff; --ok: #3fbf8f; --warn: #e0a23a; --bad: #ff6b63; --code: #20242a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  code, .mono { font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  button { font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    padding: 8px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input[type=text] { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); min-width: 320px; }
+  select { font: inherit; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .pill { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); white-space: nowrap; }
+  .s-done { color: var(--ok); border-color: var(--ok); }
+  .s-run { color: var(--accent); border-color: var(--accent); }
+  .s-fail { color: var(--bad); border-color: var(--bad); }
+  .s-wait { color: var(--muted); }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  #log { background: var(--code); border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+  .banner { border-left: 3px solid var(--warn); padding: 8px 12px; background: var(--code); border-radius: 6px; margin: 8px 0; }
+  .banner.bad { border-color: var(--bad); }
+  .scroll { overflow-x: auto; }
+  @media (max-width: 640px) { .kv { grid-template-columns: 1fr; } input[type=text] { min-width: 0; width: 100%; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>USD8 plan signer</h1>
+  <p class="sub">Signs a reviewed <code>build_trezor_plan.py</code> plan through your browser wallet, one transaction at a time, in nonce order.</p>
+
+  <section class="panel">
+    <div class="row">
+      <label>Plan file <input type="file" id="file" accept=".json,application/json"></label>
+      <span class="sub" style="margin:0">or</span>
+      <input type="text" id="planPath" placeholder="deployments/sepolia/01-system-create3-plan.json">
+      <button id="loadPath">Load</button>
+    </div>
+    <div id="planInfo" style="margin-top:12px"></div>
+  </section>
+
+  <section class="panel">
+    <div class="row">
+      <select id="walletSel"><option value="">Detecting wallets…</option></select>
+      <button id="connect">Connect wallet</button>
+      <span id="walletInfo" class="mono"></span>
+    </div>
+    <div id="checks" style="margin-top:10px"></div>
+  </section>
+
+  <section class="panel">
+    <div class="row" style="margin-bottom:10px">
+      <button class="primary" id="run" disabled>Sign remaining transactions</button>
+      <button id="stop" disabled>Pause after current</button>
+      <button id="verify" disabled>Verify on-chain</button>
+      <span id="progress" class="sub" style="margin:0"></span>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>#</th><th>Nonce</th><th>What</th><th>To</th><th>Status</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" class="sub">Load a plan to begin.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section class="panel">
+    <strong>Log</strong>
+    <div id="log" class="mono" style="margin-top:8px"></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const SEL = { timelock: "0xd33219b4", owner: "0x8da5cb5b", isAdmin: "0x24d7806c", getMinDelay: "0xf27a0c92" };
+  const CREATEX = "0xba5ed099633d3b313e4d5f7bdc1305d3c28ba5ed";
+  const CHAIN_NAMES = { 1: "Ethereum mainnet", 11155111: "Sepolia" };
+
+  let plan = null, planOk = false;
+  let provider = null, account = null, chainOk = false;
+  const providers = new Map();
+  let running = false, stopRequested = false;
+  const status = []; // per tx: wait | done | run | fail
+  const hashes = [];
+
+  const log = (msg, cls) => {
+    const line = document.createElement("div");
+    if (cls) line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    $("log").appendChild(line); $("log").scrollTop = $("log").scrollHeight;
+  };
+  const lc = (a) => (a || "").toLowerCase();
+  const short = (a) => a ? a.slice(0, 8) + "…" + a.slice(-6) : "<create>";
+  const toHex = (n) => "0x" + BigInt(n).toString(16);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  async function sha256Hex(hex) {
+    const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+    const bytes = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // ── Plan loading ───────────────────────────────────────────────
+  async function acceptPlan(obj, source) {
+    plan = null; planOk = false;
+    const problems = [];
+    for (const k of ["name", "chainId", "sender", "expectedStartNonce", "transactions"]) if (!(k in obj)) problems.push(`missing ${k}`);
+    if (!problems.length) {
+      obj.transactions.forEach((tx, i) => {
+        if (tx.index !== i) problems.push(`transaction ${i} has index ${tx.index}`);
+        if (tx.nonce !== obj.expectedStartNonce + i) problems.push(`transaction ${i} nonce ${tx.nonce} is not contiguous`);
+      });
+      for (const tx of obj.transactions) {
+        const h = await sha256Hex(tx.data);
+        if (h !== tx.dataSha256) problems.push(`transaction ${tx.index} calldata SHA-256 mismatch`);
+      }
+    }
+    if (problems.length) {
+      $("planInfo").innerHTML = `<div class="banner bad">Plan rejected (${esc(source)}):<br>${problems.map(esc).join("<br>")}</div>`;
+      log(`plan rejected: ${problems.join("; ")}`, "bad");
+      render(); return;
+    }
+    plan = obj; planOk = true;
+    status.length = 0; hashes.length = 0;
+    plan.transactions.forEach(() => { status.push("wait"); hashes.push(null); });
+    const outs = Object.entries(plan.expectedOutputs || {});
+    $("planInfo").innerHTML = `
+      <div class="kv">
+        <div>Plan</div><div><strong>${esc(plan.name)}</strong></div>
+        <div>Network</div><div>${esc(CHAIN_NAMES[plan.chainId] || plan.network)} (chain ${plan.chainId})</div>
+        <div>Sender</div><div class="mono">${esc(plan.sender)}</div>
+        <div>Nonces</div><div>${plan.expectedStartNonce} → ${plan.expectedStartNonce + plan.transactions.length - 1} (${plan.transactions.length} transactions)</div>
+        <div>Calldata hashes</div><div class="ok">all ${plan.transactions.length} match</div>
+        ${outs.length ? `<div>Expected contracts</div><div class="mono">${outs.map(([l, a]) => `${esc(l)}: ${esc(a)}`).join("<br>")}</div>` : ""}
+      </div>`;
+    log(`loaded plan "${plan.name}" from ${source}`);
+    render(); await refreshChecks();
+  }
+
+  $("file").addEventListener("change", async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { await acceptPlan(JSON.parse(await f.text()), f.name); } catch (err) { log(`could not read plan: ${err.message}`, "bad"); }
+  });
+  async function loadFromPath(path) {
+    try {
+      const res = await fetch(path, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await acceptPlan(await res.json(), path);
+    } catch (err) { log(`could not fetch ${path}: ${err.message}`, "bad"); }
+  }
+  $("loadPath").addEventListener("click", () => { const p = $("planPath").value.trim(); if (p) loadFromPath(p); });
+
+  // ── Wallet discovery (EIP-6963 with window.ethereum fallback) ──
+  window.addEventListener("eip6963:announceProvider", (e) => {
+    const { info, provider: p } = e.detail;
+    providers.set(info.uuid, { name: info.name, provider: p });
+    fillWallets();
+  });
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+  setTimeout(() => {
+    if (!providers.size && window.ethereum) { providers.set("legacy", { name: "Injected wallet", provider: window.ethereum }); }
+    fillWallets();
+  }, 600);
+  function fillWallets() {
+    const sel = $("walletSel");
+    sel.innerHTML = providers.size
+      ? [...providers].map(([id, w]) => `<option value="${esc(id)}">${esc(w.name)}</option>`).join("")
+      : `<option value="">No wallet extension found</option>`;
+  }
+
+  $("connect").addEventListener("click", async () => {
+    const entry = providers.get($("walletSel").value);
+    if (!entry) { log("no wallet selected — install/enable MetaMask or Rabby and open this page over http://localhost", "bad"); return; }
+    provider = entry.provider;
+    try {
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
+      account = lc(accounts[0]);
+      provider.on?.("accountsChanged", (a) => { account = lc(a[0]); log(`wallet account changed to ${account}`, "warn"); refreshChecks(); });
+      provider.on?.("chainChanged", () => { log("wallet network changed", "warn"); refreshChecks(); });
+      log(`connected ${entry.name}: ${account}`);
+      await refreshChecks();
+    } catch (err) { log(`connect failed: ${err.message}`, "bad"); }
+  });
+
+  const rpc = (method, params = []) => provider.request({ method, params });
+
+  async function refreshChecks() {
+    const box = $("checks"); const items = [];
+    chainOk = false;
+    if (!provider || !account) { box.innerHTML = ""; render(); return; }
+    const chainId = parseInt(await rpc("eth_chainId"), 16);
+    $("walletInfo").textContent = `${account} · chain ${chainId}`;
+    if (plan) {
+      if (chainId !== plan.chainId) {
+        items.push(`<div class="banner bad">Wallet is on chain ${chainId}, plan is for ${plan.chainId}. <button id="switchNet">Switch network</button></div>`);
+      } else chainOk = true;
+      if (account !== lc(plan.sender)) {
+        items.push(`<div class="banner bad">Connected account ${esc(account)} is not the plan sender ${esc(plan.sender)}. Select the Trezor account in your wallet.</div>`);
+      }
+      if (chainOk && account === lc(plan.sender)) {
+        const cx = await rpc("eth_getCode", [CREATEX, "latest"]);
+        if (!cx || cx === "0x") items.push(`<div class="banner bad">CreateX is not deployed on this chain.</div>`);
+        const latest = parseInt(await rpc("eth_getTransactionCount", [account, "latest"]), 16);
+        const pending = parseInt(await rpc("eth_getTransactionCount", [account, "pending"]), 16);
+        const start = plan.expectedStartNonce, end = start + plan.transactions.length;
+        plan.transactions.forEach((tx, i) => { if (status[i] !== "run") status[i] = tx.nonce < latest ? "done" : (status[i] === "fail" ? "fail" : "wait"); });
+        if (latest < start) items.push(`<div class="banner bad">Account nonce is ${latest} but the plan starts at ${start}. Something is missing before this plan — do not sign.</div>`);
+        else if (latest > end) items.push(`<div class="banner bad">Account nonce ${latest} is past the plan end (${end}). This plan was already used or other transactions were sent.</div>`);
+        else if (latest === end) items.push(`<div class="banner ok" style="border-color:var(--ok)">All ${plan.transactions.length} transactions are on-chain. Run "Verify on-chain".</div>`);
+        else if (latest > start) items.push(`<div class="banner">Resuming: ${latest - start} of ${plan.transactions.length} already on-chain (nonce ${latest}).</div>`);
+        if (pending !== latest) items.push(`<div class="banner">A transaction is pending (pending nonce ${pending}, mined ${latest}). Wait for it to confirm before continuing.</div>`);
+        const bal = BigInt(await rpc("eth_getBalance", [account, "latest"]));
+        items.push(`<div class="sub" style="margin:6px 0 0">Balance: ${(Number(bal) / 1e18).toFixed(5)} ETH · nonce ${latest}</div>`);
+      }
+    }
+    box.innerHTML = items.join("");
+    $("switchNet")?.addEventListener("click", async () => {
+      try { await rpc("wallet_switchEthereumChain", [{ chainId: toHex(plan.chainId) }]); } catch (err) { log(`switch failed: ${err.message}`, "bad"); }
+    });
+    render();
+  }
+
+  // ── Rendering ──────────────────────────────────────────────────
+  function render() {
+    const tbody = $("rows");
+    if (!plan) { tbody.innerHTML = `<tr><td colspan="5" class="sub">Load a plan to begin.</td></tr>`; }
+    else {
+      tbody.innerHTML = plan.transactions.map((tx, i) => {
+        const what = tx.contractName || tx.function || tx.transactionType;
+        const s = status[i];
+        const label = { wait: "pending", done: "done", run: "signing…", fail: "failed" }[s];
+        const link = hashes[i] ? `<br><span class="mono sub">${esc(hashes[i])}</span>` : "";
+        const created = tx.expectedContractAddress ? `<br><span class="mono sub">→ ${esc(tx.expectedContractAddress)}</span>` : "";
+        return `<tr><td>${i + 1}</td><td>${tx.nonce}</td><td><span class="mono">${esc(what)}</span>${created}</td>
+          <td class="mono" title="${esc(tx.to || "")}">${esc(short(tx.to))}</td>
+          <td><span class="pill s-${s}">${label}</span>${link}</td></tr>`;
+      }).join("");
+      const done = status.filter((s) => s === "done").length;
+      $("progress").textContent = `${done} / ${plan.transactions.length} done`;
+    }
+    const ready = planOk && provider && account && plan && account === lc(plan.sender) && chainOk;
+    $("run").disabled = !ready || running || status.every((s) => s === "done");
+    $("stop").disabled = !running;
+    $("verify").disabled = !ready || running;
+  }
+
+  // ── Signing loop ───────────────────────────────────────────────
+  async function waitForReceipt(hash) {
+    for (;;) {
+      const r = await rpc("eth_getTransactionReceipt", [hash]);
+      if (r) return r;
+      await sleep(3000);
+    }
+  }
+
+  $("stop").addEventListener("click", () => { stopRequested = true; log("will pause after the current transaction", "warn"); });
+
+  $("run").addEventListener("click", async () => {
+    if (!plan) return;
+    running = true; stopRequested = false; render();
+    try {
+      for (let i = 0; i < plan.transactions.length; i++) {
+        if (status[i] === "done") continue;
+        if (stopRequested) { log("paused"); break; }
+        const tx = plan.transactions[i];
+
+        const latest = parseInt(await rpc("eth_getTransactionCount", [account, "latest"]), 16);
+        const pending = parseInt(await rpc("eth_getTransactionCount", [account, "pending"]), 16);
+        if (pending !== latest) throw new Error(`a transaction is already pending (pending ${pending}, mined ${latest}); wait and press again`);
+        if (latest !== tx.nonce) throw new Error(`account nonce is ${latest}, plan expects ${tx.nonce} for step ${i + 1}`);
+        if (lc((await rpc("eth_requestAccounts"))[0]) !== lc(plan.sender)) throw new Error("wallet account is no longer the plan sender");
+        if (parseInt(await rpc("eth_chainId"), 16) !== plan.chainId) throw new Error("wallet network changed");
+
+        const req = { from: plan.sender, data: tx.data, value: tx.value || "0x0" };
+        if (tx.to) req.to = tx.to;
+        const estimate = BigInt(await rpc("eth_estimateGas", [req]));
+        req.gas = toHex((estimate * 125n) / 100n);
+
+        status[i] = "run"; render();
+        const what = tx.contractName || tx.function || tx.transactionType;
+        log(`step ${i + 1}/${plan.transactions.length} nonce ${tx.nonce}: ${what} — confirm on the wallet and Trezor (gas ${estimate} +25%)`);
+        const hash = await rpc("eth_sendTransaction", [req]);
+        hashes[i] = hash; render();
+        log(`sent ${hash}, waiting for receipt…`);
+        const receipt = await waitForReceipt(hash);
+        if (receipt.status !== "0x1") { status[i] = "fail"; render(); throw new Error(`step ${i + 1} reverted (${hash})`); }
+
+        if (tx.expectedContractAddress) {
+          const code = await rpc("eth_getCode", [tx.expectedContractAddress, "latest"]);
+          if (!code || code === "0x") { status[i] = "fail"; render(); throw new Error(`no code at expected ${tx.expectedContractAddress} after step ${i + 1}`); }
+        }
+        status[i] = "done"; render();
+        log(`step ${i + 1} confirmed in block ${parseInt(receipt.blockNumber, 16)}`, "ok");
+      }
+      if (status.every((s) => s === "done")) { log(`plan "${plan.name}" complete`, "ok"); await verify(); }
+    } catch (err) {
+      const msg = err?.code === 4001 ? "rejected in wallet — nothing sent for this step" : (err?.message || String(err));
+      plan.transactions.forEach((_, i) => { if (status[i] === "run") status[i] = "wait"; });
+      log(`stopped: ${msg}`, "bad");
+    } finally {
+      running = false; await refreshChecks();
+    }
+  });
+
+  // ── Verification ───────────────────────────────────────────────
+  const word = (r) => "0x" + (r || "0x").slice(-40);
+  async function verify() {
+    if (!plan) return;
+    log("verifying on-chain state…");
+    let ok = true;
+    for (const [label, addr] of Object.entries(plan.expectedOutputs || {})) {
+      const code = await rpc("eth_getCode", [addr, "latest"]);
+      const has = code && code !== "0x";
+      ok &&= has;
+      log(`${has ? "✓" : "✗"} ${label} ${addr}`, has ? "ok" : "bad");
+    }
+    const outs = plan.expectedOutputs || {};
+    const callTarget = (fn) => plan.transactions.find((t) => t.function && t.function.startsWith(fn))?.to;
+    const registry = outs["usd8.v1.Registry.proxy"] || callTarget("setTimelock(");
+    const beacon = outs["usd8.v1.SingleAssetCoverPool.beacon"] || callTarget("transferOwnership(");
+    const timelock = outs["usd8.v1.TimelockController"];
+    if (registry) {
+      const tl = word(await rpc("eth_call", [{ to: registry, data: SEL.timelock }, "latest"]));
+      const adm = await rpc("eth_call", [{ to: registry, data: SEL.isAdmin + lc(plan.sender).slice(2).padStart(64, "0") }, "latest"]);
+      const tlNote = lc(tl) === lc(plan.sender) ? "(deployer — interim, no timelock yet)"
+        : timelock && lc(tl) === lc(timelock) ? "(handed off to timelock)" : "";
+      if (timelock && lc(tl) !== lc(timelock)) ok = false;
+      log(`Registry.timelock = ${tl} ${tlNote}`, timelock ? (lc(tl) === lc(timelock) ? "ok" : "bad") : undefined);
+      log(`Registry.isAdmin(sender) = ${BigInt(adm) === 1n}`);
+    }
+    if (beacon) {
+      const own = word(await rpc("eth_call", [{ to: beacon, data: SEL.owner }, "latest"]));
+      if (timelock && lc(own) !== lc(timelock)) ok = false;
+      log(`Pool beacon owner = ${own}`, timelock ? (lc(own) === lc(timelock) ? "ok" : "bad") : undefined);
+    }
+    if (timelock) {
+      const delay = BigInt(await rpc("eth_call", [{ to: timelock, data: SEL.getMinDelay }, "latest"]));
+      if (delay !== 86400n) ok = false;
+      log(`Timelock minDelay = ${delay} s`, delay === 86400n ? "ok" : "bad");
+    }
+    log(ok ? "verification passed" : "verification FAILED", ok ? "ok" : "bad");
+  }
+  $("verify").addEventListener("click", () => verify().catch((e) => log(`verify failed: ${e.message}`, "bad")));
+
+  // Auto-load ?plan=path
+  const q = new URLSearchParams(location.search).get("plan");
+  if (q) { $("planPath").value = q; loadFromPath(q); }
+  if (location.protocol === "file:") log("opened as file:// — most wallet extensions do not inject here. Serve over http://localhost (see header of this file).", "warn");
+})();
+</script>
+</body>
+</html>

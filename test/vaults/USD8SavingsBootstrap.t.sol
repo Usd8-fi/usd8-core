@@ -52,7 +52,7 @@ contract USD8SavingsBootstrapTest is Test {
     }
 
     function _bootstrap() internal returns (USD8SavingsBootstrap.Deployment memory d) {
-        USD8SavingsBootstrap bootstrap = new USD8SavingsBootstrap();
+        USD8SavingsBootstrap bootstrap = new USD8SavingsBootstrap(address(this));
         usdc.mint(address(bootstrap), SEED_USDC);
         d = bootstrap.run(
             USD8SavingsBootstrap.Config({

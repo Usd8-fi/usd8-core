@@ -220,7 +220,7 @@ contract DeploySepoliaMockUsdcSystemScript is Script {
         );
         s.registry.setTreasury(address(s.treasury));
 
-        USD8SavingsBootstrap bootstrap = new USD8SavingsBootstrap();
+        USD8SavingsBootstrap bootstrap = new USD8SavingsBootstrap(_bootstrapOwner());
         s.savingsBootstrap = address(bootstrap);
         IERC20(s.usdc).safeTransfer(s.savingsBootstrap, SEED_USDC);
         USD8SavingsBootstrap.Deployment memory savings = bootstrap.run(
@@ -325,6 +325,12 @@ contract DeploySepoliaMockUsdcSystemScript is Script {
         s.registry.setTimelock(r.timelock);
         require(s.registry.timelock() == r.timelock, "timelock handoff failed");
         require(address(s.treasury.USDC()) == s.usdc, "mock USDC binding failed");
+    }
+
+    /// @dev Account that will call {USD8SavingsBootstrap.run}: the broadcaster when
+    ///      broadcasting. Test harnesses that call {_deploy} directly override this.
+    function _bootstrapOwner() internal view virtual returns (address) {
+        return msg.sender;
     }
 
     function _log(System memory s, Reused memory r) private pure {

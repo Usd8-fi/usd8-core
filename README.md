@@ -142,13 +142,7 @@ An incident moves through four phases. Each phase window is 3 days by default. T
    └─────────────────────┘
 ```
 
-| | During beta | After beta (no correction phase) |
-|---|---|---|
-| Result submitted | between day 3 and day 6 | between day 3 and day 6 |
-| Payouts can be accepted | 3 days after the result, for 3 days | immediately after the result, for 3 days |
-| Latest end of the incident (no corrections) | **day 12** | **day 9** |
 
-- Each corrected result restarts the 3-day correction window, which pushes everything after it back.
 - Declining has no deadline, so you can decline and recover your items even after the accept window closes.
 - If no result is submitted by day 6, the incident fails and claimants can recover their tokens, boosters and bond.
 - Cover pools stay frozen while the incident is active. That ends as soon as every claim is resolved, or at the latest end above, whichever comes first.
@@ -384,26 +378,20 @@ Deployment scripts select mainnet (`1`) or Sepolia (`11155111`) from `block.chai
 ```bash
 source .env
 
-# Set ONLY after the configured mainnet Aave strategy and vault have been
-# re-reviewed (or replaced). Do not set this by default.
-# export AAVE_STRATEGY_REVIEWED=true
-
-# 1. Deploy the timelock
-forge script script/01_DeployTimelock.s.sol:DeployTimelockScript \
+# 1. Deploy and wire the protocol (no timelock yet; the deployer keeps interim governance)
+forge script script/01_DeployUSD8System.s.sol:DeployUSD8SystemScript \
   --rpc-url "$RPC_URL" --broadcast --slow --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 
-# Copy the address printed by step 1
-export TIMELOCK_ADDRESS=0x...
+# ... initial admin setup from the deployer ...
 
-# 2. Deploy the protocol using the verified timelock
-forge script script/02_DeployUSD8System.s.sol:DeployUSD8SystemScript \
-  --sig "run(address)" "$TIMELOCK_ADDRESS" \
+# 2. Deploy the timelock and hand off governance (same deployer)
+forge script script/02_DeployTimelockAndHandOff.s.sol:DeployTimelockAndHandOffScript \
   --rpc-url "$RPC_URL" --broadcast --slow --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 ```
 
-Step 2 deploys and wires the complete system, seeds the canonical sUSD8 vault with 10 USDC, seeds the cover pool with `0.01 ether` (`10^16` base units) of the configured cover asset, and hands control to the timelock. The broadcaster must hold at least 10 USDC, the cover-pool seed amount of the configured cover asset, and enough native ETH for gas. See [`script/README.md`](script/README.md) for configuration, safety checks, verification, and recovery.
+Step 1 deploys and wires the system with no Treasury strategies and no sUSD8, insures USD8 only, and seeds the single wstETH cover pool with `0.001 ether` (`10^15` base units) of the configured cover asset. The broadcaster needs that seed amount and enough native ETH for gas. Until step 2 runs, the deployer can upgrade and reconfigure everything without delay. Step 2 installs the 24-hour timelock and hands Registry and pool-beacon authority to it. See [`script/README.md`](script/README.md) for configuration, safety checks, verification, and recovery.
 
 <br><br>
 

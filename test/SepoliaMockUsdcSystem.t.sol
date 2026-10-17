@@ -20,6 +20,10 @@ import {SepoliaTestToken, SepoliaTestVault, SepoliaTestOracle} from "../script/t
 import {DeploySepoliaMockUsdcSystemScript} from "../script/testnet/11_DeploySepoliaMockUsdcSystem.s.sol";
 
 contract DeploySepoliaMockUsdcSystemHarness is DeploySepoliaMockUsdcSystemScript {
+    function _bootstrapOwner() internal view override returns (address) {
+        return address(this);
+    }
+
     function deployForTest(address admin, Reused memory reused) external returns (System memory) {
         return _deploy(admin, reused);
     }

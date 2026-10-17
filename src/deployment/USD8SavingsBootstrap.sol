@@ -49,8 +49,12 @@ contract USD8SavingsBootstrap {
     error InvalidFactory();
     error ConfigurationCallFailed(bytes data);
 
-    constructor() {
-        owner = msg.sender;
+    /// @param owner_ Account allowed to call {run}. Passed explicitly (rather than taken
+    ///        from msg.sender) so the bootstrap can be deployed through a CREATE3 factory,
+    ///        where msg.sender during construction is the factory's proxy.
+    constructor(address owner_) {
+        if (owner_ == address(0)) revert InvalidAddress();
+        owner = owner_;
     }
 
     function run(Config calldata config) external returns (Deployment memory d) {
