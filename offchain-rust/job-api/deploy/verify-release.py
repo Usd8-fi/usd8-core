@@ -185,13 +185,18 @@ def verify_distinct_roles(aws: dict) -> None:
         fail("instance, API and janitor roles must be distinct")
 
 
+# Exact SSM SecureString name (no wildcards); the value itself never enters a release.
+PRECHECK_DRPC_KEY_PARAMETER = re.compile(r"/usd8/[a-z0-9-]+(?:/[a-z0-9-]+){1,4}")
+
+
 def verify_job_environment_schema(environment: Any) -> None:
     required = {
         "USD8_REGISTRY", "USD8_DEFI_INSURANCE", "USD8_JOB_BUCKET", "USD8_TEE_AMI_ID",
         "USD8_TEE_INSTANCE_TYPE", "USD8_TEE_INSTANCE_PROFILE", "USD8_TEE_SUBNET_ID",
         "USD8_TEE_SECURITY_GROUP_ID", "USD8_MAX_ACTIVE_WORKERS", "USD8_MAX_STARTS_PER_HOUR",
     }
-    optional = {"USD8_TEE_MAX_AGE_SECONDS", "USD8_EC2_RECONCILIATION_BOUND_SECONDS"}
+    optional = {"USD8_TEE_MAX_AGE_SECONDS", "USD8_EC2_RECONCILIATION_BOUND_SECONDS",
+                "USD8_PRECHECK_DRPC_KEY_PARAMETER"}
     if (not isinstance(environment, dict) or not required <= set(environment)
             or set(environment) - required - optional
             or any(not isinstance(value, str) for value in environment.values())):
@@ -209,6 +214,9 @@ def verify_job_environment_schema(environment: Any) -> None:
         fail("Lambda EC2 reconciliation bound must be a positive safe integer")
     if "USD8_TEE_MAX_AGE_SECONDS" in environment and not re.fullmatch(r"[1-9][0-9]*", environment["USD8_TEE_MAX_AGE_SECONDS"]):
         fail("Lambda job age environment is invalid")
+    parameter = environment.get("USD8_PRECHECK_DRPC_KEY_PARAMETER")
+    if parameter is not None and not PRECHECK_DRPC_KEY_PARAMETER.fullmatch(parameter):
+        fail("Lambda precheck dRPC key parameter name is invalid")
 
 
 def verify_environment(
@@ -379,6 +387,7 @@ def render_launch_policy(manifest: dict[str, Any], artifact: str) -> dict[str, A
                  "bucketPolicy": "bucket-policy.json"}
     policy = load_json(pathlib.Path(__file__).resolve().parent / filenames[artifact])
     bucket = "arn:aws:s3:::" + env["USD8_JOB_BUCKET"]
+    parameter = env.get("USD8_PRECHECK_DRPC_KEY_PARAMETER")
     ec2 = f"arn:aws:ec2:{region}:{account}:"
     for statement in policy["Statement"]:
         sid = statement["Sid"]
@@ -407,6 +416,13 @@ def render_launch_policy(manifest: dict[str, Any], artifact: str) -> dict[str, A
         if sid in {"WriteFunctionLogs", "WriteJanitorLogs"}:
             function = aws["lambdaFunction" if sid == "WriteFunctionLogs" else "janitorFunction"]
             statement["Resource"] = f"arn:aws:logs:{region}:{account}:log-group:/aws/lambda/{function}:*"
+        if sid == "ReadPrecheckDrpcKey" and parameter is not None:
+            if not PRECHECK_DRPC_KEY_PARAMETER.fullmatch(parameter):
+                fail("launch resource precheck dRPC key parameter is malformed or wildcarded")
+            statement["Resource"] = f"arn:aws:ssm:{region}:{account}:parameter{parameter}"
+    # Read access exists only when the release configures the exact parameter.
+    if parameter is None:
+        policy["Statement"] = [s for s in policy["Statement"] if s["Sid"] != "ReadPrecheckDrpcKey"]
     return policy
 
 

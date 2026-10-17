@@ -89,6 +89,12 @@
       "Resource": "*"
     },
     {
+      "Sid": "ReadPrecheckDrpcKey",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:eu-central-1:919437049909:parameter/usd8/mainnet/job-api/drpc-key"
+    },
+    {
       "Sid": "PassWorkerRoleOnly",
       "Effect": "Allow",
       "Action": "iam:PassRole",

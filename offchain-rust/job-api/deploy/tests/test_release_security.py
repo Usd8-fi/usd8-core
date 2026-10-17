@@ -51,6 +51,8 @@ class ReleaseSecurityTest(unittest.TestCase):
                                ("kmsPolicy", "kms-key-policy.json"), ("instancePolicy", "instance-role-policy.json"),
                                ("bucketPolicy", "bucket-policy.json"), ("bucketCors", "bucket-cors.json")):
             policy = json.loads((DEPLOY / filename).read_text())
+            if kind == "lambdaPolicy" and "USD8_PRECHECK_DRPC_KEY_PARAMETER" not in m["aws"]["lambdaEnvironment"]:
+                policy["Statement"] = [s for s in policy.get("Statement", []) if s.get("Sid") != "ReadPrecheckDrpcKey"]
             for s in policy.get("Statement", []):
                 if s.get("Sid") in {"AttestedDecryptOnly", "AttestedEnclaveDecryptOnly"}:
                     s["Condition"]["StringEqualsIgnoreCase"] = {

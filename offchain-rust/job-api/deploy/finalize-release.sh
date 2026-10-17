@@ -211,6 +211,13 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 path = root / "release-manifest.json"
 manifest = json.loads(path.read_text())
+# Optional: name (never value) of the SSM SecureString holding the precheck dRPC key.
+# Set before rendering so the Lambda policy grants read access to exactly this name.
+parameter = os.environ.get("USD8_PRECHECK_DRPC_KEY_PARAMETER", "")
+if parameter:
+    if not module.PRECHECK_DRPC_KEY_PARAMETER.fullmatch(parameter):
+        raise SystemExit("invalid USD8_PRECHECK_DRPC_KEY_PARAMETER")
+    manifest["aws"]["lambdaEnvironment"]["USD8_PRECHECK_DRPC_KEY_PARAMETER"] = parameter
 for artifact, filename in (("lambdaPolicy", "lambda-role-policy.json"),
                            ("janitorPolicy", "janitor-role-policy.json"),
                            ("bucketPolicy", "bucket-policy.json")):

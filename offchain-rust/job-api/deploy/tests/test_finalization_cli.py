@@ -22,7 +22,11 @@ class FinalizationCliTest(unittest.TestCase):
     def test_finalizer_without_score_or_bound_explicit_cost_only_mode(self):
         self.run_finalizer(include_score=False, bound=None, active="0")
 
-    def run_finalizer(self, include_score, bound, active):
+    def test_finalizer_binds_precheck_drpc_key_parameter_name_and_exact_read_grant(self):
+        self.run_finalizer(include_score=False, bound=None, active="4",
+                           drpc_parameter="/usd8/mainnet/job-api/drpc-key")
+
+    def run_finalizer(self, include_score, bound, active, drpc_parameter=None):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             build = root / "built"
@@ -85,6 +89,16 @@ class FinalizationCliTest(unittest.TestCase):
                 for key in ("SCORE_PACKAGE", "SCORE_CONFIG_JSON", "SCORE_RUNTIME_POLICY_JSON"):
                     env.pop(key, None)
             out = root / "final"
+            for bad in ("/usd8/*", "usd8/mainnet/key", "/usd8/mainnet/KEY", "/other/mainnet/key"):
+                rejected = subprocess.run(["bash", str(DEPLOY / "finalize-release.sh"), str(build), str(out)],
+                    env={**env, "USD8_PRECHECK_DRPC_KEY_PARAMETER": bad}, capture_output=True, text=True)
+                with self.subTest(parameter=bad):
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(out.exists())
+            if os.path.exists(root / "aws-calls"):
+                os.remove(root / "aws-calls")
+            if drpc_parameter is not None:
+                env["USD8_PRECHECK_DRPC_KEY_PARAMETER"] = drpc_parameter
             for key in ("LAMBDA_TIMEOUT_SECONDS", "JANITOR_TIMEOUT_SECONDS"):
                 for value in (None, "0", "901", "1.5", "-1", "030"):
                     invalid = dict(env)
@@ -107,6 +121,14 @@ class FinalizationCliTest(unittest.TestCase):
                 self.assertEqual(final["aws"].get("janitorTimeoutSeconds"), 60)
                 self.assertEqual(final["aws"]["lambdaEnvironment"]["USD8_MAX_ACTIVE_WORKERS"], active)
                 self.assertEqual(final["aws"]["lambdaEnvironment"].get("USD8_EC2_RECONCILIATION_BOUND_SECONDS"), bound)
+                self.assertEqual(final["aws"]["lambdaEnvironment"].get("USD8_PRECHECK_DRPC_KEY_PARAMETER"), drpc_parameter)
+                grants = [st for st in json.loads((out / "lambda-role-policy.json").read_text())["Statement"]
+                          if st["Sid"] == "ReadPrecheckDrpcKey"]
+                if drpc_parameter is None:
+                    self.assertEqual(grants, [])
+                else:
+                    self.assertEqual(grants, [{"Sid": "ReadPrecheckDrpcKey", "Effect": "Allow", "Action": "ssm:GetParameter",
+                        "Resource": "arn:aws:ssm:eu-central-1:919437049909:parameter" + drpc_parameter}])
                 if include_score:
                     self.assertEqual(final["artifacts"]["scoreLambda"]["sha256"], V.sha256(root / "score.zip"))
                     self.assertEqual(final["scoreService"], score_descriptor())
