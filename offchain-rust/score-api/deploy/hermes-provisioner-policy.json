@@ -53,7 +53,7 @@
         "dynamodb:UpdateTimeToLive",
         "dynamodb:TagResource"
       ],
-      "Resource": "arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints-sepolia"
+      "Resource": "arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints"
     },
     {
       "Sid": "ManageDedicatedScoreLogGroup",

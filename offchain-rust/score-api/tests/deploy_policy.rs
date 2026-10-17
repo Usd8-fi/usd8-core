@@ -58,7 +58,7 @@ fn has_exact_runtime_permissions(policy: &Value) -> bool {
             "Effect": "Allow",
             // Scan is read-only and backs the stored score list (GET /scores).
             "Action": ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:UpdateItem"],
-            "Resource": "arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints-sepolia"
+            "Resource": "arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints"
         })]
 }
 

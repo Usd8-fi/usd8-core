@@ -126,7 +126,7 @@ synchronized. Budget entries have a one-day cleanup TTL and are never reset earl
    let all old invocations finish. Old PutItem writers do not know about leases and must
    never overlap the new writer. No checkpoint migration/clear is needed.
 2. On `USD8ScoreLambdaRole`, grant `dynamodb:GetItem` and `dynamodb:UpdateItem` on only
-   `arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints-sepolia` using
+   `arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints` using
    `deploy/score-runtime-policy.json`. The final policy removes `PutItem`; no `DeleteItem`
    or `TransactWriteItems` is required. Table partition key remains string `pk`, TTL
    attribute `expiresAt`; existing log permissions are unchanged.
