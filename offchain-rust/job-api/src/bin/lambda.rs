@@ -635,6 +635,30 @@ impl InstanceLauncher for Ec2Launcher {
     }
 }
 
+/// Optional dRPC key for the precheck RPC, read once from an SSM SecureString.
+/// The value is never logged; read failures map to a fixed, key-free message.
+async fn precheck_drpc_key(sdk: &aws_types::SdkConfig) -> Result<Option<String>, Error> {
+    let Some(name) = env::var("USD8_PRECHECK_DRPC_KEY_PARAMETER")
+        .ok()
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(None);
+    };
+    let output = aws_sdk_ssm::Client::new(sdk)
+        .get_parameter()
+        .name(name)
+        .with_decryption(true)
+        .send()
+        .await
+        .map_err(|_| "failed to read USD8_PRECHECK_DRPC_KEY_PARAMETER")?;
+    let key = output
+        .parameter()
+        .and_then(|parameter| parameter.value())
+        .filter(|key| !key.is_empty())
+        .ok_or("USD8_PRECHECK_DRPC_KEY_PARAMETER is empty")?;
+    Ok(Some(key.to_owned()))
+}
+
 fn required(name: &str) -> Result<String, Error> {
     env::var(name)
         .ok()
@@ -900,6 +924,7 @@ async fn main() -> Result<(), Error> {
         .region(Region::new(region.clone()))
         .load()
         .await;
+    let precheck_drpc_key = precheck_drpc_key(&sdk).await?;
     let registry = required("USD8_REGISTRY")?;
     let defi_insurance = required("USD8_DEFI_INSURANCE")?;
     let store = Arc::new(S3Store {
@@ -909,7 +934,7 @@ async fn main() -> Result<(), Error> {
     let open_prechecker = Arc::new(OpenPrechecker {
         rpc: HttpRpc::new_with_retry_delay(
             &required("USD8_PRECHECK_RPC_URL")?,
-            None,
+            precheck_drpc_key.as_deref(),
             3_000,
             1,
             100,
@@ -929,7 +954,7 @@ async fn main() -> Result<(), Error> {
         usd8_tee_job_api::completion_verifier::RpcCompletionVerifier::new(
             HttpRpc::new_with_retry_delay(
                 &required("USD8_PRECHECK_RPC_URL")?,
-                None,
+                precheck_drpc_key.as_deref(),
                 3_000,
                 1,
                 100,
@@ -972,7 +997,7 @@ async fn main() -> Result<(), Error> {
                 ),
                 precheck_rpc: HttpRpc::new_with_retry_delay(
                     &required("USD8_PRECHECK_RPC_URL")?,
-                    None,
+                    precheck_drpc_key.as_deref(),
                     3_000,
                     1,
                     100,

@@ -145,7 +145,12 @@ impl<R: Rpc + ?Sized> AdvisorySource for Source<'_, R> {
             Err(IncidentOpenError::InsufficientPriceDrop { .. }) => Ok(Semantic::NoDrop),
             Err(IncidentOpenError::ActiveIncident) => Err(CheckError::Active),
             Err(IncidentOpenError::UnapprovedToken) => Err(CheckError::Unapproved),
-            _ => Err(CheckError::Unavailable),
+            Ok(_) => Err(CheckError::Unavailable),
+            Err(error) => {
+                // Provider error text is already redacted by the RPC layer.
+                eprintln!("incident-open price precheck unavailable: {error}");
+                Err(CheckError::Unavailable)
+            }
         }
     }
 }
