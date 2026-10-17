@@ -39,9 +39,9 @@ import {USD8DeploymentLabels} from "./lib/USD8DeploymentLabels.sol";
 ///         (insured tokens, pools, scored tokens, sUSD8...) can be done immediately. While in
 ///         this state the deployer can upgrade every proxy and the pool beacon WITHOUT DELAY:
 ///         do not open the system to users or describe it as timelocked until
-///         `02_DeployTimelockAndHandOff.s.sol` has run.
+///         governance has been handed off to the timelock deployed by `02_DeployTimelock.s.sol`.
 ///         The configured admin is granted Registry admin here; the deployer is only removed
-///         as admin in step 02, and only if it differs from the configured admin.
+///         as admin at the later hand-off, and only if it differs from the configured admin.
 ///         The Registry admin role is explicitly privileged during beta: it can operate
 ///         pauses, profit routing, strategy allocations, and incident/root controls. This is
 ///         an accepted trust assumption; migrate it to a monitored Safe before real user volume.
@@ -244,7 +244,7 @@ contract DeployUSD8SystemScript is DeploymentConfig, Create3Deployer, USD8Deploy
     function _deployAndWire(address deployer, Addresses memory addresses) internal returns (Deployed memory d) {
         // Central access + pause registry. Deployer is timelock AND initial admin
         // for setup and keeps that interim authority after this script; step 02
-        // (02_DeployTimelockAndHandOff) installs the real timelock. Every contract
+        // deploys the real timelock and a later hand-off installs it. Every contract
         // below keeps this as its fixed registry pointer.
         // Registry is UUPS-upgradeable (impl + ERC-1967 proxy), timelock-gated upgrades.
         // maxCoverPoolPayoutBps defaults to 50% in initialize.

@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {DeployUSD8SystemScript} from "../script/01_DeployUSD8System.s.sol";
-import {DeployTimelockAndHandOffScript} from "../script/02_DeployTimelockAndHandOff.s.sol";
+import {DeployTimelockScript} from "../script/02_DeployTimelock.s.sol";
 import {TimelockHandOff} from "../script/lib/TimelockHandOff.sol";
 import {DeploymentConfig} from "../script/config/DeploymentConfig.sol";
 import {Registry} from "../src/Registry.sol";
@@ -23,7 +23,7 @@ import {ERC4626Mock} from "@openzeppelin/contracts/mocks/token/ERC4626Mock.sol";
 import {VaultV2Factory} from "vault-v2/src/VaultV2Factory.sol";
 import {IVaultV2} from "vault-v2/src/interfaces/IVaultV2.sol";
 
-contract DeployTimelockScriptHarness is DeployTimelockAndHandOffScript {
+contract DeployTimelockScriptHarness is DeployTimelockScript {
     function deployForTest(address proposer) external returns (TimelockController) {
         return _deployTimelock(address(this), proposer);
     }
@@ -387,7 +387,7 @@ contract DeploymentScriptsTest is Test {
 
     function test_SystemDeploymentRunTakesNoTimelockParameter() public pure {
         assertEq(DeployUSD8SystemScript.run.selector, bytes4(keccak256("run()")));
-        assertEq(DeployTimelockAndHandOffScript.run.selector, bytes4(keccak256("run()")));
+        assertEq(DeployTimelockScript.run.selector, bytes4(keccak256("run()")));
     }
 
     function test_SystemDeploymentRejectsConfiguredAddressWithoutCode() public {
@@ -613,7 +613,7 @@ contract DeploymentScriptsTest is Test {
 
     function test_TimelockDeploymentRevertsOnUnsupportedChain() public {
         vm.chainId(31_337);
-        DeployTimelockAndHandOffScript script = new DeployTimelockAndHandOffScript();
+        DeployTimelockScript script = new DeployTimelockScript();
 
         vm.expectRevert(abi.encodeWithSelector(DeploymentConfig.UnsupportedChain.selector, uint256(31_337)));
         script.run();

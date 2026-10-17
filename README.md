@@ -385,13 +385,13 @@ forge script script/01_DeployUSD8System.s.sol:DeployUSD8SystemScript \
 
 # ... initial admin setup from the deployer ...
 
-# 2. Deploy the timelock and hand off governance (same deployer)
-forge script script/02_DeployTimelockAndHandOff.s.sol:DeployTimelockAndHandOffScript \
+# 2. Deploy the timelock only; governance stays with the deployer (same deployer)
+forge script script/02_DeployTimelock.s.sol:DeployTimelockScript \
   --rpc-url "$RPC_URL" --broadcast --slow --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 ```
 
-Step 1 deploys and wires the system with no Treasury strategies and no sUSD8, insures USD8 only, and seeds the single wstETH cover pool with `0.001 ether` (`10^15` base units) of the configured cover asset. The broadcaster needs that seed amount and enough native ETH for gas. Until step 2 runs, the deployer can upgrade and reconfigure everything without delay. Step 2 installs the 24-hour timelock and hands Registry and pool-beacon authority to it. See [`script/README.md`](script/README.md) for configuration, safety checks, verification, and recovery.
+Step 1 deploys and wires the system with no Treasury strategies and no sUSD8, insures USD8 only, and seeds the single wstETH cover pool with `0.001 ether` (`10^15` base units) of the configured cover asset. The broadcaster needs that seed amount and enough native ETH for gas. Step 2 deploys the 24-hour timelock but does not hand anything to it. Until governance is handed off to the timelock later, the deployer can still upgrade and reconfigure everything without delay. See [`script/README.md`](script/README.md) for configuration, safety checks, verification, and recovery.
 
 <br><br>
 

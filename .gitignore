@@ -67,3 +67,7 @@ artifacts/echidna/
 
 # Throwaway experiments and backtest probes
 /spikes/
+
+# Local hardware-wallet mainnet plans and progress (operator state)
+/deployments/mainnet/*-plan.json
+/deployments/mainnet/*.state.json

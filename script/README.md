@@ -102,15 +102,16 @@ forge script script/testnet/VerifySepolia.s.sol:VerifySepolia --rpc-url "$RPC_UR
 Deployment is split so that initial setup can happen without a 24-hour delay:
 
 1. **Step 01 (`01_DeployUSD8System.s.sol`)** deploys and wires the system. **No timelock is installed.** The deployer stays the Registry timelock, a Registry admin and the pool-beacon owner, and the configured admin is granted Registry admin. Timelock-only setup (`DefiInsurance.editInsuredToken`, `Registry.addPool`, `Registry.setScoredToken`, `Registry.setSavingsVault`, ...) can be done immediately from the deployer.
-2. **Step 02 (`02_DeployTimelockAndHandOff.s.sol`)** deploys (or reuses, if already at its CREATE3 address) a timelock with:
+2. **Step 02 (`02_DeployTimelock.s.sol`)** deploys (or only validates, if already at its CREATE3 address) a timelock with:
    - 24-hour minimum delay;
    - the network-configured admin as sole proposer and canceller;
    - open execution (`address(0)` executor);
    - the timelock as its own admin, with no external admin.
 
-   It rejects any other delay or role layout, requires the broadcaster to still hold the interim Registry-timelock and beacon-owner roles (so it cannot run twice or against another deployment), then transfers beacon ownership, grants the configured admin, drops the deployer as admin only if it is not the configured admin, and calls the irreversible `Registry.setTimelock` last.
+   It rejects any other delay or role layout. It does **not** hand off governance: the deployer stays the Registry timelock, a Registry admin and the pool-beacon owner, so settings can still be made without delay.
+3. **Hand-off (later, separate):** once all settings are done, transfer pool-beacon ownership to the timelock, make sure the configured admin is a Registry admin (dropping the deployer only if it is not the configured admin), and call the irreversible `Registry.setTimelock` last.
 
-**Between step 01 and step 02 the deployer can upgrade every proxy and the pool beacon without delay.** Do not open the system to users or describe it as timelocked until step 02 has run.
+**Until the hand-off, the deployer can upgrade every proxy and the pool beacon without delay.** Do not open the system to users or describe it as timelocked until the hand-off is done.
 
 ## Deterministic cross-chain addresses (CREATE3)
 
@@ -166,13 +167,13 @@ forge script script/01_DeployUSD8System.s.sol:DeployUSD8SystemScript \
 
 # ... initial admin setup from the deployer (extra insured tokens, pools, ...) ...
 
-# Step 2: deploy the timelock and hand off governance (same deployer as step 1).
-forge script script/02_DeployTimelockAndHandOff.s.sol:DeployTimelockAndHandOffScript \
+# Step 2: deploy the timelock only (same deployer as step 1); no governance hand-off.
+forge script script/02_DeployTimelock.s.sol:DeployTimelockScript \
   --rpc-url "$RPC_URL" --broadcast --slow --verify \
   --etherscan-api-key "$ETHERSCAN_API_KEY"
 ```
 
-Use the same commands without `--broadcast` for simulation. Add the signer option appropriate for the configured Foundry account, and always pass `--sender <deployer>` so simulation uses the real deployer: both steps derive every CREATE3 address from it, and step 02 must be sent by the account holding interim governance.
+Use the same commands without `--broadcast` for simulation. Add the signer option appropriate for the configured Foundry account, and always pass `--sender <deployer>` so simulation uses the real deployer: both steps derive every CREATE3 address from it, and step 02 must be sent by the step-01 deployer so the timelock lands at its CREATE3 address.
 
 **Always broadcast with `--slow`.** Without it Foundry submits transactions in parallel batches, so a failed transaction does not stop later ones: one-shot setters (`setUsd8`, `setTreasury`, `setSavingsVault`, `setBoosterConfig`) and the irreversible `setTimelock` hand-off can land on top of a broken state. With `--slow`, each transaction must be mined and succeed before the next is sent, and a failure halts the run. Where available, submit through a private / protected RPC to reduce front-running exposure during the sequence.
 
@@ -180,4 +181,4 @@ Use the same commands without `--broadcast` for simulation. Add the signer optio
 
 Foundry broadcasts multiple transactions; the complete deployment is not atomic. If deployment succeeds partially or verification is interrupted, preserve the broadcast artifacts and use `--resume`. Do not blindly rerun deployment because deployed contracts and the permanent seed transfer are not rolled back.
 
-After step 01, verify the Registry timelock and beacon owner are the deployer. After step 02, verify logged addresses, timelock roles and delay, Registry timelock/admin state, Treasury USDC, beacon ownership, canonical Registry pointers, cover-pool seed balance, USD8 scoring, insured tokens (USD8 only), the single wstETH pool and its feed, an empty strategy list, an unset savings vault, and profit receivers.
+After step 01, verify the Registry timelock and beacon owner are the deployer. After step 02, verify the timelock address, roles and delay, and that the Registry timelock and beacon owner are still the deployer. After the hand-off, verify Registry timelock/admin state, Treasury USDC, beacon ownership, canonical Registry pointers, cover-pool seed balance, USD8 scoring, insured tokens (USD8 only), the single wstETH pool and its feed, an empty strategy list, an unset savings vault, and profit receivers.
