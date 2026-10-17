@@ -348,6 +348,19 @@ fn listed_score_from_item(
     })
 }
 
+/// Chain served by the chain-less legacy routes (`/score/{account}`, `/scores`):
+/// the only configured network, or Sepolia when several are configured, because
+/// the legacy routes predate multi-network support and only ever meant Sepolia.
+/// Every other network must be addressed explicitly.
+fn legacy_chain_id(networks: &BTreeMap<u64, RuntimeNetwork>) -> Option<u64> {
+    match networks.len() {
+        1 => networks.keys().next().copied(),
+        _ => networks
+            .contains_key(&LEGACY_SEPOLIA_CHAIN_ID)
+            .then_some(LEGACY_SEPOLIA_CHAIN_ID),
+    }
+}
+
 fn checkpoint_key(chain_id: u64, registry: Address, account: Address) -> String {
     format!("{chain_id}#{registry}#{account}")
 }
@@ -806,18 +819,33 @@ async fn handle(app: Arc<App>, request: Request) -> Result<Response<Body>, Error
     if let Some(list_request) = score_list_request_from_path(request.uri().path()) {
         let chain_id = match list_request {
             Ok(ScoreListRequest::Explicit { chain_id }) => chain_id,
-            Ok(ScoreListRequest::Legacy) if app.networks.len() == 1 => {
-                *app.networks.keys().next().expect("single network is nonempty")
-            }
-            Ok(ScoreListRequest::Legacy) => {
-                return response(404, &serde_json::json!({ "error": "LEGACY_ROUTE_AMBIGUOUS" }), &app.allowed_origin, None);
-            }
+            Ok(ScoreListRequest::Legacy) => match legacy_chain_id(&app.networks) {
+                Some(chain_id) => chain_id,
+                None => {
+                    return response(
+                        404,
+                        &serde_json::json!({ "error": "LEGACY_ROUTE_AMBIGUOUS" }),
+                        &app.allowed_origin,
+                        None,
+                    );
+                }
+            },
             Err(()) => {
-                return response(400, &serde_json::json!({ "error": "INVALID_REQUEST" }), &app.allowed_origin, None);
+                return response(
+                    400,
+                    &serde_json::json!({ "error": "INVALID_REQUEST" }),
+                    &app.allowed_origin,
+                    None,
+                );
             }
         };
         let Some(network) = app.networks.get(&chain_id) else {
-            return response(404, &serde_json::json!({ "error": "UNSUPPORTED_CHAIN" }), &app.allowed_origin, None);
+            return response(
+                404,
+                &serde_json::json!({ "error": "UNSUPPORTED_CHAIN" }),
+                &app.allowed_origin,
+                None,
+            );
         };
         return match app.list_scores(network).await {
             Ok(accounts) => response(
@@ -833,7 +861,12 @@ async fn handle(app: Arc<App>, request: Request) -> Result<Response<Body>, Error
             ),
             Err(error) => {
                 eprintln!("score list failed for chain {chain_id}: {error}");
-                response(503, &serde_json::json!({ "error": "SCORE_LIST_UNAVAILABLE" }), &app.allowed_origin, None)
+                response(
+                    503,
+                    &serde_json::json!({ "error": "SCORE_LIST_UNAVAILABLE" }),
+                    &app.allowed_origin,
+                    None,
+                )
             }
         };
     }
@@ -858,11 +891,8 @@ async fn handle(app: Arc<App>, request: Request) -> Result<Response<Body>, Error
     };
     let (chain_id, account) = match score_request {
         ScoreRequest::Explicit { chain_id, account } => (chain_id, account),
-        ScoreRequest::Legacy { account } if app.networks.len() == 1 => (
-            *app.networks
-                .keys()
-                .next()
-                .expect("single network is nonempty"),
+        ScoreRequest::Legacy { account } if legacy_chain_id(&app.networks).is_some() => (
+            legacy_chain_id(&app.networks).expect("checked above"),
             account,
         ),
         ScoreRequest::Legacy { .. } => {
@@ -940,14 +970,28 @@ mod tests {
 
     #[test]
     fn score_list_route_accepts_bare_and_explicit_chain_paths_only() {
-        assert!(matches!(super::score_list_request_from_path("/scores"), Some(Ok(super::ScoreListRequest::Legacy))));
-        assert!(matches!(super::score_list_request_from_path("/scores/"), Some(Ok(super::ScoreListRequest::Legacy))));
+        assert!(matches!(
+            super::score_list_request_from_path("/scores"),
+            Some(Ok(super::ScoreListRequest::Legacy))
+        ));
+        assert!(matches!(
+            super::score_list_request_from_path("/scores/"),
+            Some(Ok(super::ScoreListRequest::Legacy))
+        ));
         assert!(matches!(
             super::score_list_request_from_path("/scores/11155111"),
-            Some(Ok(super::ScoreListRequest::Explicit { chain_id: 11_155_111 }))
+            Some(Ok(super::ScoreListRequest::Explicit {
+                chain_id: 11_155_111
+            }))
         ));
-        assert!(matches!(super::score_list_request_from_path("/scores/0"), Some(Err(()))));
-        assert!(matches!(super::score_list_request_from_path("/scores/abc"), Some(Err(()))));
+        assert!(matches!(
+            super::score_list_request_from_path("/scores/0"),
+            Some(Err(()))
+        ));
+        assert!(matches!(
+            super::score_list_request_from_path("/scores/abc"),
+            Some(Err(()))
+        ));
         assert!(super::score_list_request_from_path("/scores/1/extra").is_none());
         assert!(super::score_list_request_from_path("/score/0x1").is_none());
     }
@@ -963,10 +1007,42 @@ mod tests {
             snapshot_timestamp: "1".to_owned(),
             last_refresh_at: None,
         };
-        let mut rows = vec![row("0xb", "9"), row("0xa", "100000000000000000000000000000000000000000"), row("0xc", "10"), row("0xd", "10")];
+        let mut rows = vec![
+            row("0xb", "9"),
+            row("0xa", "100000000000000000000000000000000000000000"),
+            row("0xc", "10"),
+            row("0xd", "10"),
+        ];
         super::sort_listed_scores(&mut rows);
         let order: Vec<_> = rows.iter().map(|r| r.account.as_str()).collect();
         assert_eq!(order, ["0xa", "0xc", "0xd", "0xb"]);
+    }
+
+    #[test]
+    fn legacy_routes_serve_the_single_network_or_sepolia_when_several_are_configured() {
+        let networks = |json: &str| {
+            super::runtime_networks_from_configs(super::network_configs_from_json(json).unwrap())
+                .unwrap()
+        };
+        let sepolia = r#"{"chainId":11155111,"name":"Sepolia","registry":"0x9BfF24a44Bb20F8D1f1dE86EcA56295c5Bb46430","rpcUrl":"https://rpc.sepolia.ethpandaops.io"}"#;
+        let mainnet = r#"{"chainId":1,"name":"Ethereum","registry":"0x9BfF24a44Bb20F8D1f1dE86EcA56295c5Bb46430","rpcUrl":"https://eth.drpc.org"}"#;
+        assert_eq!(
+            super::legacy_chain_id(&networks(&format!("[{mainnet}]"))),
+            Some(1)
+        );
+        assert_eq!(
+            super::legacy_chain_id(&networks(&format!("[{sepolia}]"))),
+            Some(11_155_111)
+        );
+        assert_eq!(
+            super::legacy_chain_id(&networks(&format!("[{mainnet},{sepolia}]"))),
+            Some(11_155_111)
+        );
+        let other = r#"{"chainId":10,"name":"Other","registry":"0x9BfF24a44Bb20F8D1f1dE86EcA56295c5Bb46430","rpcUrl":"https://example.invalid"}"#;
+        assert_eq!(
+            super::legacy_chain_id(&networks(&format!("[{mainnet},{other}]"))),
+            None
+        );
     }
 
     #[test]

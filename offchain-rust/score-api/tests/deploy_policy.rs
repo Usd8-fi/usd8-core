@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 #[test]
-fn runtime_can_atomically_update_only_the_dedicated_score_table() {
+fn runtime_can_atomically_update_and_read_only_the_dedicated_score_table() {
     let policy: Value =
         serde_json::from_str(include_str!("../deploy/score-runtime-policy.json")).unwrap();
     assert!(has_exact_runtime_permissions(&policy));
@@ -56,7 +56,8 @@ fn has_exact_runtime_permissions(policy: &Value) -> bool {
     permissions
         == vec![serde_json::json!({
             "Effect": "Allow",
-            "Action": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+            // Scan is read-only and backs the stored score list (GET /scores).
+            "Action": ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:UpdateItem"],
             "Resource": "arn:aws:dynamodb:eu-central-1:919437049909:table/usd8-score-checkpoints-sepolia"
         })]
 }

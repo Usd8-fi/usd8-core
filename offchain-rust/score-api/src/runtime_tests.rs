@@ -423,7 +423,10 @@ async fn saved_score_rows_are_permanent_and_listed_per_deployment() {
     app.dynamodb
         .put_item()
         .table_name(&app.table)
-        .item("pk", AttributeValue::S(format!("1#0x{}#{account}", "ab".repeat(20))))
+        .item(
+            "pk",
+            AttributeValue::S(format!("1#0x{}#{account}", "ab".repeat(20))),
+        )
         .item("payload", AttributeValue::S("{}".into()))
         .send()
         .await
@@ -442,13 +445,29 @@ async fn saved_score_rows_are_permanent_and_listed_per_deployment() {
             .unwrap()
             .contains_key("expiresAt")
     };
-    assert!(!ttl_after(app.clone(), key.clone()).await, "acquire must clear the TTL");
     assert!(
-        app.save(&network, account, &checkpoint, &snapshot, 86400, 1, None, None, &lease)
-            .await
-            .unwrap()
+        !ttl_after(app.clone(), key.clone()).await,
+        "acquire must clear the TTL"
     );
-    assert!(!ttl_after(app.clone(), key.clone()).await, "saved rows are permanent");
+    assert!(
+        app.save(
+            &network,
+            account,
+            &checkpoint,
+            &snapshot,
+            86400,
+            1,
+            None,
+            None,
+            &lease
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !ttl_after(app.clone(), key.clone()).await,
+        "saved rows are permanent"
+    );
 
     let listed = app.list_scores(&network).await.unwrap();
     assert_eq!(listed.len(), 1);
